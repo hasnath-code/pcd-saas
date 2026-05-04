@@ -1,9 +1,9 @@
 # PCD Portal SaaS — Architecture Reference
 
-**Version:** 0.2 (Phase 1a Session 1 shipped)
+**Version:** 0.3 (Phase 1a Session 2 shipped)
 **Last updated:** 05 May 2026
 **Maintainer:** Hasnath
-**Codebase status:** Phase 1a Session 1 shipped to production
+**Codebase status:** Phase 1a Session 2 shipped — multi-tenant schema + RLS framework live in dev
 **Production URL:** https://pcd-saas.vercel.app
 **Repo:** https://github.com/hasnath-code/pcd-saas
 
@@ -2749,29 +2749,29 @@ Four sessions. Each session has a "done" criterion. Don't move to the next sessi
 
 **Estimated time:** 1 session. (Actual: 1 session.) Carryover items in §35.
 
-### Session 2: Multi-tenant schema + RLS framework
+### Session 2: Multi-tenant schema + RLS framework — ✓ SHIPPED (05 May 2026)
 
 **Tasks:**
-- [ ] Migration 0001: Initial schema — `org_types`, `plans`, `organizations`, `users`, `org_settings`, `outbound_emails`
-- [ ] Seed data migration: org_types, plans (placeholder feature flags)
-- [ ] Migration 0002: `audit_logs`, `email_events`, `webhook_events`, `invitations`
-- [ ] Drizzle schema files: `db/schema/orgs.ts`, `db/schema/users.ts`, `db/schema/audit.ts`, `db/schema/webhooks.ts`
-- [ ] Create `gen_uuid_v7()` function (or verify native `uuidv7()` is available)
-- [ ] RLS policies for all 10 Phase 1a tables (see Section 10)
-- [ ] `lib/rls.ts` helpers: `setActiveOrg`, `getCurrentUserOrg`, `getCurrentStakeholder`
-- [ ] `lib/audit.ts`: `logAudit()` helper
-- [ ] RLS test framework setup: `__tests__/rls/_setup.ts`, `_helpers.ts`
-- [ ] First RLS tests: `orgs.test.ts`, `users.test.ts` (cross-org isolation)
-- [ ] Soft-delete column on every domain table (verify)
+- [x] Single migration `0001_initial.sql` — 9 Phase 1a tables + indexes + RLS helpers + policies (merged for atomicity)
+- [x] Seed scripts in `db/seed/` (TypeScript, idempotent) — 2 org_types + 8 plans (4 tiers × 2 org types)
+- [x] Drizzle schema files: `db/schema/{org-types,plans,organizations,users,org-settings,invitations,audit-logs,webhook-events,email-events}.ts`
+- [x] App-side UUID v7 via `uuid` package (no `gen_uuid_v7()` SQL function — pre-Session-1 override honoured)
+- [x] RLS policies for all 6 RLS-enabled tables (12 policies total). 3 tables stay disabled (`org_types`, `plans`, `webhook_events`) per spec §10.
+- [x] 6 SECURITY DEFINER STABLE helper functions (expanded from brief's 4): `auth_user_orgs`, `is_org_member`, `is_org_admin`, `is_org_owner`, plus stubs `auth_user_stakeholder_orgs` and `auth_user_stakeholder_projects` for Phase 1b.
+- [x] `lib/audit/log.ts`: `logAudit()` helper — Drizzle pooler insert (postgres role bypasses RLS) + Sentry breadcrumb
+- [x] `lib/auth/requireAuth.ts`: filled `requireOrgUser` + `requireOrgAdmin` (single-org users only; multi-org throws until Session 3 wires context switcher); `requireStakeholder` documented stub until Phase 1b Session 6
+- [x] RLS test framework: Vitest 4 + two-org fixture (`tests/fixtures/two-orgs.ts`). Setup file fetches local Supabase creds from `npx supabase status -o env` so tests can never accidentally touch cloud.
+- [x] Cross-org isolation tests for every RLS-enabled table — 28 tests, all pass
+- [x] Soft-delete column on every domain table (verified in users.test.ts: soft-deleted user loses access immediately)
 
 **Done when:**
-- [ ] All 10 tables exist in dev Supabase, with RLS enabled and policies in place
-- [ ] Seed data populates org_types and plans
-- [ ] RLS test suite passes (Org A user cannot read Org B's organizations, users, or settings)
-- [ ] `logAudit()` writes to `audit_logs`
-- [ ] Drizzle types match SQL schema (no drift)
+- [x] All 9 tables exist in dev Supabase, with RLS state matching plan (6 enabled / 3 disabled)
+- [x] Seed scripts populate org_types (2) and plans (8) idempotently
+- [x] RLS test suite passes (`npm run test:rls` — 28/28)
+- [x] `logAudit()` writes to `audit_logs` via the pooler (postgres role bypass)
+- [x] Drizzle types match SQL schema — `npx drizzle-kit check` + `npx drizzle-kit generate` report no drift
 
-**Estimated time:** 1 session.
+**Estimated time:** 1 session. (Actual: 1 session.) Carryover items in §35.2.
 
 ### Session 3: Onboarding + settings
 
@@ -3009,11 +3009,36 @@ Items flagged during Phase 1a Session 1 (kicked off and shipped 04 May 2026, dep
 - 13 commits on `main` (12 work + 1 handover)
 - Cloud Supabase: project `gcwdasdujivliplthpvv` (eu-west-2 London)
 
+### §35.2 Session 2 (kickoff → ship: 05 May 2026)
+
+| # | Item | Action | Pull-forward to |
+|---|---|---|---|
+| 1 | Migration filenames stay sequential (`0001_initial.sql`, `0002_*.sql`, …) but drizzle-kit auto-numbers from `0000`. Each new migration generated requires renaming `0000` → next sequential prefix and updating `meta/_journal.json` (`tag` + `idx`). | Document the rename dance in handover; consider a small `scripts/post-migrate.mjs` helper later if friction grows | Session 3 |
+| 2 | RLS helper functions are `STABLE` = per-query caching by Postgres. Adequate for Phase 1a–1c; at 50+ concurrent requests, consider a session-scoped GUC or connection-state cache. | Revisit in Session 12 perf pass | Session 12 |
+| 3 | `requireStakeholder()` is a documented stub. Phase 1b Session 6 ships `clients` table and replaces the body. The two stakeholder helpers (`auth_user_stakeholder_orgs`, `auth_user_stakeholder_projects`) ship as empty-set stubs in 0001 — also need their bodies filled in Session 6's first migration (CREATE OR REPLACE). | Phase 1b Session 6 | Session 6 |
+| 4 | `uuid@10` deprecation warning persists — pulled in transitively by `resend → svix`. `npm dedupe` doesn't help. | Watch for `svix` update; `overrides` in package.json is risky | n/a |
+| 5 | Seed/test scripts use `--conditions=react-server` to make `server-only` resolve to its empty export under tsx. Works but is non-obvious — anyone reading the npm scripts will need a comment to understand it. | Document in seed/run.ts and tests/setup.ts (done) | n/a |
+| 6 | Tests fetch local Supabase creds from `npx supabase status -o env` at setup time. Couples test runs to having `supabase start` already running. Acceptable for dev; CI will need a different approach (likely `supabase start` in CI or hardcoded ephemeral creds). | Decide CI test strategy | Phase 2 (when CI gets set up) |
+| 7 | `requireOrgUser` throws on multi-org users (`multi_org_unsupported_until_session_3`). The `(org)/dashboard` placeholder route protected by middleware will fail closed for any user with multiple `users` rows. Phase 1a doesn't create any so harmless until Session 3. | Replace branch with active_org_id resolution from session | Session 3 |
+| 8 | `org_settings` and `invitations` got `deleted_at` columns that spec §10.5/§10.6 SQL didn't show. Per brief's "every domain table has deleted_at" hard rule + spec §23 (which lists exceptions and doesn't include either of these). The discrepancy in spec §10's per-table SQL is now reconciled — schema is the source of truth. | Update §10.5 / §10.6 SQL examples in this doc to show `deleted_at` (defer to next doc pass) | Session 3 doc cleanup |
+| 9 | Sentry environment tag `vercel-production` (Session 1 carryover #4) is still un-normalized. | Set `SENTRY_ENVIRONMENT=production` in Vercel envs | Session 12 |
+
+**Full session handover:** `SESSION-2-HANDOVER.md` in repo root.
+
+**State at Session 2 close:**
+- 9 commits added to branch (8 work + 1 handover-and-doc), branched from main
+- Local Supabase: 9 tables, 12 RLS policies, 6 helper functions, seed data populated (2 + 8 rows)
+- Cloud Supabase: not yet pushed — Session 3 (or operator) will run `supabase db push` and `npm run db:seed` against cloud
+- RLS tests: 28/28 passing locally
+- Build clean: `npm run build` succeeds
+- Type-check clean: `npx tsc --noEmit` succeeds
+- Drizzle parity: `drizzle-kit check` + `drizzle-kit generate` report no drift
+
 ---
 
 ## End of document
 
-**Last reviewed:** 05 May 2026 (Session 1 shipped — v0.2)
+**Last reviewed:** 05 May 2026 (Session 2 shipped — v0.3)
 
 **Next review:** at end of each Phase 1 session, append a new §35.N Session N Carryover subsection. After Phase 1c, freeze schema sections and start Phase 2 spec doc.
 
