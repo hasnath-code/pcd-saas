@@ -9,7 +9,11 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "db:generate": "drizzle-kit generate",
+    "db:push": "supabase db push",
+    "db:reset": "supabase db reset",
+    "db:smoke": "node --env-file=.env.local scripts/smoke-pool.mjs"
   },
   "dependencies": {
     "@hookform/resolvers": "^5.2.2",
