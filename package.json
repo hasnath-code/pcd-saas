@@ -15,7 +15,8 @@
     "db:reset": "supabase db reset",
     "db:seed": "tsx --conditions=react-server --env-file=.env.local db/seed/run.ts",
     "db:smoke": "node --env-file=.env.local scripts/smoke-pool.mjs",
-    "test:rls": "vitest run --config vitest.config.mts tests/rls"
+    "test:rls": "vitest run --config vitest.config.mts tests/rls",
+    "test:cloud-smoke": "CLOUD_SMOKE=1 vitest run --config vitest.config.mts tests/cloud-smoke"
   },
   "dependencies": {
     "@hookform/resolvers": "^5.2.2",
