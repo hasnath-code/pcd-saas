@@ -11,6 +11,7 @@ const schema = z.object({
   UPSTASH_REDIS_REST_URL: z.string().url(),
   UPSTASH_REDIS_REST_TOKEN: z.string().min(1),
   SENTRY_DSN: z.string().url(),
+  NEXT_PUBLIC_SENTRY_DSN: z.string().url().optional(),
   NEXT_PUBLIC_APP_URL: z.string().url(),
   INTERNAL_CRON_SECRET: z.string().min(32),
 });
