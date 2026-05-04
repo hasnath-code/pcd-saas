@@ -9,3 +9,6 @@ Sentry.init({
   tracesSampleRate: 0,
   debug: false,
 });
+
+// Required by @sentry/nextjs to track App Router soft navigations.
+export const onRouterTransitionStart = Sentry.captureRouterTransitionStart;
