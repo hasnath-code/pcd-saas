@@ -13,6 +13,7 @@
     "db:generate": "drizzle-kit generate",
     "db:push": "supabase db push",
     "db:reset": "supabase db reset",
+    "db:seed": "tsx --conditions=react-server --env-file=.env.local db/seed/run.ts",
     "db:smoke": "node --env-file=.env.local scripts/smoke-pool.mjs"
   },
   "dependencies": {
