@@ -8,6 +8,20 @@
       "when": 1777928073168,
       "tag": "0001_initial",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1777935600000,
+      "tag": "0002_disable_rls_on_reference_tables",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1777939200000,
+      "tag": "0003_grant_service_role_on_public_tables",
+      "breakpoints": true
     }
   ]
 }

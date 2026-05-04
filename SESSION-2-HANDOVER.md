@@ -3,7 +3,7 @@
 **Phase:** 1a (Foundation)
 **Session:** 2 of 4 (Multi-tenant schema + RLS framework)
 **Date closed:** 2026-05-05
-**Status:** complete; all done-criteria met
+**Status:** complete; all done-criteria met; both local and cloud Supabase migrated and seeded
 
 ---
 
@@ -19,9 +19,14 @@
 | 6 | `13d87b6` | feat: requireOrgUser + requireOrgAdmin auth helper bodies |
 | 7 | `e94bf20` | test: RLS framework + cross-org isolation tests for 6 tables |
 | 8 | `e8819a5` | chore: pin engines.node to 20.x, drop migrations/.gitkeep |
-| 9 | (this commit) | docs: ARCHITECTURE-saas v0.3 + SESSION-2-HANDOVER.md |
+| 9 | `7d8a3e2` | docs: ARCHITECTURE-saas v0.3 + SESSION-2-HANDOVER.md |
+| 10 | `546bb55` | merge: Phase 1a Session 2 → main |
+| 11 | (cloud fix #1) | fix(db): migration 0002 disable RLS on reference tables |
+| 12 | (cloud fix #1) | test: cloud smoke for anon-readable reference data |
+| 13 | (cloud fix #2) | fix(db): migration 0003 grant service_role on public tables |
+| 14 | (this commit) | docs: SESSION-2-HANDOVER cloud migration learnings (RLS + GRANTs) |
 
-Branch: `claude/nice-borg-aca641` (worktree). Merge to `main` is the operator's call.
+Branch: `claude/nice-borg-aca641` (worktree, then merged to main with --no-ff).
 
 ---
 
@@ -77,11 +82,104 @@ Branch: `claude/nice-borg-aca641` (worktree). Merge to `main` is the operator's 
 
 ---
 
+## Surprises / gotchas
+
+These were discovered after main was already merged (during the cloud migration step). Each landed as a follow-up migration with its own commit. Worth reading before starting Session 3.
+
+### Cloud-vs-local platform divergences
+
+Two issues showed up only on cloud — the local Supabase stack has more permissive defaults that hid both gaps. Fixed via migrations 0002 and 0003. **Pattern lesson** for every future migration in Sessions 3+ at the bottom.
+
+#### Divergence 1: cloud auto-enables RLS on every new public table
+
+Cloud Supabase auto-enables RLS on every new public-schema table. Local does not. Migration 0001 only included `ENABLE ROW LEVEL SECURITY` for the 6 tables that should have it, relying on the absence of `ENABLE` to mean "stays off." That worked locally but left cloud with RLS=true on `org_types`, `plans`, `webhook_events` — three tables that should have it OFF.
+
+Effect: with RLS on but no SELECT policy, anon and authenticated couldn't read `org_types` or `plans` even though `GRANT SELECT` was in place. Future signup UI couldn't read plans.
+
+Fix: **Migration `0002_disable_rls_on_reference_tables.sql`** adds explicit `DISABLE ROW LEVEL SECURITY` for the 3 tables.
+
+#### Divergence 2: cloud doesn't auto-grant CRUD to service_role on new public tables
+
+Cloud Supabase has TWO sets of default privileges configured on `public`:
+
+| grantor | type | what it gives anon/authenticated/service_role on new tables |
+|---|---|---|
+| `postgres` | tables | `Dxtm` (REFERENCES, TRIGGER, TRUNCATE, MAINTAIN — admin-ish, no data CRUD) |
+| `supabase_admin` | tables | `arwdDxtm` (full CRUD + admin) |
+
+`supabase db push` connects as `postgres`, so tables created by migrations inherit only the limited grant set. `service_role` has `BYPASSRLS=true`, but BYPASSRLS only skips RLS policy evaluation — table-level GRANTs are a separate layer. Net effect: the seed runner (which uses the service-role JWT) gets `permission denied for table` even though it can technically bypass RLS.
+
+Investigated and confirmed normal Supabase behavior, not a project misconfig. Standard recommendation: explicit GRANT statements in migrations.
+
+Fix: **Migration `0003_grant_service_role_on_public_tables.sql`** adds:
+- `GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO service_role` (covers the 9 existing tables)
+- `ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO service_role` (so future tables auto-grant — no per-session re-fix needed)
+
+Migration 0001 already explicitly granted SELECT/CRUD to `anon` and `authenticated` for the tables they need — this works for them because the explicit grants override the limited defaults. The same pattern needed to be applied for `service_role`. anon and authenticated keep the per-table explicit-GRANT pattern (RLS-gated user-facing roles; we want explicit per-table control). Service role gets a default-privileges sweep because it's the admin role.
+
+#### Pattern lesson for future migrations
+
+Every new public-schema table created in a migration must include both:
+
+1. **Explicit `ENABLE` or `DISABLE ROW LEVEL SECURITY`** — never rely on absence to mean "off" (cloud's auto-enable will bite you).
+2. **Explicit per-table `GRANT` statements for `anon` / `authenticated`** when those roles need access. The default-privileges set up by 0003 covers `service_role` automatically; the user-facing roles still need explicit per-table control because their access is RLS-gated.
+
+Both gotchas only manifest on cloud — locally, RLS stays off by default and service_role has full CRUD by default. Tests passed locally throughout Session 2, giving false confidence on both dimensions until the cloud push.
+
+### Worktree gotchas
+
+Worktrees do **not** inherit `supabase/.temp/` link state from the parent. To run `supabase db push --workdir <worktree-path>`, the following files must be copied from the parent's `supabase/.temp/` into the worktree's:
+
+```
+linked-project.json
+project-ref
+rest-version
+storage-version
+storage-migration
+pooler-url
+postgres-version
+gotrue-version
+```
+
+(All gitignored — they don't get committed.)
+
+Workarounds for future worktree-based sessions:
+- (a) work in the parent dir with `--workdir` flag pointing at the parent (then there's nothing to copy, but no .env.local symlink needs setup either)
+- (b) copy the `.temp/*` files at worktree creation time (one-time bootstrap)
+- (c) script `bin/bootstrap-worktree.sh` that does both the env-symlink and the .temp file copy in one step
+
+### Cloud smoke test
+
+`tests/cloud-smoke/reference-data-readable.test.ts` asserts anon-keyed REST GETs against **cloud** (`org_types`, `plans`). Run via `npm run test:cloud-smoke` (sets `CLOUD_SMOKE=1` so `tests/setup.ts` keeps the cloud creds from `.env.local` instead of overriding with local Supabase creds). NOT included in the default `npm run test:rls` suite — runs only on demand.
+
+The cloud smoke catches local-vs-cloud divergences like Divergence 1 above (which the local RLS suite missed because local RLS state differed from cloud). Run it after every cloud migration.
+
+### Seed targeting
+
+`npm run db:seed` reads from `.env.local` which contains **cloud** credentials → it seeds **cloud**. To seed **local**, override env vars inline at the shell:
+
+```sh
+eval "$(npx supabase status -o env | grep -E '^(API_URL|SERVICE_ROLE_KEY)=')"
+NEXT_PUBLIC_SUPABASE_URL="$API_URL" \
+  SUPABASE_SERVICE_ROLE_KEY="$SERVICE_ROLE_KEY" \
+  npm run db:seed
+```
+
+Asymmetric but correct DX for the same script targeting either environment by env. Session 3+ may want to add a `db:seed:local` npm script that wraps the above for ergonomics.
+
+### Helper functions: 6 not 4
+
+The Session 2 plan called for 4 SECURITY DEFINER helpers (`auth_user_orgs`, `is_org_member`, plus the two stakeholder stubs). We expanded to 6 to keep RLS policies non-recursive on role-based gating: `is_org_admin(_org_id)` and `is_org_owner(_org_id)` were added so policies could check role membership without falling back to inline subqueries on `users` (which would loop). All 6 are SECURITY DEFINER STABLE with `search_path = public, auth, pg_temp` locked.
+
+Phase 1b Session 6 will replace the stakeholder stubs' bodies (they currently return empty sets) with real queries against the `clients` and `project_stakeholders` tables.
+
+---
+
 ## Open issues / left-undone
 
 ### Pulled forward from Session 2 (most are also in §35.2)
 
-1. **Cloud Supabase has not been migrated/seeded yet.** Operator (or Session 3 first action) needs to run `npx supabase db push` against the cloud project (`gcwdasdujivliplthpvv`) and then seed it. Local stack has the data; cloud doesn't.
+1. ~~**Cloud Supabase has not been migrated/seeded yet.**~~ ✓ Done in the cloud migration step at end of Session 2: migrations 0001 + 0002 + 0003 applied, 2 org_types + 8 plans seeded. Cloud and local are in sync.
 
 2. **`uuid@10` deprecation warning** still appears during `npm install` — transitive via `resend → svix`. Out of our control; `npm dedupe` doesn't help.
 
@@ -101,7 +199,7 @@ Branch: `claude/nice-borg-aca641` (worktree). Merge to `main` is the operator's 
 
 Per ARCHITECTURE-saas.md §31 Session 3 task list, plus the carryover above:
 
-1. **Push migration + seed to cloud.** `supabase db push` then re-run seed against cloud. Verify via Supabase Studio.
+1. ~~**Push migration + seed to cloud.**~~ ✓ Done at end of Session 2 (migrations 0001+0002+0003, 2+8 rows seeded).
 2. **Decide context-switcher shape early.** It changes how `requireOrgUser` resolves multi-org users (active_org_id stored in… Supabase auth metadata? a separate cookie? a new `user_sessions` table?). Spec §8 mentions `app.active_org_id` GUC but transaction-pooler caveats make that fragile.
 3. **Build signup wizard.** Must call `createOrganization` (server action — new, Session 3) which uses the service-role client to insert `organizations` + the first `users` row (owner). Audit-log it via `logAudit({ action: 'create', resource_type: 'organization' })`.
 4. **`actions/orgs.ts`, `actions/users.ts`, `actions/settings.ts`** per spec §31 Session 3.
@@ -127,7 +225,7 @@ ARCHITECTURE-saas.md §31 Session 3 row is the authoritative task list. The abov
 | tsx | 4.21.0 | NEW |
 | drizzle-orm | 0.45.2 | unchanged |
 | drizzle-kit | 0.31.10 | unchanged |
-| Cloud Supabase | linked, not yet migrated | Session 3 or operator runs `db push` |
+| Cloud Supabase | linked, migrated (0001+0002+0003), seeded (2+8 rows) | in sync with local |
 | Local Supabase | running, schema applied + seeded | restart with `npx supabase start` if stopped |
 | Vercel | last deployed Session 1 (`93a29a8`) | unchanged; Session 3 push will redeploy automatically |
 

@@ -25,49 +25,68 @@ if (fs.existsSync(envPath)) {
   }
 }
 
-// Step 2 — fetch local Supabase creds from `supabase status -o env` and
-// override the relevant vars. This pins tests to the local stack regardless
-// of what's in .env.local.
-let local: Record<string, string>;
-try {
-  const out = execSync('npx supabase status -o env', {
-    encoding: 'utf-8',
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-  local = Object.fromEntries(
-    out
-      .split('\n')
-      .filter((l) => l.includes('='))
-      .map((l) => {
-        const eq = l.indexOf('=');
-        return [
-          l.slice(0, eq).trim(),
-          l
-            .slice(eq + 1)
-            .trim()
-            .replace(/^"|"$/g, ''),
-        ];
-      }),
-  );
-} catch (e) {
-  throw new Error(
-    `tests/setup: failed to read 'supabase status -o env' — is local Supabase running? (${(e as Error).message})`,
-  );
-}
+// Step 2 — branch on mode.
+//
+// CLOUD_SMOKE=1: keep .env.local creds (cloud values). Sanity check the URL
+//   is NOT local. Used by tests/cloud-smoke/*.test.ts to verify post-deploy
+//   reachability of cloud Supabase.
+// Default: fetch local Supabase creds from `supabase status -o env` and
+//   override Supabase URL/keys. Pins tests to the local stack regardless of
+//   what's in .env.local. Used by tests/rls/*.test.ts.
 
-const apiUrl = local['API_URL'];
-const anonKey = local['ANON_KEY'];
-const serviceRoleKey = local['SERVICE_ROLE_KEY'];
+if (process.env.CLOUD_SMOKE === '1') {
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL ?? '';
+  if (!url || url.includes('127.0.0.1') || url.includes('localhost')) {
+    throw new Error(
+      `tests/setup: CLOUD_SMOKE=1 but URL is local or empty: '${url}'. Set .env.local cloud values.`,
+    );
+  }
+  if (!process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY) {
+    throw new Error('tests/setup: CLOUD_SMOKE=1 but NEXT_PUBLIC_SUPABASE_ANON_KEY missing');
+  }
+  // Service role key not strictly needed for anon-only smoke, but the lib
+  // imports may pull env.ts which validates it — leave it as-is from .env.local.
+} else {
+  let local: Record<string, string>;
+  try {
+    const out = execSync('npx supabase status -o env', {
+      encoding: 'utf-8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    local = Object.fromEntries(
+      out
+        .split('\n')
+        .filter((l) => l.includes('='))
+        .map((l) => {
+          const eq = l.indexOf('=');
+          return [
+            l.slice(0, eq).trim(),
+            l
+              .slice(eq + 1)
+              .trim()
+              .replace(/^"|"$/g, ''),
+          ];
+        }),
+    );
+  } catch (e) {
+    throw new Error(
+      `tests/setup: failed to read 'supabase status -o env' — is local Supabase running? (${(e as Error).message})`,
+    );
+  }
 
-if (!apiUrl || !anonKey || !serviceRoleKey) {
-  throw new Error('tests/setup: supabase status missing API_URL/ANON_KEY/SERVICE_ROLE_KEY');
-}
+  const apiUrl = local['API_URL'];
+  const anonKey = local['ANON_KEY'];
+  const serviceRoleKey = local['SERVICE_ROLE_KEY'];
 
-process.env.NEXT_PUBLIC_SUPABASE_URL = apiUrl;
-process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY = anonKey;
-process.env.SUPABASE_SERVICE_ROLE_KEY = serviceRoleKey;
+  if (!apiUrl || !anonKey || !serviceRoleKey) {
+    throw new Error('tests/setup: supabase status missing API_URL/ANON_KEY/SERVICE_ROLE_KEY');
+  }
 
-// Step 3 — refuse to run unless URL is local.
-if (!apiUrl.includes('127.0.0.1') && !apiUrl.includes('localhost')) {
-  throw new Error(`tests/setup: refusing non-local Supabase URL: ${apiUrl}`);
+  process.env.NEXT_PUBLIC_SUPABASE_URL = apiUrl;
+  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY = anonKey;
+  process.env.SUPABASE_SERVICE_ROLE_KEY = serviceRoleKey;
+
+  if (!apiUrl.includes('127.0.0.1') && !apiUrl.includes('localhost')) {
+    throw new Error(`tests/setup: refusing non-local Supabase URL: ${apiUrl}`);
+  }
 }
