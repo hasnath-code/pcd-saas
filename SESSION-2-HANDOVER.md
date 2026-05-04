@@ -175,6 +175,12 @@ Phase 1b Session 6 will replace the stakeholder stubs' bodies (they currently re
 
 ---
 
+## Workflow recommendation for future sessions
+
+Session 2 used worktrees and shipped two separate merges to main (primary schema work, then cloud migration follow-ups discovered after the first merge). Each new worktree required symlinking `.env.local` and copying 8 `supabase/.temp/*` files before `supabase db push` would work — friction repeated for the cloud-fix worktree. For Session 3 onwards, recommend working on a single feature branch in the main checkout rather than per-session worktrees: the bootstrapping cost outweighs the isolation benefit for a solo-developer workflow, and one branch + one merge per session reads cleaner than 2+. If a worktree is genuinely needed (parallel experiments, isolated risky work), add `bin/bootstrap-worktree.sh` (option (c) in the Worktree gotchas section above) so the setup amortizes to one command per worktree.
+
+---
+
 ## Open issues / left-undone
 
 ### Pulled forward from Session 2 (most are also in §35.2)
