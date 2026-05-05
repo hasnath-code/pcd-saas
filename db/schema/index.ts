@@ -15,3 +15,4 @@ export * from './workflows';
 export * from './clients';
 export * from './projects';
 export * from './project-stakeholders';
+export * from './project-milestones';
