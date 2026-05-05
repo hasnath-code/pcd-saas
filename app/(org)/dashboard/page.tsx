@@ -1,22 +1,68 @@
-import { requireAuth } from '@/lib/auth/requireAuth';
+import Link from 'next/link';
+import { redirect } from 'next/navigation';
+import { requireAuthOrRedirect } from '@/lib/auth/requireAuth';
+import { getMyOrg } from '@/db/queries/orgs';
 import { signOut } from '@/actions/auth';
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 
-// Phase 1a Session 1 placeholder. Session 3 replaces this with the real org dashboard
-// (org name, team list, settings link). For now the goal is just to confirm the
-// auth + middleware path works end-to-end.
 export default async function DashboardPage() {
-  const user = await requireAuth();
+  const authUser = await requireAuthOrRedirect();
+  const myOrg = await getMyOrg(authUser.id);
+  if (!myOrg) redirect('/onboarding');
+
   return (
-    <main className="mx-auto max-w-2xl space-y-4 p-8">
-      <h1 className="text-2xl font-semibold">Authenticated</h1>
-      <p className="text-sm text-muted-foreground">Signed in as {user.email}</p>
-      <p className="text-xs text-muted-foreground">auth.users.id: {user.id}</p>
-      <form action={signOut}>
-        <Button type="submit" variant="outline">
-          Sign out
-        </Button>
-      </form>
+    <main className="mx-auto max-w-3xl space-y-6 p-8">
+      <div className="space-y-1">
+        <p className="text-sm text-muted-foreground">{myOrg.orgName}</p>
+        <h1 className="text-3xl font-semibold">Welcome, {myOrg.userName}</h1>
+      </div>
+
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+        <Link href="/settings" className="block">
+          <Card className="h-full transition-shadow hover:shadow-md">
+            <CardHeader>
+              <CardTitle>Settings</CardTitle>
+              <CardDescription>
+                Company details, bank info, and document defaults.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="text-sm text-muted-foreground">
+              Open settings →
+            </CardContent>
+          </Card>
+        </Link>
+        <Link href="/settings/team" className="block">
+          <Card className="h-full transition-shadow hover:shadow-md">
+            <CardHeader>
+              <CardTitle>Team</CardTitle>
+              <CardDescription>
+                Invite teammates and manage roles.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="text-sm text-muted-foreground">
+              Manage team →
+            </CardContent>
+          </Card>
+        </Link>
+      </div>
+
+      <div className="flex items-center justify-between border-t pt-4 text-sm text-muted-foreground">
+        <span>
+          Signed in as {authUser.email} · {myOrg.role}
+        </span>
+        <form action={signOut}>
+          <Button type="submit" variant="outline" size="sm">
+            Sign out
+          </Button>
+        </form>
+      </div>
     </main>
   );
 }

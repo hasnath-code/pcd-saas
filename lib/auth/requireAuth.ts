@@ -13,7 +13,11 @@ export type ServerActionErrorCode =
   | 'feature_gated'
   | 'quota_exceeded'
   | 'conflict'
-  | 'internal_error';
+  | 'internal_error'
+  // Adjustment 2 (Phase 1a Session 3 plan): acceptInvitation surfaces this
+  // when the auth user already has a `users` row in another org. Multi-org
+  // membership is queued for Session 5 (context switcher).
+  | 'multi_org_not_yet_supported';
 
 export class AuthError extends Error {
   constructor(

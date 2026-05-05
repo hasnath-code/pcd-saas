@@ -24,6 +24,7 @@ const PUBLIC_PREFIXES = [
   '/r/', // public receipt view (Phase 2)
   '/api/sentry-test', // sanity-check route used during Phase 1a Session 1 setup
   '/api/webhooks/', // webhook ingestion (Phase 1a Session 4)
+  '/invitations/', // public team-invitation landing (Phase 1a Session 3)
 ];
 
 function isPublic(pathname: string): boolean {

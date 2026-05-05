@@ -1,7 +1,8 @@
 'use client';
 
 import Link from 'next/link';
-import { useState, useTransition } from 'react';
+import { useSearchParams } from 'next/navigation';
+import { Suspense, useState, useTransition } from 'react';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
@@ -17,8 +18,22 @@ const schema = z.object({
 });
 
 export default function LoginPage() {
+  return (
+    <Suspense fallback={<Card><CardHeader><CardTitle>Sign in</CardTitle></CardHeader></Card>}>
+      <LoginInner />
+    </Suspense>
+  );
+}
+
+function LoginInner() {
   const [error, setError] = useState<string | null>(null);
   const [isPending, startTransition] = useTransition();
+  const searchParams = useSearchParams();
+  const invitationToken = searchParams.get('invitation');
+  const explicitNext = searchParams.get('next');
+  const next = invitationToken
+    ? `/invitations/${invitationToken}/accept`
+    : explicitNext ?? undefined;
 
   const form = useForm<z.infer<typeof schema>>({
     resolver: zodResolver(schema),
@@ -28,7 +43,7 @@ export default function LoginPage() {
   function onSubmit(values: z.infer<typeof schema>) {
     setError(null);
     startTransition(async () => {
-      const result = await signIn(values);
+      const result = await signIn({ ...values, next });
       // Successful sign-in redirects via next/navigation; only error path returns.
       if (result && 'error' in result) setError(result.error);
     });
@@ -88,7 +103,14 @@ export default function LoginPage() {
           </p>
           <p>
             No account?{' '}
-            <Link href="/signup" className="underline">
+            <Link
+              href={
+                invitationToken
+                  ? `/signup?invitation=${encodeURIComponent(invitationToken)}`
+                  : '/signup'
+              }
+              className="underline"
+            >
               Sign up
             </Link>
           </p>
