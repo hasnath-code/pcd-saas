@@ -116,7 +116,7 @@ export async function inviteTeamMember(input: unknown): Promise<ServerActionResu
     role,
     acceptUrl,
   });
-  await sendEmail({ to: email, subject, html, orgId: ctx.orgId });
+  await sendEmail({ to: email, subject, html, orgId: ctx.orgId, template: 'team_invitation' });
 
   await logAudit({
     orgId: ctx.orgId,
