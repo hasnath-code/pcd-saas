@@ -95,6 +95,11 @@ export type InvitationWithOrg = {
 // Token-by-token lookup used on the public landing page. Includes the org
 // name so the page can render "join <orgName> as <role>" without a second
 // query. Returns null for non-existent tokens (404 mode at the page level).
+//
+// Session 5: no longer filters on `isNull(deletedAt)` so the landing page
+// can distinguish "invitation cancelled" (deletedAt set) from "invitation
+// not found" (no row). Callers must check `invitation.deletedAt !== null`
+// themselves to surface the cancelled state.
 export async function getInvitationByToken(token: string): Promise<InvitationWithOrg | null> {
   const rows = await db
     .select({
@@ -105,7 +110,7 @@ export async function getInvitationByToken(token: string): Promise<InvitationWit
     .from(invitations)
     .innerJoin(organizations, eq(organizations.id, invitations.orgId))
     .leftJoin(users, eq(users.id, invitations.invitedBy))
-    .where(and(eq(invitations.token, token), isNull(invitations.deletedAt)))
+    .where(eq(invitations.token, token))
     .limit(1);
   return rows[0] ?? null;
 }

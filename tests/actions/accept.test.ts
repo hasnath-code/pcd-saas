@@ -132,6 +132,45 @@ describe('acceptInvitation', () => {
     await f.service.auth.admin.deleteUser(authUser.id);
   });
 
+  test('cancelled invitation → conflict / cancelled (no users row, no audit)', async () => {
+    const inviteeEmail = `cancelled-${uuidv7()}@test.local`;
+    const token = uuidv7();
+    const invId = uuidv7();
+    await f.service.from('invitations').insert({
+      id: invId,
+      org_id: f.orgA.id,
+      email: inviteeEmail,
+      invitation_type: 'team_member',
+      role: 'member',
+      token,
+      expires_at: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
+      deleted_at: new Date().toISOString(),
+      invited_by: f.userA.userId,
+    });
+    const authUser = await createInviteeAuthUser(inviteeEmail);
+    vi.mocked(auth.requireAuth).mockResolvedValue(authUser);
+
+    const result = await acceptInvitation({ token });
+    expect(result).toEqual({ error: 'conflict', reason: 'cancelled' });
+
+    // Security verification: no public.users row was inserted, and no audit
+    // row was written for this invitation.
+    const { data: usersRow } = await f.service
+      .from('users')
+      .select('id')
+      .eq('auth_user_id', authUser.id);
+    expect(usersRow ?? []).toEqual([]);
+
+    const { data: audits } = await f.service
+      .from('audit_logs')
+      .select('id')
+      .eq('resource_id', invId)
+      .eq('resource_type', 'invitation');
+    expect(audits ?? []).toEqual([]);
+
+    await f.service.auth.admin.deleteUser(authUser.id);
+  });
+
   test('multi-org auth user → { error: multi_org_not_yet_supported }', async () => {
     // userA is already a member of orgA. Send them an invitation to orgB
     // (different org), then attempt accept while signed in as userA.

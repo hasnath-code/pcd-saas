@@ -111,6 +111,9 @@ export async function sendPasswordReset(input: { email: string }): Promise<AuthA
   const parsed = emailSchema.safeParse(input);
   if (!parsed.success) return { error: parsed.error.issues[0]?.message ?? 'Invalid email' };
 
+  const { limited, retryAfterSec } = await rateLimit('auth', await authRateLimitKey(parsed.data.email));
+  if (limited) return { error: 'rate_limited', reason: `retry_after_${retryAfterSec}s` };
+
   const supabase = await createClient();
   const { error } = await supabase.auth.resetPasswordForEmail(parsed.data.email, {
     redirectTo: callbackUrl('/reset-password'),
