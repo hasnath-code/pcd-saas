@@ -3,6 +3,7 @@
 import { z } from 'zod';
 import { v7 as uuidv7 } from 'uuid';
 import { and, eq, gt, isNull } from 'drizzle-orm';
+import * as Sentry from '@sentry/nextjs';
 import {
   AuthError,
   requireAuth,
@@ -18,7 +19,7 @@ import { rateLimit } from '@/lib/ratelimit';
 import { env } from '@/env';
 
 export type ServerActionResult =
-  | { success: true }
+  | { success: true; deliveryWarning?: 'email_send_failed' }
   | { error: ServerActionErrorCode; reason?: string };
 
 const InviteInput = z.object({
@@ -116,7 +117,28 @@ export async function inviteTeamMember(input: unknown): Promise<ServerActionResu
     role,
     acceptUrl,
   });
-  await sendEmail({ to: email, subject, html, orgId: ctx.orgId, template: 'team_invitation' });
+
+  // sendEmail throws when Resend rejects the send (e.g. testing-mode domain
+  // restriction in production before pcdportal.com is verified, or transient
+  // 5xx from Resend). The invitation row is already in the DB — we don't
+  // want a delivery failure to roll the user back to a 500 error boundary.
+  // Capture to Sentry and continue; surface a delivery warning to the UI.
+  let deliveryFailed = false;
+  try {
+    await sendEmail({
+      to: email,
+      subject,
+      html,
+      orgId: ctx.orgId,
+      template: 'team_invitation',
+    });
+  } catch (err) {
+    deliveryFailed = true;
+    Sentry.captureException(err, {
+      tags: { action: 'inviteTeamMember', org_id: ctx.orgId },
+      extra: { invitationId, recipient: email },
+    });
+  }
 
   await logAudit({
     orgId: ctx.orgId,
@@ -124,9 +146,12 @@ export async function inviteTeamMember(input: unknown): Promise<ServerActionResu
     action: 'invite_sent',
     resourceType: 'invitation',
     resourceId: invitationId,
-    metadata: { email, role },
+    metadata: { email, role, delivery_failed: deliveryFailed },
   });
 
+  if (deliveryFailed) {
+    return { success: true, deliveryWarning: 'email_send_failed' };
+  }
   return { success: true };
 }
 
