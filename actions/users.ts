@@ -152,11 +152,16 @@ export async function acceptInvitation(input: unknown): Promise<ServerActionResu
   const invRows = await db
     .select()
     .from(invitations)
-    .where(and(eq(invitations.token, token), isNull(invitations.deletedAt)))
+    .where(eq(invitations.token, token))
     .limit(1);
   const invitation = invRows[0];
   if (!invitation) {
     return { error: 'not_found', reason: 'invalid' };
+  }
+  // Session 5: cancelled invitations (deletedAt set by cancelInvitation) get
+  // a distinct error instead of conflating with not-found.
+  if (invitation.deletedAt !== null) {
+    return { error: 'conflict', reason: 'cancelled' };
   }
   if (invitation.acceptedAt !== null) {
     return { error: 'conflict', reason: 'already_accepted' };
