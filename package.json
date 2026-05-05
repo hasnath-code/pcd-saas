@@ -17,6 +17,7 @@
     "db:seed:local": "tsx --conditions=react-server --env-file=.env.local db/seed/run-local.ts",
     "screenshot": "tsx --env-file=.env.local scripts/screenshot.ts",
     "db:smoke": "node --env-file=.env.local scripts/smoke-pool.mjs",
+    "db:cleanup-stubs": "tsx --env-file=.env.local scripts/cleanup-stub-webhook-events.ts",
     "test:rls": "vitest run --config vitest.config.mts tests/rls",
     "test:actions": "vitest run --config vitest.config.mts tests/actions",
     "test:cloud-smoke": "CLOUD_SMOKE=1 vitest run --config vitest.config.mts tests/cloud-smoke"
