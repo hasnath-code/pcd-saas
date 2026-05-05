@@ -8,7 +8,7 @@ import {
   requireOrgUser,
   type ServerActionErrorCode,
 } from '@/lib/auth/requireAuth';
-import { db } from '@/db';
+import { db, type DbOrTx } from '@/db';
 import { clients, clientOrgMemberships } from '@/db/schema';
 import { logAudit } from '@/lib/audit/log';
 
@@ -32,6 +32,77 @@ const FindOrCreateClientInput = z.object({
   companyName: z.string().trim().max(120).optional(),
   companyType: z.enum(COMPANY_TYPES).optional(),
 });
+
+export type FindOrCreateClientInputT = z.infer<typeof FindOrCreateClientInput>;
+
+// Internal tx-friendly variant of findOrCreateClient. Takes an existing
+// transaction client (or the top-level db) so callers like inviteStakeholder
+// can compose it inside their own atomic write. Drizzle does NOT support
+// nested transactions, so the outer caller MUST pass `tx` rather than calling
+// findOrCreateClient (the public action wraps in its own tx).
+//
+// Returns clientId + a `created` flag (true if a new clients row was inserted;
+// false if reusing an existing row globally or in this org). Caller is
+// responsible for the audit log entry — this helper does no audit so it
+// remains a pure data primitive.
+export async function findOrCreateClientTx(
+  tx: DbOrTx,
+  input: FindOrCreateClientInputT,
+  orgId: string,
+): Promise<{ clientId: string; created: boolean }> {
+  const { email, name, phone, companyName, companyType } = input;
+
+  // Existing client by email + linked to caller's org via membership?
+  const existingInOrg = await tx
+    .select({ id: clients.id })
+    .from(clients)
+    .innerJoin(clientOrgMemberships, eq(clientOrgMemberships.clientId, clients.id))
+    .where(
+      and(
+        eq(clients.email, email),
+        eq(clientOrgMemberships.orgId, orgId),
+        isNull(clients.deletedAt),
+      ),
+    )
+    .limit(1);
+  if (existingInOrg.length > 0) {
+    return { clientId: existingInOrg[0].id, created: false };
+  }
+
+  // Existing client globally (different org)? Reuse the row, just attach a
+  // new membership for caller's org.
+  const existingGlobal = await tx
+    .select({ id: clients.id })
+    .from(clients)
+    .where(and(eq(clients.email, email), isNull(clients.deletedAt)))
+    .limit(1);
+
+  let clientId: string;
+  let created = false;
+
+  if (existingGlobal.length > 0) {
+    clientId = existingGlobal[0].id;
+  } else {
+    clientId = uuidv7();
+    await tx.insert(clients).values({
+      id: clientId,
+      email,
+      name,
+      phone,
+      companyName,
+      companyType,
+    });
+    created = true;
+  }
+
+  await tx.insert(clientOrgMemberships).values({
+    id: uuidv7(),
+    clientId,
+    orgId,
+  });
+
+  return { clientId, created };
+}
 
 // Idempotent: if a client row with the given email is already linked to the
 // caller's org via client_org_memberships, returns it; else creates a new
@@ -60,59 +131,10 @@ export async function findOrCreateClient(
       reason: parsed.error.issues[0]?.message ?? 'Invalid input',
     };
   }
-  const { email, name, phone, companyName, companyType } = parsed.data;
 
-  // Existing client by email + linked to caller's org via membership?
-  const existingInOrg = await db
-    .select({ id: clients.id })
-    .from(clients)
-    .innerJoin(clientOrgMemberships, eq(clientOrgMemberships.clientId, clients.id))
-    .where(
-      and(
-        eq(clients.email, email),
-        eq(clientOrgMemberships.orgId, ctx.orgId),
-        isNull(clients.deletedAt),
-      ),
-    )
-    .limit(1);
-  if (existingInOrg.length > 0) {
-    return { success: true, data: { clientId: existingInOrg[0].id, created: false } };
-  }
-
-  // Existing client globally (different org)? Reuse the row, just attach a
-  // new membership for caller's org.
-  const existingGlobal = await db
-    .select({ id: clients.id })
-    .from(clients)
-    .where(and(eq(clients.email, email), isNull(clients.deletedAt)))
-    .limit(1);
-
-  let clientId: string;
-  let created = false;
-
+  let result: { clientId: string; created: boolean };
   try {
-    await db.transaction(async (tx) => {
-      if (existingGlobal.length > 0) {
-        clientId = existingGlobal[0].id;
-      } else {
-        clientId = uuidv7();
-        await tx.insert(clients).values({
-          id: clientId,
-          email,
-          name,
-          phone,
-          companyName,
-          companyType,
-        });
-        created = true;
-      }
-
-      await tx.insert(clientOrgMemberships).values({
-        id: uuidv7(),
-        clientId,
-        orgId: ctx.orgId,
-      });
-    });
+    result = await db.transaction(async (tx) => findOrCreateClientTx(tx, parsed.data, ctx.orgId));
   } catch (e) {
     const reason = e instanceof Error ? e.message : String(e);
     return { error: 'internal_error', reason: `find_or_create_client:${reason}` };
@@ -121,14 +143,14 @@ export async function findOrCreateClient(
   await logAudit({
     orgId: ctx.orgId,
     userId: ctx.userId,
-    clientId: clientId!,
+    clientId: result.clientId,
     action: 'create',
-    resourceType: created ? 'client' : 'client_org_membership',
-    resourceId: clientId!,
-    metadata: { email, via: 'find_or_create' },
+    resourceType: result.created ? 'client' : 'client_org_membership',
+    resourceId: result.clientId,
+    metadata: { email: parsed.data.email, via: 'find_or_create' },
   });
 
-  return { success: true, data: { clientId: clientId!, created } };
+  return { success: true, data: result };
 }
 
 const UpdateClientInput = z.object({

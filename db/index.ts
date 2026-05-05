@@ -14,3 +14,10 @@ const queryClient = postgres(env.DATABASE_URL, {
 });
 
 export const db = drizzle(queryClient, { schema });
+
+// Helper type for functions that accept either the top-level db or a tx client
+// inside db.transaction(async (tx) => ...). Used by findOrCreateClientTx
+// (actions/clients.ts) and similar tx-friendly helpers composed inside outer
+// transactions (Rule 19 in SKILL.md v3.2). Derived from the callback signature
+// so it covers both PgDatabase and PgTransaction shapes.
+export type DbOrTx = Parameters<Parameters<typeof db.transaction>[0]>[0] | typeof db;

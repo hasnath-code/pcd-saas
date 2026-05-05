@@ -159,13 +159,30 @@ export async function requireOrgAdmin(): Promise<OrgAdminContext> {
   };
 }
 
-// STUB. The `clients` table ships in Phase 1b Session 6; until then there is
-// no stakeholder identity to resolve. Wired here so server actions in 1a can
-// reference the symbol; calling it always throws.
+// Resolve the calling user's stakeholder identity. Returns the (authUserId,
+// clientId) tuple where clientId is the public.clients row whose auth_user_id
+// matches auth.uid(). Throws AuthError('not_authorized', 'no_stakeholder_identity')
+// if the auth user has no clients row (e.g. an org user who landed in /portal
+// by mistake, or a stakeholder whose acceptance was reversed).
+//
+// Single-clients-row guarantee: clients.email is GLOBALLY UNIQUE and a single
+// auth.users row maps to at most one clients row (auth_user_id is set during
+// acceptStakeholderInvitation). No multi-stakeholder-identity picker needed.
+//
+// RLS: the SELECT on `clients` flows through clients_select_self_or_org_member
+// policy; the auth_user_id = auth.uid() branch matches our own row.
 export async function requireStakeholder(): Promise<StakeholderContext> {
-  await requireAuth();
-  throw new AuthError(
-    'internal_error',
-    'requireStakeholder: ships in Phase 1b Session 6 (clients table)',
-  );
+  const authUser = await requireAuth();
+  const supabase = await createClient();
+  const { data, error } = await supabase
+    .from('clients')
+    .select('id')
+    .eq('auth_user_id', authUser.id)
+    .is('deleted_at', null)
+    .limit(1);
+  if (error) throw new AuthError('internal_error', `requireStakeholder: ${error.message}`);
+  if (!data || data.length === 0) {
+    throw new AuthError('not_authorized', 'no_stakeholder_identity');
+  }
+  return { authUserId: authUser.id, clientId: data[0].id };
 }
