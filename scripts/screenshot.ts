@@ -16,7 +16,7 @@
 //     (default: SCREENSHOT_DEFAULT_PASSWORD env var, else 'testpass1234')
 //
 // OUTPUT: screenshots/<filename>.png (gitignored).
-import { chromium } from '@playwright/test';
+import { chromium, type Page } from '@playwright/test';
 import * as path from 'node:path';
 
 const VIEWPORTS = {
@@ -76,20 +76,16 @@ async function main() {
     if (authEmail) {
       const password =
         flags.password ?? process.env.SCREENSHOT_DEFAULT_PASSWORD ?? 'testpass1234';
+      // Warm up the dev server's /login compilation in a throwaway page so
+      // the real sign-in below doesn't race React hydration. Without this
+      // warmup, the click can fire before onSubmit is wired and the form
+      // submits as a default GET to /login?email=...&password=...
+      const warmup = await context.newPage();
+      await warmup.goto(`${baseUrl}/login`, { waitUntil: 'networkidle' });
+      await warmup.close();
+
       const loginPage = await context.newPage();
-      await loginPage.goto(`${baseUrl}/login`, { waitUntil: 'networkidle' });
-      await loginPage
-        .getByRole('textbox', { name: /email/i })
-        .fill(authEmail);
-      await loginPage
-        .getByRole('textbox', { name: /password/i })
-        .fill(password);
-      await Promise.all([
-        loginPage.waitForURL((url) => !url.pathname.startsWith('/login'), {
-          timeout: 15_000,
-        }),
-        loginPage.getByRole('button', { name: /^sign in$/i }).click(),
-      ]);
+      await signInViaForm(loginPage, baseUrl, authEmail, password);
       await loginPage.close();
     }
 
@@ -103,6 +99,45 @@ async function main() {
   } finally {
     await browser.close();
   }
+}
+
+// Helper: sign in via the real /login form, with hydration-race retry.
+// First click may fall through to default GET (form posts to /login?email=...).
+// If that happens, we re-navigate and retry once with a longer settling wait.
+async function signInViaForm(
+  page: Page,
+  baseUrl: string,
+  email: string,
+  password: string,
+) {
+  const fillAndClick = async (settleMs: number) => {
+    await page.goto(`${baseUrl}/login`, { waitUntil: 'networkidle' });
+    if (settleMs > 0) await page.waitForTimeout(settleMs);
+    await page.getByRole('textbox', { name: /email/i }).fill(email);
+    await page.getByRole('textbox', { name: /password/i }).fill(password);
+    await page.getByRole('button', { name: /^sign in$/i }).click();
+  };
+
+  for (const settle of [400, 1500, 2500]) {
+    await fillAndClick(settle);
+    try {
+      await page.waitForURL(
+        (url) => !url.pathname.startsWith('/login'),
+        { timeout: 4_000 },
+      );
+      return;
+    } catch {
+      // hydration race — retry with a longer settle.
+      if (process.env.SCREENSHOT_DEBUG) {
+        console.log(
+          `[debug] sign-in retry, settled URL=${page.url()} (settle=${settle}ms)`,
+        );
+      }
+    }
+  }
+  throw new Error(
+    `screenshot --auth: login form did not navigate after retries (last URL: ${page.url()})`,
+  );
 }
 
 main().catch((err) => {
