@@ -48,3 +48,6 @@ next-env.d.ts
 # playwright
 /playwright-report/
 /test-results/
+
+# Claude Code workspace artifacts
+.claude/
