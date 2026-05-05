@@ -61,12 +61,18 @@ ALTER TABLE "audit_logs" ADD CONSTRAINT "audit_logs_client_id_clients_id_fk"
 --> statement-breakpoint
 
 -- =============================================================================
+-- SECURITY DEFINER helpers for clients + client_org_memberships RLS.
+-- Both helpers bypass RLS to break the recursion that would otherwise occur:
+-- clients_select needs to consult memberships, and memberships_select needs
+-- to consult clients. Without these helpers Postgres detects an infinite-
+-- recursion-in-policy error (42P17). search_path is pinned per Phase 1a's
+-- helper convention.
+-- =============================================================================
+
 -- Replace the auth_user_stakeholder_orgs() stub from migration 0001 with the
 -- real implementation. Returns the org_ids of all orgs where the current user
--- has a non-deleted client membership. Used by stakeholder-accessible RLS
--- policies in Phase 1c. Signature unchanged; existing callers continue to work
--- (the stub was a no-op SELECT NULL WHERE FALSE).
--- =============================================================================
+-- has a non-deleted client membership. Signature unchanged; existing callers
+-- continue to work (the stub was a no-op SELECT NULL WHERE FALSE).
 CREATE OR REPLACE FUNCTION public.auth_user_stakeholder_orgs()
 RETURNS SETOF uuid
 LANGUAGE sql
@@ -79,6 +85,44 @@ AS $$
   JOIN public.clients c ON c.id = com.client_id
   WHERE c.auth_user_id = auth.uid()
     AND c.deleted_at IS NULL;
+$$;
+--> statement-breakpoint
+
+-- Returns the client_ids where the current auth user IS that client (i.e.
+-- clients.auth_user_id = auth.uid()). Used by the client_org_memberships
+-- SELECT policy so it can match "my own client row's memberships" without
+-- recursing back into clients_select.
+CREATE OR REPLACE FUNCTION public.auth_user_client_ids()
+RETURNS SETOF uuid
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = public, auth, pg_temp
+AS $$
+  SELECT id FROM public.clients
+  WHERE auth_user_id = auth.uid()
+    AND deleted_at IS NULL;
+$$;
+--> statement-breakpoint
+
+-- Returns the client_ids that are linked (via client_org_memberships) to any
+-- org the current auth user is a non-deleted member of. Used by the
+-- clients_select policy's "I'm an org member of this client's org" branch
+-- without recursing back into memberships_select.
+CREATE OR REPLACE FUNCTION public.auth_user_org_client_ids()
+RETURNS SETOF uuid
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = public, auth, pg_temp
+AS $$
+  SELECT com.client_id
+  FROM public.client_org_memberships com
+  WHERE com.org_id IN (
+    SELECT u.org_id FROM public.users u
+    WHERE u.auth_user_id = auth.uid()
+      AND u.deleted_at IS NULL
+  );
 $$;
 --> statement-breakpoint
 
@@ -108,6 +152,10 @@ ALTER TABLE public.client_org_memberships ENABLE ROW LEVEL SECURITY;
 -- member of an org that has a client_org_memberships row pointing at this
 -- client. Updates restricted to self only — org users update via service role
 -- through the updateClient action (which performs its own org check).
+--
+-- Recursion-safe: the second OR branch uses auth_user_org_client_ids() which
+-- bypasses RLS via SECURITY DEFINER, so this policy doesn't loop through
+-- memberships_select.
 -- =============================================================================
 CREATE POLICY "clients_select_self_or_org_member" ON public.clients
   FOR SELECT TO authenticated
@@ -115,10 +163,7 @@ CREATE POLICY "clients_select_self_or_org_member" ON public.clients
     deleted_at IS NULL
     AND (
       auth_user_id = auth.uid()
-      OR id IN (
-        SELECT com.client_id FROM public.client_org_memberships com
-        WHERE is_org_member(com.org_id)
-      )
+      OR id IN (SELECT auth_user_org_client_ids())
     )
   );
 
@@ -134,14 +179,15 @@ CREATE POLICY "clients_update_self" ON public.clients
 -- Visible to org members of the linked org, and to the client themselves.
 -- Writes (link/unlink) via service role only — managed via findOrCreateClient
 -- and Phase 1c stakeholder removal flows.
+--
+-- Recursion-safe: the second OR branch uses auth_user_client_ids() (SECURITY
+-- DEFINER) instead of querying clients directly, so this policy doesn't loop
+-- through clients_select.
 -- =============================================================================
 CREATE POLICY "client_org_memberships_select" ON public.client_org_memberships
   FOR SELECT TO authenticated
   USING (
     is_org_member(org_id)
-    OR client_id IN (
-      SELECT c.id FROM public.clients c
-      WHERE c.auth_user_id = auth.uid() AND c.deleted_at IS NULL
-    )
+    OR client_id IN (SELECT auth_user_client_ids())
   );
 -- INSERT/UPDATE/DELETE: service role only.

@@ -106,6 +106,24 @@ export async function createProject(
     }
   }
 
+  // Pre-check the (org_id, project_number) UNIQUE constraint to surface a
+  // friendly conflict before letting the INSERT raise a 23505. Cheaper +
+  // more readable than parsing pg error messages.
+  const dup = await db
+    .select({ id: projects.id })
+    .from(projects)
+    .where(
+      and(
+        eq(projects.orgId, ctx.orgId),
+        eq(projects.projectNumber, projectNumber),
+        isNull(projects.deletedAt),
+      ),
+    )
+    .limit(1);
+  if (dup.length > 0) {
+    return { error: 'conflict', reason: 'project_number_taken' };
+  }
+
   const projectId = uuidv7();
 
   try {
@@ -120,8 +138,10 @@ export async function createProject(
       createdBy: ctx.userId,
     });
   } catch (e) {
+    // Race-condition fallback: if two concurrent createProject calls slip
+    // past the pre-check, the second hits the UNIQUE violation here.
     const msg = e instanceof Error ? e.message : String(e);
-    if (msg.includes('projects_org_project_number_uniq')) {
+    if (msg.includes('projects_org_project_number_uniq') || msg.includes('23505')) {
       return { error: 'conflict', reason: 'project_number_taken' };
     }
     return { error: 'internal_error', reason: `project_insert:${msg}` };
