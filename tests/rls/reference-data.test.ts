@@ -21,11 +21,18 @@ describe('reference data + system tables', () => {
 
   test('Anonymous CANNOT SELECT webhook_events (no GRANT)', async () => {
     const a = asAnon();
-    const { data, error } = await a.from('webhook_events').select('id').limit(1);
-    // Either error (permission denied) or empty data — both prove anon access blocked
-    expect(error !== null || (data ?? []).length === 0).toBe(true);
-    if (error) {
-      expect(error.message.toLowerCase()).toMatch(/permission|denied|not found|relation/);
-    }
+    const { error } = await a.from('webhook_events').select('id').limit(1);
+    // After migration 0004, anon has no GRANT on webhook_events. Empty data is
+    // not a valid pass mode — it could mask a real GRANT regression on a table
+    // that just happens to be empty. Require an explicit permission error.
+    expect(error).not.toBeNull();
+    expect(error!.message.toLowerCase()).toMatch(/permission|denied/);
+  });
+
+  test('Anonymous CANNOT SELECT email_events (no GRANT, RLS too)', async () => {
+    const a = asAnon();
+    const { error } = await a.from('email_events').select('id').limit(1);
+    expect(error).not.toBeNull();
+    expect(error!.message.toLowerCase()).toMatch(/permission|denied/);
   });
 });

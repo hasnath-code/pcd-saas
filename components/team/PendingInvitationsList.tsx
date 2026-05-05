@@ -53,6 +53,13 @@ export function PendingInvitationsList({ invitations }: { invitations: PendingIn
                     <Badge variant="secondary">
                       {inv.role === 'admin' ? 'Admin' : 'Member'}
                     </Badge>
+                    {(inv.latestDeliveryEventType === 'bounced' ||
+                      inv.latestDeliveryEventType === 'complained' ||
+                      inv.latestDeliveryEventType === 'failed') && (
+                      <Badge variant="destructive" className="ml-2">
+                        Delivery failed
+                      </Badge>
+                    )}
                   </TableCell>
                   <TableCell className="text-muted-foreground">
                     Expires {daysUntil(inv.expiresAt)}

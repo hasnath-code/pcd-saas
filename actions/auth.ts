@@ -1,8 +1,10 @@
 'use server';
 
 import { z } from 'zod';
+import { headers } from 'next/headers';
 import { redirect } from 'next/navigation';
 import { createClient } from '@/lib/supabase/server';
+import { rateLimit } from '@/lib/ratelimit';
 import { env } from '@/env';
 
 // Shared schemas. Mirror these on the client side via zodResolver in form components.
@@ -32,16 +34,31 @@ function safeNext(input: string | undefined, fallback = '/dashboard'): string {
 // `redirect()` throws across the wire and never returns a value; callers won't see
 // `success: true` from sign-in (Next handles the redirect). They will see `success: true`
 // for actions that show an in-page confirmation (e.g. magic link sent).
+//
+// `reason` is optional. When `error === 'rate_limited'` it carries the
+// `retry_after_<n>s` marker so UI can render the wait time.
 export type AuthActionResult =
   | { success: true; message?: string }
-  | { error: string };
+  | { error: string; reason?: string };
 
 const callbackUrl = (next: string = '/dashboard') =>
   `${env.NEXT_PUBLIC_APP_URL}/auth/callback?next=${encodeURIComponent(next)}`;
 
+// IP+email is the right grain for auth limiting: defeats both single-IP
+// spraying and single-email distributed attempts. x-forwarded-for is the
+// standard Vercel/Next header; '0.0.0.0' is the dev-fallback.
+async function authRateLimitKey(email: string): Promise<string> {
+  const h = await headers();
+  const ip = (h.get('x-forwarded-for') ?? '0.0.0.0').split(',')[0]?.trim() ?? '0.0.0.0';
+  return `${ip}:${email.toLowerCase()}`;
+}
+
 export async function signUp(input: { email: string; password: string; next?: string }): Promise<AuthActionResult> {
   const parsed = emailPasswordSchema.safeParse(input);
   if (!parsed.success) return { error: parsed.error.issues[0]?.message ?? 'Invalid input' };
+
+  const { limited, retryAfterSec } = await rateLimit('auth', await authRateLimitKey(parsed.data.email));
+  if (limited) return { error: 'rate_limited', reason: `retry_after_${retryAfterSec}s` };
 
   const supabase = await createClient();
   const next = safeNext(parsed.data.next);
@@ -59,6 +76,9 @@ export async function signIn(input: { email: string; password: string; next?: st
   const parsed = emailPasswordSchema.safeParse(input);
   if (!parsed.success) return { error: parsed.error.issues[0]?.message ?? 'Invalid input' };
 
+  const { limited, retryAfterSec } = await rateLimit('auth', await authRateLimitKey(parsed.data.email));
+  if (limited) return { error: 'rate_limited', reason: `retry_after_${retryAfterSec}s` };
+
   const supabase = await createClient();
   const { error } = await supabase.auth.signInWithPassword({
     email: parsed.data.email,
@@ -72,6 +92,9 @@ export async function signIn(input: { email: string; password: string; next?: st
 export async function sendMagicLink(input: { email: string; next?: string }): Promise<AuthActionResult> {
   const parsed = emailSchema.safeParse(input);
   if (!parsed.success) return { error: parsed.error.issues[0]?.message ?? 'Invalid email' };
+
+  const { limited, retryAfterSec } = await rateLimit('auth', await authRateLimitKey(parsed.data.email));
+  if (limited) return { error: 'rate_limited', reason: `retry_after_${retryAfterSec}s` };
 
   const supabase = await createClient();
   const next = safeNext(parsed.data.next);
