@@ -1,7 +1,8 @@
 'use client';
 
 import Link from 'next/link';
-import { useState, useTransition } from 'react';
+import { useSearchParams } from 'next/navigation';
+import { Suspense, useState, useTransition } from 'react';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
@@ -17,9 +18,20 @@ const schema = z.object({
 });
 
 export default function SignupPage() {
+  return (
+    <Suspense fallback={<Card><CardHeader><CardTitle>Create account</CardTitle></CardHeader></Card>}>
+      <SignupInner />
+    </Suspense>
+  );
+}
+
+function SignupInner() {
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
   const [isPending, startTransition] = useTransition();
+  const searchParams = useSearchParams();
+  const invitationToken = searchParams.get('invitation');
+  const next = invitationToken ? `/invitations/${invitationToken}/accept` : undefined;
 
   const form = useForm<z.infer<typeof schema>>({
     resolver: zodResolver(schema),
@@ -30,7 +42,7 @@ export default function SignupPage() {
     setError(null);
     setSuccess(null);
     startTransition(async () => {
-      const result = await signUp(values);
+      const result = await signUp({ ...values, next });
       if ('error' in result) setError(result.error);
       else setSuccess(result.message ?? 'Check your email.');
     });
@@ -41,7 +53,9 @@ export default function SignupPage() {
       <CardHeader>
         <CardTitle>Create account</CardTitle>
         <CardDescription>
-          We&apos;ll send a confirmation email. Click the link to finish signing up.
+          {invitationToken
+            ? "After confirming your email you'll be added to the team."
+            : "We'll send a confirmation email. Click the link to finish signing up."}
         </CardDescription>
       </CardHeader>
       <CardContent>
@@ -82,7 +96,14 @@ export default function SignupPage() {
         </Form>
         <p className="mt-4 text-center text-sm">
           Already have an account?{' '}
-          <Link href="/login" className="underline">
+          <Link
+            href={
+              invitationToken
+                ? `/login?invitation=${encodeURIComponent(invitationToken)}`
+                : '/login'
+            }
+            className="underline"
+          >
             Sign in
           </Link>
         </p>

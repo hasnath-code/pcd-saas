@@ -9,15 +9,24 @@ import { env } from '@/env';
 const emailPasswordSchema = z.object({
   email: z.string().email().toLowerCase().trim(),
   password: z.string().min(8, 'Password must be at least 8 characters'),
+  next: z.string().optional(),
 });
 
 const emailSchema = z.object({
   email: z.string().email().toLowerCase().trim(),
+  next: z.string().optional(),
 });
 
 const passwordSchema = z.object({
   password: z.string().min(8, 'Password must be at least 8 characters'),
 });
+
+// Open-redirect guard: only allow relative paths starting with `/` and not `//`.
+function safeNext(input: string | undefined, fallback = '/dashboard'): string {
+  if (!input) return fallback;
+  if (!input.startsWith('/') || input.startsWith('//')) return fallback;
+  return input;
+}
 
 // Standard return shape for actions called from forms.
 // `redirect()` throws across the wire and never returns a value; callers won't see
@@ -30,40 +39,45 @@ export type AuthActionResult =
 const callbackUrl = (next: string = '/dashboard') =>
   `${env.NEXT_PUBLIC_APP_URL}/auth/callback?next=${encodeURIComponent(next)}`;
 
-export async function signUp(input: { email: string; password: string }): Promise<AuthActionResult> {
+export async function signUp(input: { email: string; password: string; next?: string }): Promise<AuthActionResult> {
   const parsed = emailPasswordSchema.safeParse(input);
   if (!parsed.success) return { error: parsed.error.issues[0]?.message ?? 'Invalid input' };
 
   const supabase = await createClient();
+  const next = safeNext(parsed.data.next);
   const { error } = await supabase.auth.signUp({
     email: parsed.data.email,
     password: parsed.data.password,
-    options: { emailRedirectTo: callbackUrl() },
+    options: { emailRedirectTo: callbackUrl(next) },
   });
 
   if (error) return { error: error.message };
   return { success: true, message: 'Check your email to confirm your account.' };
 }
 
-export async function signIn(input: { email: string; password: string }): Promise<AuthActionResult> {
+export async function signIn(input: { email: string; password: string; next?: string }): Promise<AuthActionResult> {
   const parsed = emailPasswordSchema.safeParse(input);
   if (!parsed.success) return { error: parsed.error.issues[0]?.message ?? 'Invalid input' };
 
   const supabase = await createClient();
-  const { error } = await supabase.auth.signInWithPassword(parsed.data);
+  const { error } = await supabase.auth.signInWithPassword({
+    email: parsed.data.email,
+    password: parsed.data.password,
+  });
 
   if (error) return { error: error.message };
-  redirect('/dashboard');
+  redirect(safeNext(parsed.data.next));
 }
 
-export async function sendMagicLink(input: { email: string }): Promise<AuthActionResult> {
+export async function sendMagicLink(input: { email: string; next?: string }): Promise<AuthActionResult> {
   const parsed = emailSchema.safeParse(input);
   if (!parsed.success) return { error: parsed.error.issues[0]?.message ?? 'Invalid email' };
 
   const supabase = await createClient();
+  const next = safeNext(parsed.data.next);
   const { error } = await supabase.auth.signInWithOtp({
     email: parsed.data.email,
-    options: { emailRedirectTo: callbackUrl() },
+    options: { emailRedirectTo: callbackUrl(next) },
   });
 
   if (error) return { error: error.message };

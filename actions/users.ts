@@ -5,6 +5,7 @@ import { v7 as uuidv7 } from 'uuid';
 import { and, eq, gt, isNull } from 'drizzle-orm';
 import {
   AuthError,
+  requireAuth,
   requireOrgAdmin,
   type ServerActionErrorCode,
 } from '@/lib/auth/requireAuth';
@@ -125,5 +126,106 @@ export async function inviteTeamMember(input: unknown): Promise<ServerActionResu
   return { success: true };
 }
 
-// acceptInvitation lands in Task D.2 (with multi-org guard per Adjustment 2).
+const AcceptInput = z.object({
+  token: z.string().min(1),
+});
+
+export async function acceptInvitation(input: unknown): Promise<ServerActionResult> {
+  let authUser;
+  try {
+    authUser = await requireAuth();
+  } catch (e) {
+    if (e instanceof AuthError) return { error: e.code, reason: e.message };
+    throw e;
+  }
+
+  const parsed = AcceptInput.safeParse(input);
+  if (!parsed.success) {
+    return { error: 'validation_error', reason: parsed.error.issues[0]?.message ?? 'Invalid input' };
+  }
+  const { token } = parsed.data;
+
+  const invRows = await db
+    .select()
+    .from(invitations)
+    .where(and(eq(invitations.token, token), isNull(invitations.deletedAt)))
+    .limit(1);
+  const invitation = invRows[0];
+  if (!invitation) {
+    return { error: 'not_found', reason: 'invalid' };
+  }
+  if (invitation.acceptedAt !== null) {
+    return { error: 'conflict', reason: 'already_accepted' };
+  }
+  if (invitation.expiresAt.getTime() < Date.now()) {
+    return { error: 'conflict', reason: 'expired' };
+  }
+  if (invitation.invitationType !== 'team_member') {
+    return { error: 'validation_error', reason: 'unsupported_invitation_type' };
+  }
+  if (
+    invitation.email.toLowerCase().trim() !==
+    (authUser.email ?? '').toLowerCase().trim()
+  ) {
+    return { error: 'not_authorized', reason: 'email_mismatch' };
+  }
+
+  // Adjustment 2: multi-org membership is queued for Session 5. If this auth
+  // user already belongs to another org, surface a clean error rather than
+  // letting requireOrgUser crash later.
+  const existingMemberships = await db
+    .select({ id: users.id, orgId: users.orgId })
+    .from(users)
+    .where(and(eq(users.authUserId, authUser.id), isNull(users.deletedAt)));
+  if (existingMemberships.length > 0) {
+    return {
+      error: 'multi_org_not_yet_supported',
+      reason: 'You are already a member of another organization. Multi-org membership is coming in a future update.',
+    };
+  }
+
+  if (
+    invitation.role !== 'admin' &&
+    invitation.role !== 'member' &&
+    invitation.role !== 'owner'
+  ) {
+    return { error: 'validation_error', reason: 'invalid_role_on_invitation' };
+  }
+
+  const newUserId = uuidv7();
+  const inviteeName = (authUser.email ?? '').split('@')[0] || 'New member';
+  await db.insert(users).values({
+    id: newUserId,
+    authUserId: authUser.id,
+    orgId: invitation.orgId,
+    email: invitation.email,
+    name: inviteeName,
+    role: invitation.role,
+  });
+
+  await db
+    .update(invitations)
+    .set({ acceptedAt: new Date() })
+    .where(eq(invitations.id, invitation.id));
+
+  await logAudit({
+    orgId: invitation.orgId,
+    userId: newUserId,
+    action: 'invite_accepted',
+    resourceType: 'invitation',
+    resourceId: invitation.id,
+    metadata: { role: invitation.role },
+  });
+  await logAudit({
+    orgId: invitation.orgId,
+    userId: newUserId,
+    action: 'create',
+    resourceType: 'user',
+    resourceId: newUserId,
+    metadata: { role: invitation.role, via_invitation: invitation.id },
+  });
+
+  return { success: true };
+}
+
 // removeUserFromOrg lands in Task E.
