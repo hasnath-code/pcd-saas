@@ -60,7 +60,13 @@ export function InviteForm() {
         toast.error(`Couldn't send invitation: ${reason}`);
         return;
       }
-      toast.success(`Invitation sent to ${values.email}`);
+      if (result.deliveryWarning === 'email_send_failed') {
+        toast.warning(
+          `Invitation created for ${values.email}, but the email could not be delivered. They'll need to be sent the link another way.`,
+        );
+      } else {
+        toast.success(`Invitation sent to ${values.email}`);
+      }
       form.reset({ email: '', role: 'member' });
       router.refresh();
     });

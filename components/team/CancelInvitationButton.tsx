@@ -47,9 +47,13 @@ export function CancelInvitationButton({
         toast.error(friendly);
         return;
       }
+      // Hotfix MEDIUM 5: fire the RSC refresh BEFORE closing the dialog so
+      // the new server props start propagating while the dismiss animation
+      // runs. If the dialog is closed first, the parent re-renders with
+      // stale data and the cancelled row sticks until a second refresh.
+      router.refresh();
       toast.success(`Invitation to ${email} cancelled.`);
       setOpen(false);
-      router.refresh();
     });
   }
 

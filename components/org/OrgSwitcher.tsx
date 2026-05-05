@@ -41,12 +41,16 @@ export function OrgSwitcher({
   const router = useRouter();
 
   if (others.length === 0) {
+    // Hotfix MEDIUM 3: render unmistakably non-interactive — no border,
+    // muted-foreground text, default cursor. Previously read as a clickable
+    // pill because of the Badge's default styling adjacent to the org name.
     return (
-      <div className="flex items-center gap-2 text-sm">
-        <span className="font-medium">{current.orgName}</span>
-        <Badge variant="secondary" className="text-xs">
-          {ROLE_LABEL[current.role]}
-        </Badge>
+      <div
+        className="flex cursor-default items-center gap-2 text-sm text-muted-foreground"
+        aria-label={`Active organization: ${current.orgName}, ${ROLE_LABEL[current.role]}`}
+      >
+        <span>{current.orgName}</span>
+        <span className="text-xs opacity-70">· {ROLE_LABEL[current.role]}</span>
       </div>
     );
   }
