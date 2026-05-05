@@ -78,7 +78,12 @@ export async function cancelInvitation(input: unknown): Promise<ServerActionResu
     metadata: { reason: 'cancelled_by_admin', email: invitation.email },
   });
 
-  revalidatePath('/settings/team');
+  // Hotfix MEDIUM 5: revalidate the layout (not just the page) so the
+  // Router Cache for /settings/team is fully dropped on the client. The
+  // 'page' default invalidates only the leaf segment's cache; in practice
+  // the (org) layout's cache fragment around PendingInvitationsList stayed
+  // warm and the cancelled row didn't disappear until manual reload.
+  revalidatePath('/settings/team', 'layout');
 
   return { success: true };
 }
