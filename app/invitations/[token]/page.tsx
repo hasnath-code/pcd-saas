@@ -53,6 +53,17 @@ export default async function InvitationLandingPage({
   const { invitation, orgName, inviterName } = result;
   const inviter = inviterName ?? 'A teammate';
 
+  // Session 5: cancelled invitations get a distinct, accurate message
+  // instead of conflating with "not found".
+  if (invitation.deletedAt !== null) {
+    return (
+      <CardShell
+        title="Invitation cancelled"
+        body="This invitation was cancelled by the organization and is no longer valid. Contact your team if you believe this is a mistake."
+      />
+    );
+  }
+
   if (invitation.acceptedAt !== null) {
     return (
       <CardShell
