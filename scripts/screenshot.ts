@@ -1,9 +1,9 @@
 // One-off Playwright screenshot script. Saves a full-page PNG of any route at
-// a chosen viewport. Optional `--auth=<email>` signs the user in via
-// auth.admin.generateLink() before navigating.
+// a chosen viewport. Optional `--auth=<email>` signs the user in via the real
+// /login form (email + password) before navigating to the target route.
 //
 // USAGE:
-//   npm run screenshot -- <route> <filename> [--viewport=mobile|tablet|desktop] [--auth=<email>]
+//   npm run screenshot -- <route> <filename> [--viewport=mobile|tablet|desktop] [--auth=<email>] [--password=<pw>]
 //
 // EXAMPLES:
 //   npm run screenshot -- /login login-desktop
@@ -12,11 +12,11 @@
 //
 // PRECONDITIONS:
 //   - `npm run dev` running on port 3000 (or set SCREENSHOT_BASE_URL)
-//   - For --auth: the user must already exist in auth.users
+//   - For --auth: the user must exist in auth.users with the given password
+//     (default: SCREENSHOT_DEFAULT_PASSWORD env var, else 'testpass1234')
 //
 // OUTPUT: screenshots/<filename>.png (gitignored).
 import { chromium } from '@playwright/test';
-import { createClient } from '@supabase/supabase-js';
 import * as path from 'node:path';
 
 const VIEWPORTS = {
@@ -74,28 +74,23 @@ async function main() {
     const context = await browser.newContext({ viewport });
 
     if (authEmail) {
-      const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-      const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-      if (!supabaseUrl || !serviceRoleKey) {
-        throw new Error(
-          'screenshot --auth: NEXT_PUBLIC_SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY missing. Run with --env-file=.env.local',
-        );
-      }
-      const supabase = createClient(supabaseUrl, serviceRoleKey);
-      const { data, error } = await supabase.auth.admin.generateLink({
-        type: 'magiclink',
-        email: authEmail,
-      });
-      if (error || !data.properties?.action_link) {
-        throw new Error(
-          `screenshot: failed to generate magic link for ${authEmail}: ${error?.message ?? 'no link returned'}`,
-        );
-      }
-      const linkPage = await context.newPage();
-      await linkPage.goto(data.properties.action_link, {
-        waitUntil: 'networkidle',
-      });
-      await linkPage.close();
+      const password =
+        flags.password ?? process.env.SCREENSHOT_DEFAULT_PASSWORD ?? 'testpass1234';
+      const loginPage = await context.newPage();
+      await loginPage.goto(`${baseUrl}/login`, { waitUntil: 'networkidle' });
+      await loginPage
+        .getByRole('textbox', { name: /email/i })
+        .fill(authEmail);
+      await loginPage
+        .getByRole('textbox', { name: /password/i })
+        .fill(password);
+      await Promise.all([
+        loginPage.waitForURL((url) => !url.pathname.startsWith('/login'), {
+          timeout: 15_000,
+        }),
+        loginPage.getByRole('button', { name: /^sign in$/i }).click(),
+      ]);
+      await loginPage.close();
     }
 
     const page = await context.newPage();
