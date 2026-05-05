@@ -19,6 +19,13 @@ vi.mock('@/lib/email/send', () => ({
   sendEmail: vi.fn().mockResolvedValue({ messageId: 'mocked-msg', emailEventId: null }),
 }));
 
+vi.mock('@sentry/nextjs', () => ({
+  addBreadcrumb: vi.fn(),
+  captureException: vi.fn(),
+  setTag: vi.fn(),
+  setContext: vi.fn(),
+}));
+
 vi.mock('@/lib/ratelimit', () => ({
   rateLimit: vi.fn().mockResolvedValue({ limited: false, retryAfterSec: 0 }),
 }));
@@ -26,6 +33,8 @@ vi.mock('@/lib/ratelimit', () => ({
 import { inviteTeamMember } from '@/actions/users';
 import * as auth from '@/lib/auth/requireAuth';
 import * as ratelimit from '@/lib/ratelimit';
+import * as email from '@/lib/email/send';
+import * as Sentry from '@sentry/nextjs';
 import { AuthError } from '@/lib/auth/requireAuth';
 
 describe('inviteTeamMember', () => {
@@ -95,5 +104,35 @@ describe('inviteTeamMember', () => {
     vi.mocked(ratelimit.rateLimit).mockResolvedValueOnce({ limited: true, retryAfterSec: 42 });
     const result = await inviteTeamMember({ email: `x-${uuidv7()}@test.local`, role: 'member' });
     expect(result).toEqual({ error: 'rate_limited', reason: 'retry_after_42s' });
+  });
+
+  // Hotfix: BLOCKER 1. Resend rejects sends to non-verified addresses in
+  // testing mode (production before pcdportal.com is verified). Before the
+  // fix this threw out of the action and crashed the RSC render with a 500.
+  // After the fix, the invitation row is still inserted, Sentry captures
+  // the exception, and the action returns success with deliveryWarning.
+  test('sendEmail throws → { success: true, deliveryWarning: email_send_failed } (no 500)', async () => {
+    const email_addr = `qa-test-${uuidv7()}@example.com`;
+    vi.mocked(email.sendEmail).mockRejectedValueOnce(
+      new Error(
+        'resend.emails.send failed: You can only send testing emails to your own email address',
+      ),
+    );
+
+    const result = await inviteTeamMember({ email: email_addr, role: 'member' });
+    expect(result).toEqual({ success: true, deliveryWarning: 'email_send_failed' });
+
+    // Sentry was notified.
+    expect(vi.mocked(Sentry.captureException)).toHaveBeenCalledTimes(1);
+
+    // Invitation row still persisted (the DB insert happens BEFORE sendEmail).
+    const { data: row } = await f.service
+      .from('invitations')
+      .select('id, email, deleted_at, accepted_at')
+      .eq('email', email_addr)
+      .single();
+    expect(row).not.toBeNull();
+    expect(row?.deleted_at).toBeNull();
+    expect(row?.accepted_at).toBeNull();
   });
 });
