@@ -80,8 +80,44 @@ describe('removeUserFromOrg', () => {
     expect(result).toEqual({ error: 'not_found', reason: 'user' });
   });
 
-  test('last owner cannot be removed → { error: conflict, reason: last_owner_cannot_be_removed }', async () => {
-    // userA is the only owner of orgA. Admin (also userA) tries to remove themselves.
+  // Hotfix: BLOCKER 2. Self-removal is blocked regardless of role. The
+  // server check fires BEFORE the last-owner check; UI also hides the
+  // Remove kebab on the caller's own row (defense in depth).
+  test('self-remove → { error: not_authorized, reason: cannot_remove_self }', async () => {
+    // userA (owner) tries to remove themselves. Previously returned
+    // last_owner_cannot_be_removed; now returns cannot_remove_self because
+    // the self-check is more specific and fires first.
+    const result = await removeUserFromOrg({ userId: f.userA.userId });
+    expect(result).toEqual({ error: 'not_authorized', reason: 'cannot_remove_self' });
+  });
+
+  test('admin self-remove → { error: not_authorized, reason: cannot_remove_self }', async () => {
+    // Even admins (not just owners) can't self-remove via this action.
+    const adminId = await seedMember('admin');
+    // Switch the auth context to that admin.
+    vi.mocked(auth.requireOrgAdmin).mockResolvedValueOnce(
+      asOrgAdminContext(
+        { authUserId: f.userA.authUserId, userId: adminId, email: '', password: '' },
+        f.orgA.id,
+        'admin',
+      ),
+    );
+    const result = await removeUserFromOrg({ userId: adminId });
+    expect(result).toEqual({ error: 'not_authorized', reason: 'cannot_remove_self' });
+  });
+
+  test('non-self last-owner removal still blocked → conflict / last_owner_cannot_be_removed', async () => {
+    // Seed an admin in orgA (not the owner). Admin tries to remove the sole
+    // owner (userA). The cannot_remove_self check doesn't fire (different
+    // user); the existing last_owner_cannot_be_removed guard kicks in.
+    const adminId = await seedMember('admin');
+    vi.mocked(auth.requireOrgAdmin).mockResolvedValueOnce(
+      asOrgAdminContext(
+        { authUserId: f.userA.authUserId, userId: adminId, email: '', password: '' },
+        f.orgA.id,
+        'admin',
+      ),
+    );
     const result = await removeUserFromOrg({ userId: f.userA.userId });
     expect(result).toEqual({ error: 'conflict', reason: 'last_owner_cannot_be_removed' });
   });

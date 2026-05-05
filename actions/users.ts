@@ -296,6 +296,15 @@ export async function removeUserFromOrg(input: unknown): Promise<ServerActionRes
     return { error: 'not_found', reason: 'user' };
   }
 
+  // Hotfix: BLOCKER 2. Block self-removal regardless of role. Owners must
+  // transfer ownership first (Phase 6 will ship the transfer flow); admins
+  // and members should leave via a different flow (also Phase 6). The UI
+  // hides the Remove kebab on the caller's own row; this is the server-side
+  // backstop in case the UI is bypassed.
+  if (target.id === ctx.userId) {
+    return { error: 'not_authorized', reason: 'cannot_remove_self' };
+  }
+
   if (target.role === 'owner') {
     const otherOwners = await db
       .select({ id: users.id })
