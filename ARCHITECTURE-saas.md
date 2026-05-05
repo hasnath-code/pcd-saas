@@ -1,9 +1,9 @@
 # PCD Portal SaaS — Architecture Reference
 
-**Version:** 0.5 (Phase 1a complete — all 4 sessions shipped)
-**Last updated:** 05 May 2026
+**Version:** 0.6 (Phase 1b Session 5 shipped — workflows + projects + clients + multi-org switcher)
+**Last updated:** 06 May 2026
 **Maintainer:** Hasnath
-**Codebase status:** Phase 1a complete — webhook ingestion, real Resend wiring, rate limiting, bounce surfacing, and 19 action-shape tests live; stub cleanup ran. Phase 1b begins next session.
+**Codebase status:** Phase 1b in progress — Session 5 shipped workflows + projects + clients schema, atomic createOrganization (Drizzle transaction), multi-org cookie switcher, cancel-invitation flow, plus carryovers (sendPasswordReset rate limit, system_cleanup audit verb). 46 RLS + 50 action + 7 cloud-smoke tests green. 3 sessions remaining in Phase 1b.
 **Production URL:** https://pcd-saas.vercel.app
 **Repo:** https://github.com/hasnath-code/pcd-saas
 
@@ -1518,15 +1518,21 @@ INSERT INTO workflow_stages (workflow_id, slug, name, position, is_terminal, col
 
 ### Seed: "PCD Surveyor" template (Hasnath's org only)
 
-Mirrors the Apps Script status enum for migration parity. Seeded only on Hasnath's org via a one-time migration keyed by org identifier.
+Mirrors the Apps Script status enum for migration parity. Seeded only on Hasnath's org via the standalone idempotent script `scripts/seed-hasnath-pcd-surveyor.ts` (npm: `db:seed-pcd-surveyor`) — NOT a SQL migration. The script finds Hasnath's org via `org_settings` (key=`company.company_number`, value=`"16240187"`) and inserts a non-template `workflows` row + 8 stages.
 
-```sql
--- Pseudo-code: actual migration creates a non-template workflow on the specified org
--- Stages: Quoted → Quote Accepted → Invoice Sent → Confirmed → Survey Booked
---       → Drawing In Progress → QA → Completed
+```
+Stages (1-indexed, terminal=true on the last only):
+  Quoted          #94a3b8 (slate)
+  Quote Accepted  #06b6d4 (cyan)
+  Invoice Sent    #3b82f6 (blue)
+  Confirmed       #8b5cf6 (violet)
+  Survey Booked   #a855f7 (purple)
+  Drawing In Progress #f59e0b (amber)
+  QA              #fb923c (orange)
+  Completed       #10b981 (emerald, terminal)
 ```
 
-Migration adds this AFTER Phase 1c is complete and Hasnath's org exists in production. Not part of system templates — it's a one-off, intentionally org-specific.
+Why a script and not a migration: this template is intentionally org-specific. Seeding it as a system template would clone it for every new org by default — wrong, as it only fits Hasnath's surveyor business flow. Run the script post-signup once Hasnath's org exists with `company_number` populated in settings. Idempotent: re-running on an already-seeded org exits cleanly. Aborts loudly if multiple orgs match.
 
 ### Cloning on signup
 
@@ -2868,24 +2874,30 @@ Before moving to Phase 1b:
 
 ## 32. Phase 1b Build Checklist
 
-### Session 5: Workflows + clients + project shell
+### Session 5: Workflows + clients + project shell ✓ SHIPPED 2026-05-06
 
 **Tasks:**
-- [ ] Migration: `workflows`, `workflow_stages`, `clients`, `client_org_memberships`
-- [ ] Seed: "Simple" system template + stages
-- [ ] Backfill FKs: `audit_logs.client_id`, `invitations.project_id` (added later in this session)
-- [ ] Migration: `projects`
-- [ ] Drizzle schema: `db/schema/workflows.ts`, `db/schema/clients.ts`, `db/schema/projects.ts`
-- [ ] RLS policies for all 5 new tables
-- [ ] RLS tests for each table
-- [ ] `actions/orgs.ts`: extend `createOrg` to clone "Simple" workflow on signup
-- [ ] `actions/projects.ts`: `createProject`, `updateProject`, `softDeleteProject`, `restoreProject`
-- [ ] `actions/clients.ts`: `findOrCreateClient`, `updateClient`
-- [ ] Project list UI (org dashboard)
-- [ ] Project create form (assign workflow, enter project_number, site_address)
-- [ ] Project detail skeleton
+- [x] Migration: `workflows`, `workflow_stages`, `clients`, `client_org_memberships` (0006 + 0007)
+- [x] Seed: "Simple" system template + stages (0009)
+- [x] Backfill FKs: `audit_logs.client_id` (0007), `invitations.project_id` (0008)
+- [x] Migration: `projects` (0008)
+- [x] Drizzle schema: `db/schema/workflows.ts`, `db/schema/clients.ts`, `db/schema/projects.ts`
+- [x] RLS policies for all 5 new tables (with new SECURITY DEFINER helpers `auth_user_client_ids` + `auth_user_org_client_ids` to break clients↔memberships recursion; unstubs `auth_user_stakeholder_orgs`)
+- [x] RLS tests for each table (17 new tests, all green)
+- [x] `actions/orgs.ts`: REFACTORED to Drizzle `db.transaction(...)` so signup atomically creates org + user + workflow + 5 stages
+- [x] `actions/projects.ts`: `createProject`, `updateProject`, `softDeleteProject`, `restoreProject`
+- [x] `actions/clients.ts`: `findOrCreateClient` (idempotent, transactional), `updateClient`
+- [x] Project list UI (org dashboard)
+- [x] Project create form (assign workflow, enter project_number, site_address; optional client capture)
+- [x] Project detail skeleton (stage progression view; soft-delete for owners/admins)
 
-**Done when:** new orgs auto-clone "Simple" workflow; org users can create/edit/delete projects; RLS isolates per org.
+**Carryovers from Phase 1a (also shipped):**
+- [x] Multi-org context switcher: `switchActiveOrg` action + cookie-aware `requireOrgUser` + `OrgSwitcher` header dropdown
+- [x] Cancel pending invitation: `cancelInvitation` action + kebab UI + cancelled-invite landing state
+- [x] `sendPasswordReset` rate limit
+- [x] `'system_cleanup'` AuditAction verb + `cleanup-stub-webhook-events` script updated
+
+**Done when:** new orgs auto-clone "Simple" workflow ✓; org users can create/edit/delete projects ✓; RLS isolates per org ✓.
 
 ### Session 6: Stakeholders + visibility profiles
 
@@ -3119,7 +3131,38 @@ Items flagged during Phase 1a Session 1 (kicked off and shipped 04 May 2026, dep
 
 ---
 
-**Last reviewed:** 05 May 2026 (Phase 1a complete — v0.5; Session 4 shipped)
+### §35.5 Session 5 (kickoff → ship: 06 May 2026)
+
+| # | Item | Action | Pull-forward to |
+|---|---|---|---|
+| 1 | PCD Surveyor template ships via standalone idempotent script (`scripts/seed-hasnath-pcd-surveyor.ts`, npm: `db:seed-pcd-surveyor`), NOT a SQL migration. Per architectural decision: it's intentionally org-specific (only fits Hasnath's surveyor flow) and seeding it as a system template would clone it for every new org. The script reads `org_settings` (key=`company.company_number`, value=`"16240187"`) to find Hasnath's org. | Run `npm run db:seed-pcd-surveyor` against cloud once Hasnath's org is signed up and company_number is populated in settings. Re-running is a safe no-op. | User action post-signup |
+| 2 | `auth.users` orphan on transaction rollback. The Supabase auth signup creates the `auth.users` row before `createOrganization` is called. If the Drizzle transaction inside `createOrganization` rolls back (e.g. system template missing), no `public.users`/`organizations` rows are created — but the `auth.users` row remains, orphaned. Workaround: re-run signup; `authUserHasMembership` returns false, second attempt proceeds. | Phase 6: add a background job that purges `auth.users` rows without a `public.users` link after N hours. | Phase 6 |
+| 3 | `requireOrgUser` cookie cleanup uses try/catch around `cookies().delete()` because RSC contexts throw on cookie mutation. Stale cookie self-corrects on next mutation request — minor inefficiency, no functional impact. | Pattern documented in [lib/auth/requireAuth.ts:requireOrgUser]. If Next.js gains a `cookies().tryDelete()` API, swap. | Open-ended |
+| 4 | Project list has no client column. Stakeholders ship in Session 6 (`project_stakeholders`); the join would land empty for every Session 5 project. Page query (`db/queries/projects.ts listProjectsForOrg`) returns the shape ready to extend. | Add the column when Session 6 stakeholders are wired up. | Session 6 |
+| 5 | `projects` RLS uses `auth_user_stakeholder_projects()` stub from migration 0001 (still empty-set). | Session 6's first migration MUST `CREATE OR REPLACE` it to query `project_stakeholders`, mirroring how 0007 unstubbed `auth_user_stakeholder_orgs()`. | Session 6 |
+| 6 | Two new SECURITY DEFINER helpers shipped in 0007 to break clients↔memberships RLS recursion: `auth_user_client_ids()` and `auth_user_org_client_ids()`. Both are STABLE + SECURITY DEFINER + pinned search_path. Pattern mirrors Phase 1a's `is_org_member`. | If Session 6 adds policies that cross client/membership/stakeholder tables, prefer adding more helpers over inline subqueries. Recursion pattern documented in 0007 helper comments. | Session 6 onwards |
+| 7 | Stage transitions are NOT implemented. Project detail page renders the stage progression view with current stage highlighted, but no advance-stage UI. Placeholder text: "Stage transitions ship in a future update." | Session 8 ships `moveProjectToStage` + the UI. Replace placeholder. | Session 8 |
+| 8 | Audit verb for org switch is `permission_change`. Closest existing fit; not a new verb. | If Session 6 introduces stakeholder context switching with materially different semantics, discuss adding a new AuditAction member rather than reusing. | Session 6+ |
+| 9 | Force-rollback test for `createOrganization` was deferred (would race with parallel test files reading the same Simple system template). Atomicity is a Postgres engine guarantee; the happy-path test verifies the transaction wiring is correct. | If explicit rollback coverage is needed later, isolate via `vi.mock('@/db', ...)` — don't manipulate global DB state. | Open-ended |
+| 10 | Worktree's `supabase/.temp` was empty after auto-naming; `supabase migration list --linked` failed until we copied `.temp` from the main repo. | Future worktrees may need the same one-time `cp -r ../../../supabase/.temp ./supabase/.temp`. Consider scripting if it recurs. | Tooling note |
+
+**Full session handover:** `SESSION-5-HANDOVER.md` in repo root.
+
+**State at Session 5 close:**
+- 7 commits on the worktree branch (6 feat/test/chore + 1 handover/docs commit), to be merged into session branch then `main`
+- Local Supabase: migrations 0001..0009 applied; reference data seeded; "Simple" system template seeded
+- Cloud Supabase: migrations 0001..0009 applied; cloud anon curl on all 5 Phase 1b tables returns 401
+- RLS tests: 46/46 (29 prior + 17 new across workflows / clients / projects)
+- Action tests: 50/50 (19 prior + 31 new across orgs / projects / clients / switch-org / cancel-invitation + cancelled-invite security test in accept.test.ts)
+- Cloud-smoke: 7/7 (3 prior + 4 new for the Phase 1b anon-blocked check)
+- Build clean: `npm run build` succeeds
+- Type-check clean: `npx tsc --noEmit` succeeds
+- Drizzle parity: `drizzle-kit check` reports no drift
+- Phase 1a `createOrganization` REST refactored to Drizzle `db.transaction(...)` — atomic signup
+
+---
+
+**Last reviewed:** 06 May 2026 (Phase 1b S5 shipped — v0.6)
 
 ## End of document
 

@@ -15,6 +15,7 @@ import {
 } from '@/components/ui/table';
 import { Badge } from '@/components/ui/badge';
 import type { PendingInvitation } from '@/db/queries/invitations';
+import { CancelInvitationButton } from './CancelInvitationButton';
 
 function daysUntil(date: Date): string {
   const ms = date.getTime() - Date.now();
@@ -24,7 +25,13 @@ function daysUntil(date: Date): string {
   return `in ${days} days`;
 }
 
-export function PendingInvitationsList({ invitations }: { invitations: PendingInvitation[] }) {
+export function PendingInvitationsList({
+  invitations,
+  canManage,
+}: {
+  invitations: PendingInvitation[];
+  canManage: boolean;
+}) {
   return (
     <Card>
       <CardHeader>
@@ -43,6 +50,7 @@ export function PendingInvitationsList({ invitations }: { invitations: PendingIn
                 <TableHead>Email</TableHead>
                 <TableHead>Role</TableHead>
                 <TableHead>Expires</TableHead>
+                {canManage && <TableHead className="w-12" />}
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -64,6 +72,14 @@ export function PendingInvitationsList({ invitations }: { invitations: PendingIn
                   <TableCell className="text-muted-foreground">
                     Expires {daysUntil(inv.expiresAt)}
                   </TableCell>
+                  {canManage && (
+                    <TableCell className="text-right">
+                      <CancelInvitationButton
+                        invitationId={inv.id}
+                        email={inv.email}
+                      />
+                    </TableCell>
+                  )}
                 </TableRow>
               ))}
             </TableBody>

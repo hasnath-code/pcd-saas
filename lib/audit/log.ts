@@ -15,7 +15,10 @@ export type AuditAction =
   | 'invite_sent'
   | 'invite_accepted'
   | 'login'
-  | 'password_changed';
+  | 'password_changed'
+  // Session 5: scripts/* operations that aren't user-initiated soft-deletes
+  // (e.g. one-shot cleanup of stub rows after a system migration).
+  | 'system_cleanup';
 
 export type LogAuditOpts = {
   orgId?: string;

@@ -20,11 +20,23 @@ export default async function DashboardPage() {
   return (
     <main className="mx-auto max-w-3xl space-y-6 p-8">
       <div className="space-y-1">
-        <p className="text-sm text-muted-foreground">{myOrg.orgName}</p>
         <h1 className="text-3xl font-semibold">Welcome, {myOrg.userName}</h1>
       </div>
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+        <Link href="/dashboard/projects" className="block">
+          <Card className="h-full transition-shadow hover:shadow-md">
+            <CardHeader>
+              <CardTitle>Projects</CardTitle>
+              <CardDescription>
+                Your firm&apos;s active projects. Create, edit, and track stages.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="text-sm text-muted-foreground">
+              Open projects →
+            </CardContent>
+          </Card>
+        </Link>
         <Link href="/settings" className="block">
           <Card className="h-full transition-shadow hover:shadow-md">
             <CardHeader>

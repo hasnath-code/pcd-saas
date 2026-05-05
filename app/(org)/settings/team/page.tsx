@@ -40,7 +40,7 @@ export default async function TeamSettingsPage() {
         orgName={myOrg.orgName}
       />
 
-      <PendingInvitationsList invitations={pending} />
+      <PendingInvitationsList invitations={pending} canManage={canManage} />
 
       {canManage && <InviteForm />}
     </main>

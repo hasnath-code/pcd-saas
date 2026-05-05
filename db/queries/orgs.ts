@@ -1,5 +1,5 @@
 import 'server-only';
-import { and, eq, isNull } from 'drizzle-orm';
+import { and, asc, eq, isNull } from 'drizzle-orm';
 import { db } from '@/db';
 import { organizations, users } from '@/db/schema';
 
@@ -11,12 +11,13 @@ export type MyOrgInfo = {
   role: 'owner' | 'admin' | 'member';
 };
 
-// Returns the auth user's single org membership (joined with the org row), or
+// Returns the auth user's first org membership (joined with the org row), or
 // null if no `users` row exists yet for this auth_user_id (pre-onboarding).
 //
-// Multi-org users would return only the first row here — Phase 1a is single-org;
-// `requireOrgUser()` is the gating helper that errors on multi-org. Callers that
-// need a guaranteed-single-org context should use that instead.
+// For multi-org users, callers should prefer `requireOrgUser()` (cookie-aware
+// active-org resolution). This helper is convenient for Server Components
+// that just need ONE membership for header rendering before the cookie path
+// resolves.
 export async function getMyOrg(authUserId: string): Promise<MyOrgInfo | null> {
   const rows = await db
     .select({
@@ -43,4 +44,38 @@ export async function getMyOrg(authUserId: string): Promise<MyOrgInfo | null> {
     return null;
   }
   return row as MyOrgInfo;
+}
+
+export type OrgMembership = {
+  userId: string;
+  orgId: string;
+  orgName: string;
+  role: 'owner' | 'admin' | 'member';
+};
+
+// Returns ALL active memberships for the auth user, ordered by org name.
+// Used by the multi-org switcher dropdown.
+export async function listMyMemberships(authUserId: string): Promise<OrgMembership[]> {
+  const rows = await db
+    .select({
+      userId: users.id,
+      orgId: organizations.id,
+      orgName: organizations.name,
+      role: users.role,
+    })
+    .from(users)
+    .innerJoin(organizations, eq(users.orgId, organizations.id))
+    .where(
+      and(
+        eq(users.authUserId, authUserId),
+        isNull(users.deletedAt),
+        isNull(organizations.deletedAt),
+      ),
+    )
+    .orderBy(asc(organizations.name));
+
+  return rows.filter(
+    (r): r is OrgMembership =>
+      r.role === 'owner' || r.role === 'admin' || r.role === 'member',
+  );
 }

@@ -1,4 +1,5 @@
 import { redirect } from 'next/navigation';
+import { cookies } from 'next/headers';
 import type { User } from '@supabase/supabase-js';
 import { createClient } from '@/lib/supabase/server';
 
@@ -82,11 +83,18 @@ export interface StakeholderContext {
   clientId: string;
 }
 
-// Return the calling user's single org membership, or throw.
+// Return the calling user's active org membership, or throw.
 //
-// Phase 1a: a user with multiple `users` rows is unsupported — Session 3 will
-// implement the context switcher (set active_org via session) and update this
-// helper to read that session field. For now, multi-org is an explicit error.
+// Resolution order (Session 5 multi-org switcher):
+//   1. Single membership → use it (cookie ignored). Don't auto-set the cookie
+//      for single-membership users; only `switchActiveOrg` writes it.
+//   2. Multiple memberships + cookie matches one → use that one.
+//   3. Multiple memberships + cookie missing or invalid (e.g. user was removed
+//      from that org since last switch) → fall back to data[0] AND attempt to
+//      delete the stale cookie. cookies().delete() throws in read-only RSC
+//      context — wrapped in try/catch; stale cookie self-corrects on next
+//      mutation request.
+//   4. Zero memberships → throw not_authorized (caller redirects to onboarding).
 export async function requireOrgUser(): Promise<OrgUserContext> {
   const authUser = await requireAuth();
   const supabase = await createClient();
@@ -103,20 +111,36 @@ export async function requireOrgUser(): Promise<OrgUserContext> {
   if (!data || data.length === 0) {
     throw new AuthError('not_authorized', 'no_org_membership');
   }
+
+  let chosen = data[0];
+
   if (data.length > 1) {
-    // Session 3 will resolve via active_org_id in session. Until then, fail loud.
-    throw new AuthError('not_authorized', 'multi_org_unsupported_until_session_3');
+    const cookieStore = await cookies();
+    const activeOrgId = cookieStore.get('active_org_id')?.value;
+    if (activeOrgId) {
+      const match = data.find((row) => row.org_id === activeOrgId);
+      if (match) {
+        chosen = match;
+      } else {
+        // Stale cookie — attempt cleanup. RSC context throws on .delete();
+        // catch silently and let it self-correct on next mutation request.
+        try {
+          cookieStore.delete('active_org_id');
+        } catch {
+          // expected in read-only contexts
+        }
+      }
+    }
   }
 
-  const row = data[0];
-  const role = row.role as OrgUserContext['role'];
+  const role = chosen.role as OrgUserContext['role'];
   if (role !== 'owner' && role !== 'admin' && role !== 'member') {
-    throw new AuthError('internal_error', `requireOrgUser: unexpected role '${row.role}'`);
+    throw new AuthError('internal_error', `requireOrgUser: unexpected role '${chosen.role}'`);
   }
   return {
     authUserId: authUser.id,
-    userId: row.id,
-    orgId: row.org_id,
+    userId: chosen.id,
+    orgId: chosen.org_id,
     role,
   };
 }
