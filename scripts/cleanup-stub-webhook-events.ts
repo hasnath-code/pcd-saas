@@ -11,9 +11,9 @@ import { v7 as uuidv7 } from 'uuid';
 // no soft-delete column. email_events FK has ON DELETE CASCADE so projected
 // rows go with the stub.
 //
-// One audit row written. Note: 'soft_delete' is the closest verb in the
-// AuditAction union for what's actually a hard delete; metadata.hard_delete
-// disambiguates. A 'system_cleanup' verb is flagged as carryover §35.4.
+// One audit row written using the 'system_cleanup' AuditAction verb (added
+// in Session 5; previously this script used 'soft_delete' with metadata.
+// hard_delete=true as the closest fit).
 //
 // Run against BOTH environments — local and cloud — to keep the bisect
 // surface clean. Override env vars to switch targets:
@@ -59,7 +59,7 @@ async function main() {
     id: uuidv7(),
     org_id: null,
     user_id: null,
-    action: 'soft_delete',
+    action: 'system_cleanup',
     resource_type: 'webhook_events',
     resource_id: null,
     metadata: {
