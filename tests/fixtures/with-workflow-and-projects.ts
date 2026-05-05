@@ -80,12 +80,16 @@ export async function createWorkflowProjectFixture(): Promise<WorkflowProjectFix
   const orgBWorkflow = await cloneWorkflowFor(f.orgB.id);
 
   // 3. Create one client + membership per org.
+  // Email uses a Math.random suffix (not a uuidv7 slice) because uuidv7's first
+  // 8 hex chars are the millisecond timestamp prefix — two parallel forks at
+  // the same ms produce identical slices and collide on clients.email UNIQUE.
   async function makeClient(orgId: string, label: string) {
     const clientId = uuidv7();
     const membershipId = uuidv7();
+    const rnd = Math.random().toString(36).slice(2, 10);
     const { error: clientErr } = await f.service.from('clients').insert({
       id: clientId,
-      email: `client-${label}-${ts}-${uuidv7().slice(0, 8)}@test.local`,
+      email: `client-${label}-${ts}-${rnd}@test.local`,
       name: `Client ${label}`,
     });
     if (clientErr) throw new Error(`fixture: client insert: ${clientErr.message}`);
