@@ -18,7 +18,7 @@ The PCD codebase now spans two stacks. Both are maintained — read the referenc
 | Stack | Reference | When to read |
 |---|---|---|
 | Apps Script V2 portal (live, single tenant) | `references/ARCHITECTURE.md` | Any work on Code.gs, Index.html, the live portal — bug fixes, V2 features, status changes |
-| PCD SaaS (Next.js 15 + Supabase, Phase 1a in progress) | `references/ARCHITECTURE-saas.md` + latest `SESSION-N-HANDOVER.md` | Any work on the SaaS rebuild — schema, RLS, server actions, auth, deploys |
+| PCD SaaS (Next.js 15 + Supabase, Phase 1b in progress) | `references/ARCHITECTURE-saas.md` + latest `SESSION-N-HANDOVER.md` | Any work on the SaaS rebuild — schema, RLS, server actions, auth, deploys |
 
 If both stacks are touched in a single conversation (e.g. data migration), read both.
 
@@ -58,33 +58,25 @@ Match your response to what the user is asking for:
 **Trigger:** "give me the prompt", "what should I tell Claude Code?"
 
 Structure every prompt as:
-
-```
-**Task: [Title]**
-
+Task: [Title]
 [2-3 sentence context]
-
-**How it should work:**
+How it should work:
 [User-perspective description]
-
-**Backend changes (Code.gs):**
+Backend changes (Code.gs):
 [Specific functions, line references, exact modifications]
-
-**Frontend changes (Index.html):**
+Frontend changes (Index.html):
 [Specific sections, modal patterns, JS handlers]
+Critical rules:
 
-**Critical rules:**
-- Do NOT rename or modify any existing function, action, status value, column reference, or JSON field name.
-- Do NOT add new spreadsheet columns.
-- Do NOT touch auth/session, Trello sync, recycle bin, or token validation code (unless the feature specifically requires it).
-- When modifying scopeData (column O), use read-modify-write.
-- [Feature-specific rules]
+Do NOT rename or modify any existing function, action, status value, column reference, or JSON field name.
+Do NOT add new spreadsheet columns.
+Do NOT touch auth/session, Trello sync, recycle bin, or token validation code (unless the feature specifically requires it).
+When modifying scopeData (column O), use read-modify-write.
+[Feature-specific rules]
 
-**Verification plan:**
+Verification plan:
 [Numbered test steps]
-
 Show me your plan before coding.
-```
 
 ### Mode 4: Bug Diagnosis
 **Trigger:** User describes unexpected behaviour or pastes screenshots
@@ -154,6 +146,10 @@ When drafting features, reference these existing patterns rather than reinventin
 | Email threading | `sendOrReplyClientEmail()` | Every client-facing email |
 | Read-modify-write on scopeData | Read JSON → merge fields → write full object | Any scopeData modification |
 | FIFO-capped log | Push + slice if over cap | Any audit trail or history |
+| **Drizzle transactions for atomic multi-table writes** (SaaS) | `actions/orgs.ts createOrganization`, `actions/clients.ts findOrCreateClient` | Any new server action that writes to 2+ dependent tables and must succeed-or-rollback together. Replaces `supabase.from()` REST calls for new actions. |
+| **SECURITY DEFINER helpers to break RLS recursion** (SaaS) | Migration 0001 (`is_org_member`, `is_org_admin`, `auth_user_orgs`), 0007 (`auth_user_client_ids`, `auth_user_org_client_ids`) | Any new table whose RLS policy references another table whose RLS policy references back. Pattern fires on join-table designs. |
+| **Browser QA verification loop** (SaaS UI sessions) | Session 5b hotfix process; Mode 7 sign-off | Any session that ships UI changes — add Claude in Chrome verification per fix, not just unit tests. Captures RSC re-render bugs, hydration mismatches, dialog/router races, visual ambiguity. |
+| **`revalidatePath` layout vs page scope** (SaaS) | `actions/invitations.ts cancelInvitation` (uses `'layout'`) | Use `'layout'` scope when the cached fragment lives in a layout above the mutating page; use `'page'` when local. Default `'page'` silently misses Router Cache fragments held in `(org)/layout.tsx`. |
 
 ---
 
@@ -173,7 +169,7 @@ Enforce on every response. If a plan violates any, flag immediately.
 10. **Commit before each change.** Always remind user to git commit first.
 11. **Never ask about existing functionality as if it's unknown.** Before asking any clarifying question, check ARCHITECTURE.md. If the answer is documented there, reference it and ask the forward-looking question instead. The user should never have to re-explain what the current system already does.
 
-**Migration-phase rules (ACTIVE — Phase 1a in progress, multi-stack mode on):**
+**Migration-phase rules (ACTIVE — Phase 1b in progress, multi-stack mode on):**
 
 12. **Strangler fig only.** New features build in Next.js; Apps Script stays as Workspace adapter.
 13. **Dual-write during transition.** Both Sheets and Postgres receive writes until cutover confirmed.
@@ -186,6 +182,14 @@ Enforce on every response. If a plan violates any, flag immediately.
 17. **Bump skill changelog when rules change.** This skill grows with the project (see Section 8.5). Any edit to Sections 1–7 or Section 9 — especially adding/removing rules, modes, or stack references — is a changelog event. Don't ship rule changes without a changelog entry.
 18. **For RLS-related, GRANT-related, or role-permission changes: verify on cloud Supabase before declaring session shipped.** Local Supabase has more permissive defaults than cloud. Two known divergences (Session 2): cloud auto-enables RLS on new public tables; cloud doesn't auto-grant CRUD on new public tables to service_role. Pattern: anything that "just works" locally without explicit configuration may fail on cloud. Mitigation: cloud smoke tests for any RLS/permission-affecting change before close.
 
+19. **Atomic multi-table writes use Drizzle transactions, not REST.** When a SaaS server action inserts into 2+ tables that depend on each other (org+user+workflow, client+membership, project+stage), wrap the inserts in `db.transaction(async (tx) => { ... })`. Drizzle's pooler client (`@/db`) uses the postgres role, bypasses RLS, and supports transactions natively — equivalent to service-role for our purposes. Don't reach for `createServiceClient` / `supabase.from()` for new actions unless you specifically need REST-shape access (e.g. `auth.admin` operations Drizzle can't do). Reason: Phase 1a `createOrganization` was REST-based; Session 5 refactored it to Drizzle transactions to fix split-brain risk on workflow clone. The pattern is now standard.
+
+20. **RLS recursion: prevent at design time with SECURITY DEFINER helpers.** When adding a new table whose RLS policy references another table whose RLS policy references back (typical with join tables: `clients` ↔ `client_org_memberships`, future: `project_stakeholders` ↔ `clients` ↔ `projects`), expect Postgres error 42P17 (infinite recursion). Resolve by adding SECURITY DEFINER helper functions, NOT inline subqueries. Mirror migration 0001 (`is_org_member`, `is_org_admin`) and 0007 (`auth_user_client_ids`, `auth_user_org_client_ids`). Add the helper proactively in the same migration as the table — discovering it at test time is wasted iteration. Document the helper in the migration's comment block so future additions know it exists.
+
+21. **Browser QA verification before SaaS session sign-off, not just unit tests.** Sessions that modify UI (layouts, forms, dialogs, dropdowns, headers, kebabs, toasts) include a Claude in Chrome verification step before declaring done. Unit tests pass while users still hit RSC re-render crashes, hydration mismatches, dialog/router races, and visual ambiguity. Session 5 shipped with 51→103 passing tests; an external QA pass found 5 bugs that all passed automated tests. The fix loop: investigate (Sentry first if production error) → apply fix → run unit tests → reproduce in browser → screenshot the fixed behavior → commit with screenshot reference. For sessions without UI changes (pure schema/migration sessions), browser QA can be omitted — but unit-test-only sign-off is forbidden the moment a `.tsx` file changes.
+
+22. **Worktree symlink ritual extended for cloud Supabase work.** When a worktree spawns, in addition to symlinking `.env.local` and `.env.test` from the main repo, copy `supabase/.temp/` if cloud Supabase pushes will be needed in this session. Worktrees do NOT inherit `supabase/.temp` automatically — `supabase migration list --linked` will fail with "Cannot find project ref" until the directory exists in the worktree. One-shot copy: `cp -r ../../../supabase/.temp ./supabase/.temp` from the worktree root. Also: `npm` is not on PATH in non-interactive bash sessions on this machine; commands need `export PATH="$HOME/.nvm/versions/node/v20.20.2/bin:$PATH"` prefix.
+
 ---
 
 ## 5. Context Window Management
@@ -197,6 +201,8 @@ Remind the user when appropriate:
 - **Commit before starting** — `git add -A && git commit -m "before <feature>"`
 - **Test before stacking** — verify one feature works before starting the next
 - **Session handover** — at the end of a big session, ask Claude Code to write a handover prompt for the next session
+- **Browser QA before sign-off** (SaaS UI sessions) — Rule 21. If `.tsx` files changed, Claude in Chrome verification is required before declaring shipped. Reuse production URL for verification when possible (preview deploys live on different subdomains and don't share Supabase Auth cookies).
+- **Reuse session context for hotfixes** — if a QA pass surfaces bugs in a session that has 30%+ context remaining, fix in the same session rather than spawning fresh. The same Claude instance already has the codebase loaded and knows why decisions were made.
 
 ---
 
@@ -261,6 +267,8 @@ The skill is potentially outdated when any of these occur:
 | **Stack change** | User starts working in Next.js, Supabase, or any non-Apps-Script stack | Fork the architecture reference into `ARCHITECTURE-appscript.md` and `ARCHITECTURE-nextjs.md`. Update Section 3 with new-stack patterns. |
 | **User says "the skill is missing X"** | Direct feedback | Immediately draft the update |
 | **Question about documented functionality** | Claude asks the user to explain something ARCHITECTURE.md already covers | Rule 11 violation — self-correct, reference the architecture, and rephrase the question as forward-looking |
+| **External QA finds bugs that passed unit tests** | A walkthrough by someone other than Claude Code surfaces issues automated tests didn't catch | Rule 21 reinforced — confirm browser QA loop is in place for the next session. If Claude Code shipped a session that called itself done before QA, that's a process gap. Add the browser QA gate to the next kickoff prompt. |
+| **RLS recursion error 42P17 hits in tests** | A new migration's RLS policies fail with "infinite recursion detected in policy for relation X" | Rule 20 fires retroactively. Add SECURITY DEFINER helpers to break the cycle. Document the new helpers in the migration comment block. Pattern repeats every time a join-table relationship is added. |
 
 ### 8.2 Self-Analysis Protocol
 
@@ -327,7 +335,7 @@ Track skill evolution so the user knows what state the skill is in:
 
 ---
 
-## 9. Multi-Stack Architecture (ACTIVE — Phase 1a in progress)
+## 9. Multi-Stack Architecture (ACTIVE — Phase 1b in progress)
 
 The PCD codebase now spans two stacks. Both are maintained until Phase 4 retires Apps Script to a Workspace adapter.
 
@@ -341,17 +349,18 @@ The PCD codebase now spans two stacks. Both are maintained until Phase 4 retires
 
 ### Stack 2 — PCD SaaS (Next.js 15 + Supabase)
 
-- **Status:** Phase 1a in progress; Session 1 shipped 04 May 2026
+- **Status:** Phase 1a closed (Sessions 1–4 shipped); Phase 1b in progress (Session 5 + hotfixes shipped 06 May 2026); Sessions 6–8 remaining
 - **Production URL:** https://pcd-saas.vercel.app
 - **Repo:** https://github.com/hasnath-code/pcd-saas
 - **Cloud Supabase project:** `gcwdasdujivliplthpvv` (eu-west-2 London)
-- **Reference (canonical):** `references/ARCHITECTURE-saas.md` — schema, RLS, conventions, build checklists
+- **Reference (canonical):** `references/ARCHITECTURE-saas.md` v0.6+ — schema through Phase 1b §11, RLS, conventions, build checklists
 - **Reference (latest realised state):** `SESSION-N-HANDOVER.md` in repo root — what shipped + carryover items
 - **Reference (per-session deltas):** `ARCHITECTURE-saas.md §35.N` Session N Carryover subsections
 - **Rules that apply:**
   - `ARCHITECTURE-saas.md §4` (codebase-level: RLS-first, schema-is-forever, no client writes, etc.)
-  - This skill's §4 #15–17 (cross-stack workflow)
+  - This skill's §4 #15–22 (cross-stack workflow + Drizzle transactions + RLS recursion + browser QA + worktree ritual)
 - **Modes covered:** 1–5 (planning/review/prompt/diagnosis/architecture) and **7** (session handover at session boundaries)
+- **Verification stack:** unit tests (Vitest, 3 suites: rls / actions / cloud-smoke) + Claude in Chrome browser QA per Rule 21 + Sentry production error monitoring + Vercel deploy probes
 
 ### Where to find inherited state
 
@@ -378,18 +387,14 @@ Apps Script remains live until Phase 4 cuts it back to a Workspace adapter only.
 - Data migration handled per `MIGRATION-MAP.md` (separate doc, written when Phase 2 begins)
 
 ### Repo-layout convention
-
-```
 PCD SaaS repo (hasnath-code/pcd-saas):
 ├── ARCHITECTURE-saas.md      ← canonical SaaS spec (this is the source of truth for Stack 2)
 ├── SESSION-N-HANDOVER.md     ← one per shipped session
 ├── SKILL.md                  ← this skill (mirror — canonical lives in skill bundle)
 ├── ... (Next.js app)
-
 Apps Script repo (separate):
 ├── ARCHITECTURE.md           ← canonical Apps Script spec (source of truth for Stack 1)
 ├── ... (Code.gs, Index.html, etc.)
-```
 
 ---
 
@@ -399,3 +404,13 @@ Apps Script repo (separate):
 - v2.1 (03 May 2026): Added Rule 11 — "Never ask about existing functionality as if it's unknown." Triggered by gap signal: Claude asked the user to re-explain quote acceptance flow that was fully documented in ARCHITECTURE.md. Added Rule 11 violation detection to Section 8.1 gap triggers. Renumbered migration rules to 12-14.
 - v3.0 (05 May 2026): **Multi-stack mode activated.** Section 9 promoted from placeholder to active reference (Apps Script + SaaS coexist). Section 1 now lists both `ARCHITECTURE.md` and `ARCHITECTURE-saas.md` with read-when guidance. Cross-stack workflow rules added (§4 #15–17): read latest SESSION handover at start of any SaaS session; update `ARCHITECTURE-saas.md` after every shipped session; bump this changelog when rules change. Mode 7 (SaaS Session Handover) added: codifies the protocol for writing `SESSION-N-HANDOVER.md` and updating `ARCHITECTURE-saas.md` §35.N. Migration-phase rule label changed from "activate when SaaS migration begins" to "ACTIVE — Phase 1a in progress, multi-stack mode on". Triggered by: PCD SaaS Phase 1a Session 1 shipped to production (https://pcd-saas.vercel.app), making the multi-stack placeholder false.
 - v3.1 (05 May 2026): Cloud-vs-local divergence rule added (§4 #18) — RLS/GRANT/permission changes must verify on cloud before session close. Migration count growth note added (§2 Mode 1 step 7) — plan count is a lower bound, fix forward with new migrations. Lessons from Phase 1a Session 2 (planned 1 migration, shipped 3 after cloud surfaced two local-vs-cloud platform divergences).
+- v3.2 (06 May 2026): **Phase 1b lessons baked in.** Four new rules from Session 5 + hotfix QA pass:
+  - Rule 19 (Drizzle transactions for atomic multi-table writes) — Session 5 refactored `createOrganization` from REST to `db.transaction(...)` after the original plan exposed split-brain risk on workflow clone failures.
+  - Rule 20 (SECURITY DEFINER helpers prevent RLS recursion) — Migration 0007 hit Postgres error 42P17 between `clients` ↔ `client_org_memberships`; resolved with `auth_user_client_ids` and `auth_user_org_client_ids` mirroring the Phase 1a pattern. Pattern will recur in Session 6 with `project_stakeholders`.
+  - Rule 21 (Browser QA verification before SaaS UI session sign-off) — External QA pass found 5 bugs (1 BLOCKER server-components crash, 1 BLOCKER owner self-removal footgun, 3 MEDIUM polish issues) that all passed automated tests. Claude in Chrome loop established as standard verification gate for any session touching `.tsx`.
+  - Rule 22 (Worktree symlink ritual extended) — Session 5 worktree's `supabase/.temp/` was empty, blocking cloud migration push; one-shot copy from main repo unblocked it. Plus `npm` PATH issue in non-interactive bash sessions documented.
+  - Section 3 gains 4 new SaaS patterns (Drizzle transactions, SECURITY DEFINER recursion fix, browser QA loop, `revalidatePath` layout-vs-page scope).
+  - Section 5 adds browser QA reminder + hotfix-in-same-session reuse note.
+  - Section 8.1 adds 2 new gap triggers (external QA finds unit-test-passing bugs; RLS recursion error 42P17).
+  - Section 9 Stack 2 status updated to Phase 1b in progress; verification stack now explicit (Vitest + Claude in Chrome + Sentry + Vercel probes).
+  - Triggered by: PCD SaaS Phase 1b Session 5 shipped (https://pcd-saas.vercel.app at commit ec6bb2c, 103 passing tests, all 5 hotfixes verified in production via Claude in Chrome QA replay).
