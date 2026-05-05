@@ -14,6 +14,7 @@ import { invitations, organizations, users } from '@/db/schema';
 import { logAudit } from '@/lib/audit/log';
 import { sendEmail } from '@/lib/email/send';
 import { teamInvitationEmail } from '@/lib/email/templates/team-invitation';
+import { rateLimit } from '@/lib/ratelimit';
 import { env } from '@/env';
 
 export type ServerActionResult =
@@ -33,6 +34,9 @@ export async function inviteTeamMember(input: unknown): Promise<ServerActionResu
     if (e instanceof AuthError) return { error: e.code, reason: e.message };
     throw e;
   }
+
+  const { limited, retryAfterSec } = await rateLimit('invite', `org:${ctx.orgId}`);
+  if (limited) return { error: 'rate_limited', reason: `retry_after_${retryAfterSec}s` };
 
   const parsed = InviteInput.safeParse(input);
   if (!parsed.success) {
@@ -112,7 +116,7 @@ export async function inviteTeamMember(input: unknown): Promise<ServerActionResu
     role,
     acceptUrl,
   });
-  await sendEmail({ to: email, subject, html, orgId: ctx.orgId });
+  await sendEmail({ to: email, subject, html, orgId: ctx.orgId, template: 'team_invitation' });
 
   await logAudit({
     orgId: ctx.orgId,

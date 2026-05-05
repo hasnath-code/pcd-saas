@@ -89,4 +89,17 @@ if (process.env.CLOUD_SMOKE === '1') {
   if (!apiUrl.includes('127.0.0.1') && !apiUrl.includes('localhost')) {
     throw new Error(`tests/setup: refusing non-local Supabase URL: ${apiUrl}`);
   }
+
+  // Action tests (tests/actions/*.test.ts) import @/db, which is constructed
+  // from DATABASE_URL at module-load via env.ts. Without an override the test
+  // would silently target cloud postgres. Pin both pooler and direct URLs to
+  // the local stack. RLS tests don't import @/db so they're unaffected.
+  const dbUrl = local['DB_URL'];
+  if (dbUrl) {
+    if (!dbUrl.includes('127.0.0.1') && !dbUrl.includes('localhost')) {
+      throw new Error(`tests/setup: refusing non-local DB URL: ${dbUrl}`);
+    }
+    process.env.DATABASE_URL = dbUrl;
+    process.env.DIRECT_URL = dbUrl;
+  }
 }

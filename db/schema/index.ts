@@ -9,3 +9,4 @@ export * from './invitations';
 export * from './audit-logs';
 export * from './webhook-events';
 export * from './email-events';
+export * from './outbound-emails';

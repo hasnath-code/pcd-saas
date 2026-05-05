@@ -22,6 +22,20 @@
       "when": 1777939200000,
       "tag": "0003_grant_service_role_on_public_tables",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1778025600000,
+      "tag": "0004_revoke_anon_grants_on_system_tables",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1778029200000,
+      "tag": "0005_create_outbound_emails",
+      "breakpoints": true
     }
   ]
 }
