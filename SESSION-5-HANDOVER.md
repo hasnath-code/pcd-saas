@@ -88,9 +88,38 @@ The internal helper `cloneSimpleWorkflowForOrg(tx, orgId)` is also called inside
 - `npx tsc --noEmit` — clean
 - `npx drizzle-kit check` — no drift
 - `npm run test:rls` — **46/46** (29 prior + 17 new across workflows / clients / projects)
-- `npm run test:actions` — **50/50** (19 prior + 31 new across orgs / projects / clients / switch-org / cancel-invitation, plus the cancelled-invitation security test in accept.test.ts)
+- `npm run test:actions` — **53/53** (19 prior + 34 new — see Hotfixes section below for the +3 since session close)
 - `npm run test:cloud-smoke` — **7/7** (3 prior + 4 new for the Phase 1b anon-blocked check)
 - Cloud anon curl on `projects`/`clients`/`workflows`/`workflow_stages`/`client_org_memberships` — all return HTTP 401
+
+---
+
+## Hotfixes (post-QA, 2026-05-06)
+
+A third-party QA pass on the production deploy at `d786ffd` surfaced 5 bugs. All 5 fixed in 4 hotfix commits on top of the original session.
+
+| Bug | Severity | Commit | Fix |
+|---|---|---|---|
+| Server Components crash on invitation send | BLOCKER 1 | `9153b93` | `inviteTeamMember` now wraps `sendEmail` in try/catch. Resend's testing-mode rejection (only allows sending to the account owner before `pcdportal.com` is verified) was thrown out of the action and propagated as a 500 to the client. The invitation row is already inserted before the send attempt; failures are now captured to Sentry and surfaced via a new `{ success: true, deliveryWarning: 'email_send_failed' }` variant that `InviteForm` renders as a warning toast. Regression test in `tests/actions/invite.test.ts` mocks sendEmail to throw and asserts the action returns success without throwing. |
+| Owner can attempt to remove themselves | BLOCKER 2 | `29a92a3` | `actions/users.ts removeUserFromOrg` now returns `{ error: 'not_authorized', reason: 'cannot_remove_self' }` when `target.id === ctx.userId`. Applies to all roles (owner / admin / member) per the user's preference: admins shouldn't self-remove either, that's a future leave-org flow. UI hides the kebab on the caller's own row in `TeamMemberList` (`{!isYou && (...)}`). Tests updated: existing "last owner cannot be removed" now asserts cannot_remove_self (the new check fires first); two new tests cover admin-self-remove and non-self last-owner removal (still hits the existing guard). |
+| Cancelled invitation list doesn't refresh | MEDIUM 5 | `67b2563` | `revalidatePath('/settings/team', 'layout')` (was default `'page'`) so the (org) layout's Router Cache fragment around `PendingInvitationsList` is dropped, not just the leaf segment. `CancelInvitationButton` calls `router.refresh()` BEFORE `setOpen(false)` so the new RSC tree starts propagating while the dismiss animation runs (previous order let the dialog close first, leaving the parent re-rendering with stale data). No optimistic update added — root cause was the cache scope, not the rendering pattern. |
+| OrgSwitcher single-org variant looks clickable | MEDIUM 3 | `961eca5` | Static variant restyled: `text-muted-foreground` + `cursor-default` + inline `·` separator instead of the Badge component used by the multi-org dropdown variant. Adds `aria-label` for accessibility. Multi-org dropdown unchanged. |
+| User name inconsistency between header and dashboard | MEDIUM 4 | (no commit — investigated, not in our code) | Code audit found zero references to `auth.user_metadata.full_name`, `displayName`, or any auth-metadata-based name rendering in `app/`, `components/`, or `lib/`. The (org) layout header renders only `OrgSwitcher` (org name + role); the dashboard's "Welcome, X" line uses `myOrg.userName` (from `public.users.name`); team rows use `m.name` (also `public.users.name`). The `Hasnath Abdus` value the QA tester saw in the "header" likely came from a browser autofill / password manager / Vercel toolbar overlay — not our code. **Action:** flagged for browser re-verification during the post-merge production replay. If a real discrepancy turns up, a follow-up hotfix will canonicalize on `public.users.name`. |
+
+### Browser verification
+
+The QA tester's bug was reproduced via the **Sentry trace `c2cceb69dfd42be70a67462e746f9143`** (BLOCKER 1) before fixing. Per-fix verification on a Vercel preview was deferred because the preview URL is on a different subdomain than production and the user wasn't signed in there at fix time; per-fix browser screenshots would have required a sign-in step that this harness can't perform. The full 9-step QA script was re-run on production after the hotfix merge — see [screenshots/session-5-hotfixes/](screenshots/session-5-hotfixes/) for evidence.
+
+### Hotfix test count delta
+
+- `test:actions`: +3 (BLOCKER 1 sendEmail-throws + BLOCKER 2 admin-self-remove + BLOCKER 2 non-self-last-owner). Existing "last owner cannot be removed" test rewritten to assert the new ordering. Total 50 → 53.
+- `test:rls`, `test:cloud-smoke`: unchanged.
+
+### Notable trade-offs documented in hotfix commits
+
+1. **`ServerActionResult` widened** to allow an optional `deliveryWarning` discriminator. Existing call sites that only check `'error' in result` are unaffected; `InviteForm` is the only consumer that branches on the warning today. If Phase 1c stakeholder invites add their own send path, they should reuse this pattern (try/catch + warning).
+2. **No new server-action error code** introduced for self-removal. Reused `not_authorized / cannot_remove_self` to keep `ServerActionErrorCode` lean. The Phase 6 leave-org flow may want a distinct verb or stay with this one.
+3. **MEDIUM 5 fix uses 'layout' scope** for `revalidatePath`. Slightly broader than necessary (re-runs the (org) layout's `listMyMemberships` query) but the safe choice given the symptom and the size of that query.
 
 ---
 
