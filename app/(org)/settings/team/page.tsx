@@ -33,7 +33,12 @@ export default async function TeamSettingsPage() {
         </p>
       </div>
 
-      <TeamMemberList members={members} currentUserId={myOrg.userId} />
+      <TeamMemberList
+        members={members}
+        currentUserId={myOrg.userId}
+        currentUserRole={myOrg.role}
+        orgName={myOrg.orgName}
+      />
 
       <PendingInvitationsList invitations={pending} />
 

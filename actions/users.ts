@@ -228,4 +228,73 @@ export async function acceptInvitation(input: unknown): Promise<ServerActionResu
   return { success: true };
 }
 
-// removeUserFromOrg lands in Task E.
+const RemoveUserInput = z.object({
+  userId: z.string().uuid(),
+});
+
+export async function removeUserFromOrg(input: unknown): Promise<ServerActionResult> {
+  let ctx: Awaited<ReturnType<typeof requireOrgAdmin>>;
+  try {
+    ctx = await requireOrgAdmin();
+  } catch (e) {
+    if (e instanceof AuthError) return { error: e.code, reason: e.message };
+    throw e;
+  }
+
+  const parsed = RemoveUserInput.safeParse(input);
+  if (!parsed.success) {
+    return { error: 'validation_error', reason: parsed.error.issues[0]?.message ?? 'Invalid input' };
+  }
+  const { userId } = parsed.data;
+
+  const targetRows = await db
+    .select({ id: users.id, orgId: users.orgId, role: users.role })
+    .from(users)
+    .where(and(eq(users.id, userId), isNull(users.deletedAt)))
+    .limit(1);
+  const target = targetRows[0];
+  if (!target) {
+    return { error: 'not_found', reason: 'user' };
+  }
+  if (target.orgId !== ctx.orgId) {
+    // Treat cross-org targets as not_found rather than not_authorized to
+    // avoid leaking that the user exists in a different org.
+    return { error: 'not_found', reason: 'user' };
+  }
+
+  if (target.role === 'owner') {
+    const otherOwners = await db
+      .select({ id: users.id })
+      .from(users)
+      .where(
+        and(
+          eq(users.orgId, ctx.orgId),
+          eq(users.role, 'owner'),
+          isNull(users.deletedAt),
+        ),
+      );
+    const remainingOwners = otherOwners.filter((u) => u.id !== target.id);
+    if (remainingOwners.length === 0) {
+      return {
+        error: 'conflict',
+        reason: 'last_owner_cannot_be_removed',
+      };
+    }
+  }
+
+  await db
+    .update(users)
+    .set({ deletedAt: new Date() })
+    .where(eq(users.id, target.id));
+
+  await logAudit({
+    orgId: ctx.orgId,
+    userId: ctx.userId,
+    action: 'soft_delete',
+    resourceType: 'user',
+    resourceId: target.id,
+    metadata: { removed_role: target.role },
+  });
+
+  return { success: true };
+}
