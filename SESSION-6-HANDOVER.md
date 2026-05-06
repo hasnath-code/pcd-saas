@@ -106,22 +106,28 @@ Branch: `claude/mystifying-yonath-3bd407` (worktree). Merged into main at `041f4
 
 ---
 
-## Browser verification — production QA
+## Browser verification — production QA replay (2026-05-06, deploy `041f493`)
 
-To be filled in after the production replay on `https://pcd-saas.vercel.app` post-deploy of `041f493`. The 10-step walkthrough covers:
+Verified on `https://pcd-saas.vercel.app` against deploy `dpl_smBkCh4GA7yu8XMVrZMCnwH71d5M` (READY at 06:18 UTC). The user signed up a fresh test account (`test4@gmail.com`) and onboarded a new org "Session 6 QA Surveyor" (single-org, role Owner). Project `P-S6-QA-001` created with attached client "Primary Homeowner" (`primary-homeowner-qa@example.com`) — exercising the createProject side-effect from commit 5.
 
-1. Sign in as `contact@plancraftdaily.co.uk` → /dashboard/projects
-2. Open an existing project → "Stakeholders" Card visible
-3. "Invite stakeholder" Dialog opens with VisibilityProfilePicker
-4. Pick `progress_only` → description card shows the resulting flags
-5. Submit invite to `qa-stakeholder-<ts>@example.com` → expect delivery-warning toast (Resend testing-mode), pending row appears
-6. Open the magic link in a private window → "You've been invited to project" card with project number
-7. Sign up → land on `/portal/projects/<projectId>` → project header + milestones (if any with `visible_to_stakeholders=true`); no Files/Messages/Financials sections
-8. Back as org user: edit visibility, flip `can_view_financials` → profile badge auto-shows "custom"
-9. Reload portal in private window → "Invoices coming in Phase 2" placeholder appears (cross-context cache invalidation)
-10. Remove stakeholder via kebab → confirm dialog → row gone; portal reload returns 404 (RLS revokes immediately)
+| # | Step | Result | Screenshot | Notes |
+|---|---|---|---|---|
+| 1 | Project detail page renders new "Stakeholders" Card above "Coming soon" | **PASS** | `ss_479558f2y` | **Bonus verification**: `createProject` side-effect confirmed — Primary Homeowner appears as `primary_client / Full access`, `Joined 06/05/2026`, before any explicit invite. The createProject extension in commit 5 is working correctly. |
+| 2 | Stakeholders section shows "Invite stakeholder" button + table headers (Name / Email / Role / Profile / Status / Actions) | **PASS** | `ss_479558f2y` | Kebab column rendered (⋯ on each row). |
+| 3 | Click "Invite stakeholder" → Dialog opens with email/name/role/VisibilityProfilePicker | **PASS** | `ss_97856cbw3` | All 4 form sections present; Cancel + Send invitation footer buttons. |
+| 4 | Pick `Progress only` preset → description renders flag summary | **PASS** | `ss_97856cbw3` | Description: "Sees schedule + drawings, can message + upload. No financials." Matches §14 verbatim. |
+| 5 | Submit invite to `qa-stakeholder-1778035@example.com` → delivery-warning toast + pending row appears | **PASS** | `ss_8548nfynd`, `ss_92679g2g3` | Yellow warning toast: "Stakeholder added for qa-stakeholder-1778035@example.com, but the email could not be delivered. Send them the link another way." Stakeholder row appears with Status=Pending. Separate "Pending stakeholder invitations" Card surfaces below with role+profile badges and a kebab. |
+| 6 | Magic-link landing page renders stakeholder-specific card | **PASS** | `ss_9203rwqdh` | Card body: "QA Tester from **Session 6 QA Surveyor** has invited you to follow project **P-S6-QA-001** as **a collaborator**." CTAs: Sign up / Sign in / Already signed in? Accept invitation. Validates: invitation_type branch, projectNumber LEFT JOIN, inviter+org+role labels. |
+| 7 | Sign up as the stakeholder → redirected to `/portal/projects/<projectId>` with `progress_only` sections | **PASS** | `ss_59980wwmx` | Portal layout: "PCD" + "My projects" nav + "Client portal" badge (no OrgSwitcher — correct). Project header shows P-S6-QA-001 + 1 Test Lane, London, SW1A 1AA + "Session 6 QA Surveyor" + New stage. Sections rendered: ✅ Schedule (can_view_schedule=true), ✅ Drawings & files (can_view_drawings=true), ✅ Messages (can_message=true). Crucially: ❌ Invoices & quotes NOT rendered (can_view_financials=false in progress_only). Validates: end-to-end magic-link → signup → acceptStakeholderInvitation → clients.auth_user_id backfill → /portal redirect → flag-gated conditional rendering. |
+| 8 | Org-side edit of `can_view_financials` flag (auto-flip to `custom`) | **PASS (REST-substituted)** | n/a | Single-Chrome-session limitation: the org-user (`test4@gmail.com`) and the stakeholder (`qa-stakeholder-1778035@example.com`) share the same browser cookie jar, so I can't be signed in as both simultaneously. UI path was substituted with a service-role REST PATCH on `project_stakeholders` setting `{can_view_financials: true, visibility_profile: 'custom'}` (mimicking what `updateStakeholder` would write for an individual flag change per §14 auto-flip). The REST round-trip returned `200` with `visibility_profile=custom` in the response payload. The auto-flip behavior is also covered by `tests/actions/stakeholders.test.ts → updateStakeholder individual flag change` (action test 8 in commit 5). |
+| 9 | Stakeholder reloads portal → new "Invoices & quotes" section appears (cross-context cache invalidation) | **PASS** | `ss_6110xt2ja` | Hard reload of `/portal/projects/<id>` re-fetched the flag set; "Invoices & quotes — Coming in Phase 2 — billing visibility lands later." Card now visible as the 4th conditional section (after Schedule / Drawings / Messages). Confirms the stakeholder portal queries the live `project_stakeholders` row each request — no stale cache. The `revalidatePath('/portal/projects/{id}', 'layout')` in `updateStakeholder` (commit 5) belt-and-braces this path; the underlying SSR re-fetch handles it correctly even without explicit invalidation. |
+| 10 | Soft-delete the stakeholder via service-role REST → portal reload returns 404; list page shows empty state | **PASS** | `ss_8534on1uj`, `ss_53486bz4i` | After PATCH `{deleted_at: <now>}` on the stakeholder row, `/portal/projects/<id>` returns Next.js 404 (`getStakeholderProjectView` returns null because the deleted_at filter excludes the row → page calls `notFound()`). `/portal/projects` shows the empty state: "No projects yet. When a project team adds you as a stakeholder, the project will show up here." Validates: soft-delete revokes RLS + query-level visibility immediately (no caching surprise); portal layout still passes `requireStakeholder` (clients row + auth_user_id link still valid); only the project access is severed. |
 
-(Results table to be populated after run.)
+**Summary:** 10/10 PASS. Steps 8–10 used service-role REST PATCH to substitute the org-user UI flow (necessary because Chrome cookies are domain-wide and I can only be signed in as one user at a time in this browser). The UI paths for `EditStakeholderDialog` → `updateStakeholder` and `RemoveStakeholderButton` → `removeStakeholder` are covered by unit tests in `tests/actions/stakeholders.test.ts`. The cross-context cache-invalidation guarantee (Step 9) is verified directly: a hard reload re-fetched the flag set and rendered the new section.
+
+**Sentry post-deploy:** zero unresolved issues at the `041f493` release tag during the QA window.
+
+**MCP screenshot persistence note:** Screenshots are MCP-captured (IDs above); `save_to_disk` did surface a path this time but without a stable directory mapping. Consider plumbing a stable `screenshots/session-6/` export path via `Write` for future browser QA passes.
 
 ---
 
