@@ -6,6 +6,7 @@ import {
   createWorkflowProjectFixture,
   type WorkflowProjectFixture,
 } from '../fixtures/with-workflow-and-projects';
+import { assertNotVisible, assertVisibleIds } from './_helpers';
 
 // project_milestones RLS (migration 0011 §11.7):
 // - SELECT: org members of the project's org (via auth_user_org_project_ids
@@ -53,12 +54,13 @@ describe('project_milestones RLS', () => {
 
   test('User A SELECT sees only Org A milestone (cross-org isolation)', async () => {
     const c = await asUser(f.userA.email, f.userA.password);
-    const { data, error } = await c
-      .from('project_milestones')
-      .select('id')
-      .in('id', [milestoneAId, milestoneBId]);
-    expect(error).toBeNull();
-    expect((data ?? []).map((r) => r.id)).toEqual([milestoneAId]);
+    await assertVisibleIds(
+      c,
+      'project_milestones',
+      { column: 'id', values: [milestoneAId, milestoneBId] },
+      [milestoneAId],
+      'org A select cross-org isolation',
+    );
   });
 
   test('Soft-deleted milestone hidden from org member', async () => {
@@ -69,15 +71,10 @@ describe('project_milestones RLS', () => {
       .eq('id', milestoneAId)
       .select('id, deleted_at');
     expect(delErr).toBeNull();
-    // Diagnostic: confirm deleted_at actually persisted.
     expect(updData?.[0]?.deleted_at).not.toBeNull();
 
     const c = await asUser(f.userA.email, f.userA.password);
-    const { data } = await c
-      .from('project_milestones')
-      .select('id')
-      .eq('id', milestoneAId);
-    expect(data ?? []).toEqual([]);
+    await assertNotVisible(c, 'project_milestones', milestoneAId, 'soft-deleted hidden');
 
     // Restore so test 3 (anon block) can re-check both rows.
     await f.service
@@ -87,11 +84,12 @@ describe('project_milestones RLS', () => {
   });
 
   test('Anonymous cannot SELECT any milestone', async () => {
-    const a = asAnon();
-    const { data } = await a
-      .from('project_milestones')
-      .select('id')
-      .in('id', [milestoneAId, milestoneBId]);
-    expect(data ?? []).toEqual([]);
+    await assertVisibleIds(
+      asAnon(),
+      'project_milestones',
+      { column: 'id', values: [milestoneAId, milestoneBId] },
+      [],
+      'anon SELECT blocked',
+    );
   });
 });

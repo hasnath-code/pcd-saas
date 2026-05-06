@@ -5,6 +5,7 @@ import {
   createWorkflowProjectFixture,
   type WorkflowProjectFixture,
 } from '../fixtures/with-workflow-and-projects';
+import { assertNotVisible, assertVisibleIds } from './_helpers';
 
 // Linchpin test for migration 0013: verifies the unstubbed
 // auth_user_stakeholder_projects() actually grants project visibility to
@@ -118,12 +119,13 @@ describe('projects + project_milestones stakeholder visibility (0013 unstub)', (
 
   test('Accepted stakeholder SELECT projects sees orgA project, not orgB (cross-project isolation)', async () => {
     const c = await asUser(stakeholderAuth.email, stakeholderAuth.password);
-    const { data, error } = await c
-      .from('projects')
-      .select('id')
-      .in('id', [f.extras.orgAProject.id, f.extras.orgBProject.id]);
-    expect(error).toBeNull();
-    expect((data ?? []).map((r) => r.id)).toEqual([f.extras.orgAProject.id]);
+    await assertVisibleIds(
+      c,
+      'projects',
+      { column: 'id', values: [f.extras.orgAProject.id, f.extras.orgBProject.id] },
+      [f.extras.orgAProject.id],
+      'stakeholder cross-project isolation',
+    );
   });
 
   test('Stakeholder with accepted_at=NULL does NOT see project', async () => {
@@ -134,11 +136,7 @@ describe('projects + project_milestones stakeholder visibility (0013 unstub)', (
       .eq('id', stakeholderRowId);
 
     const c = await asUser(stakeholderAuth.email, stakeholderAuth.password);
-    const { data } = await c
-      .from('projects')
-      .select('id')
-      .eq('id', f.extras.orgAProject.id);
-    expect(data ?? []).toEqual([]);
+    await assertNotVisible(c, 'projects', f.extras.orgAProject.id, 'pending stakeholder no project access');
 
     // Restore acceptance for subsequent tests.
     await f.service

@@ -1,0 +1,105 @@
+name: RLS Gate
+
+on:
+  pull_request:
+    branches: [main]
+
+# Cancel in-progress runs for the same PR when a new commit lands.
+concurrency:
+  group: rls-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rls-tests:
+    name: rls + actions + cloud-smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # supabase CLI is a devDependency (package.json), so npx supabase
+      # resolves to the locally-installed version. supabase start auto-applies
+      # all migrations under supabase/migrations/.
+      - name: Start local Supabase
+        run: npx supabase start
+
+      # Build .env.local so db:seed:local + tests/setup.ts find what they
+      # need. tests/setup.ts loads .env.local manually for the 7 non-Supabase
+      # vars (env.ts validates them via Zod at @/env import time);
+      # db:seed:local loads the same file via tsx --env-file=.env.local. The 7
+      # non-Supabase values are CI-grade DUMMIES — tests use mocked Resend /
+      # Upstash / Sentry clients, so these never reach a real provider; they
+      # exist only to satisfy env.ts validation. Supabase + DATABASE_URL
+      # values are the ephemeral local-stack values and ARE used (for
+      # db:seed inserts and test reads).
+      #
+      # CAVEAT: this step depends on `npx supabase status -o env` emitting
+      # well-formed `KEY="value"` lines (parsed by `eval` here, mirrored in
+      # JS by tests/setup.ts:50–70). If a future Supabase CLI version
+      # changes that output format, both this step and tests/setup.ts must
+      # be updated together.
+      - name: Generate .env.local for seed and tests
+        run: |
+          eval "$(npx supabase status -o env)"
+          cat > .env.local <<EOF
+          DATABASE_URL=$DB_URL
+          DIRECT_URL=$DB_URL
+          NEXT_PUBLIC_SUPABASE_URL=$API_URL
+          NEXT_PUBLIC_SUPABASE_ANON_KEY=$ANON_KEY
+          SUPABASE_SERVICE_ROLE_KEY=$SERVICE_ROLE_KEY
+          RESEND_API_KEY=re_test_dummy_key_for_ci
+          RESEND_WEBHOOK_SECRET=whsec_test_dummy_for_ci
+          UPSTASH_REDIS_REST_URL=https://dummy-redis.upstash.io
+          UPSTASH_REDIS_REST_TOKEN=dummy_token_for_ci
+          SENTRY_DSN=https://dummy@sentry.io/0
+          NEXT_PUBLIC_APP_URL=http://localhost:3000
+          INTERNAL_CRON_SECRET=dummy-cron-secret-for-ci-padding-12345678
+          EOF
+
+      # Seed org_types + plans (idempotent). The fixtures in
+      # tests/fixtures/two-orgs.ts read from `plans` to look up the
+      # per-org-type plan_id; without this step the fixture build throws
+      # "no plans rows — run `npm run db:seed` against this stack first."
+      # Locally we run the seed once after `supabase start`; CI must run it
+      # on every job because the local stack is fresh per run. Use
+      # db:seed:local (not db:seed) because it overrides Supabase env vars
+      # from `supabase status` before deferring to run.ts.
+      - name: Seed reference data
+        run: npm run db:seed:local
+
+      - name: Run RLS tests
+        run: npm run test:rls
+
+      - name: Run action-layer tests
+        run: npm run test:actions
+
+      # Cloud smoke verifies anon-keyed RLS denial against the production
+      # Supabase project. Requires CLOUD_SUPABASE_URL + CLOUD_SUPABASE_ANON_KEY
+      # to be configured as repo secrets. If they are not yet set the step
+      # logs a warning and exits 0 — a defensive fallback so the very PR that
+      # lands this workflow doesn't block on missing secrets. Once secrets are
+      # configured, future runs gate on cloud-smoke as well.
+      - name: Run cloud-smoke tests
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.CLOUD_SUPABASE_URL }}
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.CLOUD_SUPABASE_ANON_KEY }}
+        run: |
+          if [ -z "$NEXT_PUBLIC_SUPABASE_URL" ] || [ -z "$NEXT_PUBLIC_SUPABASE_ANON_KEY" ]; then
+            echo "::warning::Cloud secrets (CLOUD_SUPABASE_URL, CLOUD_SUPABASE_ANON_KEY) not set; skipping test:cloud-smoke. Configure them in repo settings to enable the cloud-smoke gate."
+            exit 0
+          fi
+          npm run test:cloud-smoke
+
+      - name: Stop local Supabase
+        if: always()
+        run: npx supabase stop --no-backup
