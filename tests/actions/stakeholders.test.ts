@@ -171,18 +171,18 @@ describe('inviteStakeholder', () => {
     expect(first).toMatchObject({ success: true });
     const firstClientId = ('data' in first && first.data?.clientId) || '';
 
-    // Soft-delete the stakeholder row.
-    await f.service
+    // Use removeStakeholder rather than manual table updates — the action
+    // soft-deletes the project_stakeholders row AND cascade-cancels the
+    // pending invitation atomically (Session 7 hotfix). Both behaviors are
+    // now exercised here.
+    const { data: stkBefore } = await f.service
       .from('project_stakeholders')
-      .update({ deleted_at: new Date().toISOString() })
+      .select('id')
       .eq('project_id', f.extras.orgAProject.id)
-      .eq('client_id', firstClientId);
-
-    // Cancel the prior invitation so the duplicate-invite check doesn't fire.
-    await f.service
-      .from('invitations')
-      .update({ deleted_at: new Date().toISOString() })
-      .eq('email', inviteEmail);
+      .eq('client_id', firstClientId)
+      .single();
+    const removeResult = await removeStakeholder({ stakeholderId: stkBefore!.id });
+    expect(removeResult).toMatchObject({ success: true });
 
     // Re-invite with a different role + profile to verify the undelete resets.
     const second = await inviteStakeholder({
@@ -432,5 +432,177 @@ describe('updateStakeholder + removeStakeholder', () => {
       .eq('id', stakeholderId)
       .single();
     expect(data?.deleted_at).not.toBeNull();
+  });
+});
+
+describe('removeStakeholder cascade-cancel', () => {
+  let f: WorkflowProjectFixture;
+
+  beforeAll(async () => {
+    f = await createWorkflowProjectFixture();
+  });
+  afterAll(async () => {
+    await f.service
+      .from('project_stakeholders')
+      .delete()
+      .in('project_id', [f.extras.orgAProject.id, f.extras.orgBProject.id]);
+    await f.service
+      .from('invitations')
+      .delete()
+      .in('project_id', [f.extras.orgAProject.id, f.extras.orgBProject.id]);
+    await f.cleanup();
+  });
+  beforeEach(() => {
+    vi.mocked(auth.requireOrgUser).mockResolvedValue(
+      asOrgUserContext(f.userA, f.orgA.id, 'owner'),
+    );
+  });
+
+  // Helper: seed an accepted stakeholder + paired invitation. Returns the bits
+  // each cascade-cancel test needs. acceptedInvitation=false means a pending
+  // invitation (the cascade target); =true means an already-accepted one
+  // (which the cascade must leave alone).
+  async function seedStakeholderWithInvitation(opts: {
+    acceptedInvitation: boolean;
+    needsAuthUser?: boolean;
+  }): Promise<{
+    stakeholderId: string;
+    clientId: string;
+    invitationId: string;
+    token: string;
+    email: string;
+    authUserId?: string;
+  }> {
+    const ts = Date.now();
+    const rnd = Math.random().toString(36).slice(2, 10);
+    const email = `cascade-${ts}-${rnd}@test.local`;
+
+    let authUserId: string | undefined;
+    if (opts.needsAuthUser) {
+      const password = `pwCas-${rnd}-x9X`;
+      const { data: au } = await f.service.auth.admin.createUser({
+        email,
+        password,
+        email_confirm: true,
+      });
+      authUserId = au.user!.id;
+    }
+
+    const clientId = uuidv7();
+    await f.service.from('clients').insert({ id: clientId, email, name: 'Cascade Test' });
+    await f.service
+      .from('client_org_memberships')
+      .insert({ id: uuidv7(), client_id: clientId, org_id: f.orgA.id });
+
+    const stakeholderId = uuidv7();
+    await f.service.from('project_stakeholders').insert({
+      id: stakeholderId,
+      project_id: f.extras.orgAProject.id,
+      client_id: clientId,
+      role: 'collaborator',
+      visibility_profile: 'full',
+      invited_by: f.userA.userId,
+      accepted_at: new Date().toISOString(),
+    });
+
+    const invitationId = uuidv7();
+    const token = uuidv7();
+    await f.service.from('invitations').insert({
+      id: invitationId,
+      org_id: f.orgA.id,
+      email,
+      invitation_type: 'stakeholder',
+      project_id: f.extras.orgAProject.id,
+      stakeholder_role: 'collaborator',
+      visibility_profile: 'full',
+      token,
+      expires_at: new Date(Date.now() + 86400_000).toISOString(),
+      invited_by: f.userA.userId,
+      accepted_at: opts.acceptedInvitation ? new Date().toISOString() : null,
+    });
+
+    return { stakeholderId, clientId, invitationId, token, email, authUserId };
+  }
+
+  test('cascades pending invitation → invitations.deleted_at set + audit log entry', async () => {
+    const seeded = await seedStakeholderWithInvitation({ acceptedInvitation: false });
+
+    const result = await removeStakeholder({ stakeholderId: seeded.stakeholderId });
+    expect(result).toMatchObject({ success: true });
+
+    const { data: inv } = await f.service
+      .from('invitations')
+      .select('deleted_at, accepted_at')
+      .eq('id', seeded.invitationId)
+      .single();
+    expect(inv?.deleted_at).not.toBeNull();
+    expect(inv?.accepted_at).toBeNull();
+
+    // Audit log entry with the cascade reason.
+    const { data: audit } = await f.service
+      .from('audit_logs')
+      .select('action, resource_type, resource_id, metadata')
+      .eq('resource_id', seeded.invitationId)
+      .eq('resource_type', 'invitation');
+    expect(audit?.length).toBe(1);
+    expect(audit?.[0].action).toBe('soft_delete');
+    expect(
+      (audit?.[0].metadata as Record<string, unknown> | null)?.reason,
+    ).toBe('cascade_from_remove_stakeholder');
+  });
+
+  test('leaves accepted invitation untouched', async () => {
+    const seeded = await seedStakeholderWithInvitation({ acceptedInvitation: true });
+
+    const result = await removeStakeholder({ stakeholderId: seeded.stakeholderId });
+    expect(result).toMatchObject({ success: true });
+
+    const { data: inv } = await f.service
+      .from('invitations')
+      .select('deleted_at, accepted_at')
+      .eq('id', seeded.invitationId)
+      .single();
+    // accepted_at remains set; deleted_at remains NULL — Design C preserves
+    // history for already-accepted invitations.
+    expect(inv?.accepted_at).not.toBeNull();
+    expect(inv?.deleted_at).toBeNull();
+
+    // No invitation audit log for the cascade — the cascade only fires when
+    // acceptedAt IS NULL.
+    const { data: audit } = await f.service
+      .from('audit_logs')
+      .select('id')
+      .eq('resource_id', seeded.invitationId)
+      .eq('resource_type', 'invitation');
+    expect(audit?.length).toBe(0);
+  });
+
+  test('removed-then-replay → cancelled token returns conflict/cancelled', async () => {
+    // Seed a fresh stakeholder + pending invitation + auth user (the auth
+    // user is needed to call acceptStakeholderInvitation after the cascade).
+    const seeded = await seedStakeholderWithInvitation({
+      acceptedInvitation: false,
+      needsAuthUser: true,
+    });
+
+    // First, remove — cascades the invitation cancel.
+    const removeResult = await removeStakeholder({ stakeholderId: seeded.stakeholderId });
+    expect(removeResult).toMatchObject({ success: true });
+
+    // Now attempt to use the cancelled token. Should reject with the same
+    // shape as a manually-cancelled invitation (existing security path).
+    vi.mocked(auth.requireAuth).mockResolvedValueOnce(
+      asAuthUser({
+        authUserId: seeded.authUserId!,
+        userId: '',
+        email: seeded.email,
+        password: '',
+      }),
+    );
+    const acceptResult = await acceptStakeholderInvitation({ token: seeded.token });
+    expect(acceptResult).toMatchObject({ error: 'conflict', reason: 'cancelled' });
+
+    // Cleanup the auth user we created.
+    await f.service.auth.admin.deleteUser(seeded.authUserId!);
   });
 });

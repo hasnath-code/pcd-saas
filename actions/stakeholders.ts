@@ -582,9 +582,11 @@ export async function removeStakeholder(input: unknown): Promise<StakeholderActi
       projectId: projectStakeholders.projectId,
       deletedAt: projectStakeholders.deletedAt,
       orgId: projects.orgId,
+      clientEmail: clients.email,
     })
     .from(projectStakeholders)
     .innerJoin(projects, eq(projects.id, projectStakeholders.projectId))
+    .innerJoin(clients, eq(clients.id, projectStakeholders.clientId))
     .where(eq(projectStakeholders.id, stakeholderId))
     .limit(1);
   if (rows.length === 0 || rows[0].orgId !== ctx.orgId) {
@@ -595,10 +597,38 @@ export async function removeStakeholder(input: unknown): Promise<StakeholderActi
     return { error: 'conflict', reason: 'already_removed' };
   }
 
-  await db
-    .update(projectStakeholders)
-    .set({ deletedAt: new Date() })
-    .where(eq(projectStakeholders.id, stakeholderId));
+  // Atomic soft-delete + cascade-cancel pending invitation. Cascade only fires
+  // when the paired invitation's acceptedAt IS NULL (Design C — preserves
+  // history for already-accepted invitations).
+  const cancelledInvitationId = await db.transaction(async (tx) => {
+    await tx
+      .update(projectStakeholders)
+      .set({ deletedAt: new Date() })
+      .where(eq(projectStakeholders.id, stakeholderId));
+
+    const pending = await tx
+      .select({ id: invitations.id })
+      .from(invitations)
+      .where(
+        and(
+          eq(invitations.projectId, target.projectId),
+          eq(invitations.email, target.clientEmail),
+          eq(invitations.invitationType, 'stakeholder'),
+          isNull(invitations.acceptedAt),
+          isNull(invitations.deletedAt),
+        ),
+      )
+      .limit(1);
+
+    if (pending.length === 0) return null;
+
+    await tx
+      .update(invitations)
+      .set({ deletedAt: new Date() })
+      .where(eq(invitations.id, pending[0].id));
+
+    return pending[0].id;
+  });
 
   await logAudit({
     orgId: ctx.orgId,
@@ -608,6 +638,20 @@ export async function removeStakeholder(input: unknown): Promise<StakeholderActi
     resourceId: stakeholderId,
     metadata: { project_id: target.projectId },
   });
+
+  if (cancelledInvitationId) {
+    await logAudit({
+      orgId: ctx.orgId,
+      userId: ctx.userId,
+      action: 'soft_delete',
+      resourceType: 'invitation',
+      resourceId: cancelledInvitationId,
+      metadata: {
+        reason: 'cascade_from_remove_stakeholder',
+        stakeholder_id: stakeholderId,
+      },
+    });
+  }
 
   revalidatePath(`/dashboard/projects/${target.projectId}`, 'layout');
   revalidatePath(`/portal/projects/${target.projectId}`, 'layout');
