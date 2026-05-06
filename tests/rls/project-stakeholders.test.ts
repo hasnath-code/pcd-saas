@@ -6,6 +6,7 @@ import {
   createWorkflowProjectFixture,
   type WorkflowProjectFixture,
 } from '../fixtures/with-workflow-and-projects';
+import { assertVisibleIds, assertWriteDenied } from './_helpers';
 
 // project_stakeholders RLS (migration 0010 §11.6):
 // - SELECT: org members of the project's org OR the stakeholder themselves
@@ -54,39 +55,44 @@ describe('project_stakeholders RLS', () => {
 
   test('User A SELECT sees only Org A stakeholder (cross-org isolation)', async () => {
     const c = await asUser(f.userA.email, f.userA.password);
-    const { data, error } = await c
-      .from('project_stakeholders')
-      .select('id, project_id')
-      .in('id', [stakeholderAId, stakeholderBId]);
-    expect(error).toBeNull();
-    expect((data ?? []).map((r) => r.id)).toEqual([stakeholderAId]);
+    await assertVisibleIds(
+      c,
+      'project_stakeholders',
+      { column: 'id', values: [stakeholderAId, stakeholderBId] },
+      [stakeholderAId],
+      'org A select cross-org isolation',
+    );
   });
 
   test('User A cannot UPDATE Org B stakeholder visibility flags', async () => {
     const c = await asUser(f.userA.email, f.userA.password);
-    const { data } = await c
-      .from('project_stakeholders')
-      .update({ can_view_financials: true })
-      .eq('id', stakeholderBId)
-      .select();
-    // RLS modify policy filters out the row → empty array, no error.
-    expect(data ?? []).toEqual([]);
-
-    // Service-role re-read confirms the flag is unchanged.
-    const { data: verify } = await f.service
-      .from('project_stakeholders')
-      .select('can_view_financials')
-      .eq('id', stakeholderBId)
-      .single();
-    expect(verify?.can_view_financials).toBe(false);
+    await assertWriteDenied(
+      () =>
+        c
+          .from('project_stakeholders')
+          .update({ can_view_financials: true })
+          .eq('id', stakeholderBId)
+          .select(),
+      'cross-org update denied',
+      async () => {
+        // Service-role re-read confirms the flag is unchanged.
+        const { data: verify } = await f.service
+          .from('project_stakeholders')
+          .select('can_view_financials')
+          .eq('id', stakeholderBId)
+          .single();
+        expect(verify?.can_view_financials).toBe(false);
+      },
+    );
   });
 
   test('Anonymous cannot SELECT any project_stakeholders row', async () => {
-    const a = asAnon();
-    const { data } = await a
-      .from('project_stakeholders')
-      .select('id')
-      .in('id', [stakeholderAId, stakeholderBId]);
-    expect(data ?? []).toEqual([]);
+    await assertVisibleIds(
+      asAnon(),
+      'project_stakeholders',
+      { column: 'id', values: [stakeholderAId, stakeholderBId] },
+      [],
+      'anon SELECT blocked',
+    );
   });
 });
