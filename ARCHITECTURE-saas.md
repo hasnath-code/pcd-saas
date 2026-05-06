@@ -1,9 +1,9 @@
 # PCD Portal SaaS — Architecture Reference
 
-**Version:** 0.6 (Phase 1b Session 5 shipped — workflows + projects + clients + multi-org switcher)
+**Version:** 0.8 (Phase 1b Session 6 shipped — stakeholders + visibility profiles + portal + post-merge QA replay)
 **Last updated:** 06 May 2026
 **Maintainer:** Hasnath
-**Codebase status:** Phase 1b in progress — Session 5 shipped workflows + projects + clients schema, atomic createOrganization (Drizzle transaction), multi-org cookie switcher, cancel-invitation flow, plus carryovers (sendPasswordReset rate limit, system_cleanup audit verb). 46 RLS + 50 action + 7 cloud-smoke tests green. 3 sessions remaining in Phase 1b.
+**Codebase status:** Phase 1b in progress — Session 6 shipped `project_stakeholders` + `project_milestones` (with per-command RLS hotfix migration 0012), the visibility-profile model + custom override, stakeholder portal at `/portal/*`, magic-link branching by invitation type, primary_client side-effect on `createProject`, and 2 new SECURITY DEFINER helpers (`auth_user_org_project_ids`, `auth_user_stakeholder_project_visibility`) plus the 0013 unstub of `auth_user_stakeholder_projects`. 55 RLS + 66 action + 9 cloud-smoke tests green; production QA 10/10 PASS at deploy `dpl_smBkCh4GA7yu8XMVrZMCnwH71d5M`. 2 sessions remaining in Phase 1b (S7 RLS hardening, S8 workflow management).
 **Production URL:** https://pcd-saas.vercel.app
 **Repo:** https://github.com/hasnath-code/pcd-saas
 
@@ -470,6 +470,10 @@ The universal rules every table follows. RLS is the primary security boundary in
 ### The cardinal rule
 
 **Cross-org data isolation is non-negotiable.** No SELECT, INSERT, UPDATE, or DELETE on any domain table may return or affect rows from another org. Every table has a test asserting this.
+
+### Policy shape convention
+
+**All RLS policies use per-command shape (`FOR SELECT` / `FOR INSERT` / `FOR UPDATE` / `FOR DELETE`) — never `FOR ALL`.** See SKILL.md Hard Rule 23 for rationale. Migration 0010 originally shipped `FOR ALL` policies on `project_stakeholders` and `project_milestones`; migration 0012 converted them to the canonical per-command shape after the soft-delete leak surfaced in tests. All future tables must follow per-command from creation.
 
 ### Standard policy patterns
 
@@ -1155,20 +1159,47 @@ CREATE INDEX idx_project_stakeholders_client ON project_stakeholders(client_id) 
 
 ALTER TABLE project_stakeholders ENABLE ROW LEVEL SECURITY;
 
+-- Per-command shape (see §9 "Policy shape convention" — FOR ALL is forbidden).
+-- SELECT keeps deleted_at filtering; modify policies intentionally omit it so re-invite-via-undelete works.
+
 CREATE POLICY "project_stakeholders_select" ON project_stakeholders
   FOR SELECT USING (
-    -- Org members of the project's org
+    deleted_at IS NULL
+    AND (
+      -- Org members of the project's org
+      project_id IN (
+        SELECT id FROM projects
+        WHERE org_id IN (SELECT org_id FROM users WHERE auth_user_id = auth.uid() AND deleted_at IS NULL)
+      )
+      OR
+      -- The stakeholder themselves
+      client_id IN (SELECT id FROM clients WHERE auth_user_id = auth.uid() AND deleted_at IS NULL)
+    )
+  );
+
+CREATE POLICY "project_stakeholders_insert_org_members" ON project_stakeholders
+  FOR INSERT WITH CHECK (
     project_id IN (
       SELECT id FROM projects
       WHERE org_id IN (SELECT org_id FROM users WHERE auth_user_id = auth.uid() AND deleted_at IS NULL)
     )
-    OR
-    -- The stakeholder themselves
-    client_id IN (SELECT id FROM clients WHERE auth_user_id = auth.uid() AND deleted_at IS NULL)
   );
 
-CREATE POLICY "project_stakeholders_modify_org_members" ON project_stakeholders
-  FOR ALL USING (
+CREATE POLICY "project_stakeholders_update_org_members" ON project_stakeholders
+  FOR UPDATE USING (
+    project_id IN (
+      SELECT id FROM projects
+      WHERE org_id IN (SELECT org_id FROM users WHERE auth_user_id = auth.uid() AND deleted_at IS NULL)
+    )
+  ) WITH CHECK (
+    project_id IN (
+      SELECT id FROM projects
+      WHERE org_id IN (SELECT org_id FROM users WHERE auth_user_id = auth.uid() AND deleted_at IS NULL)
+    )
+  );
+
+CREATE POLICY "project_stakeholders_delete_org_members" ON project_stakeholders
+  FOR DELETE USING (
     project_id IN (
       SELECT id FROM projects
       WHERE org_id IN (SELECT org_id FROM users WHERE auth_user_id = auth.uid() AND deleted_at IS NULL)
@@ -1194,22 +1225,57 @@ CREATE INDEX idx_project_milestones_project ON project_milestones(project_id) WH
 
 ALTER TABLE project_milestones ENABLE ROW LEVEL SECURITY;
 
+-- Per-command shape (see §9 "Policy shape convention" — FOR ALL is forbidden).
+-- SELECT enforces deleted_at filtering and the visibility-flag gate; modify policies are org-scoped only.
+
 CREATE POLICY "project_milestones_select" ON project_milestones
   FOR SELECT USING (
+    deleted_at IS NULL
+    AND (
+      project_id IN (
+        SELECT id FROM projects
+        WHERE org_id IN (SELECT org_id FROM users WHERE auth_user_id = auth.uid() AND deleted_at IS NULL)
+      )
+      OR (
+        visible_to_stakeholders = true
+        AND project_id IN (
+          SELECT ps.project_id FROM project_stakeholders ps
+          JOIN clients c ON c.id = ps.client_id
+          WHERE c.auth_user_id = auth.uid()
+            AND ps.can_view_schedule = true
+            AND ps.deleted_at IS NULL
+            AND ps.accepted_at IS NOT NULL
+        )
+      )
+    )
+  );
+
+CREATE POLICY "project_milestones_insert_org_members" ON project_milestones
+  FOR INSERT WITH CHECK (
     project_id IN (
       SELECT id FROM projects
       WHERE org_id IN (SELECT org_id FROM users WHERE auth_user_id = auth.uid() AND deleted_at IS NULL)
     )
-    OR (
-      visible_to_stakeholders = true
-      AND project_id IN (
-        SELECT ps.project_id FROM project_stakeholders ps
-        JOIN clients c ON c.id = ps.client_id
-        WHERE c.auth_user_id = auth.uid()
-          AND ps.can_view_schedule = true
-          AND ps.deleted_at IS NULL
-          AND ps.accepted_at IS NOT NULL
-      )
+  );
+
+CREATE POLICY "project_milestones_update_org_members" ON project_milestones
+  FOR UPDATE USING (
+    project_id IN (
+      SELECT id FROM projects
+      WHERE org_id IN (SELECT org_id FROM users WHERE auth_user_id = auth.uid() AND deleted_at IS NULL)
+    )
+  ) WITH CHECK (
+    project_id IN (
+      SELECT id FROM projects
+      WHERE org_id IN (SELECT org_id FROM users WHERE auth_user_id = auth.uid() AND deleted_at IS NULL)
+    )
+  );
+
+CREATE POLICY "project_milestones_delete_org_members" ON project_milestones
+  FOR DELETE USING (
+    project_id IN (
+      SELECT id FROM projects
+      WHERE org_id IN (SELECT org_id FROM users WHERE auth_user_id = auth.uid() AND deleted_at IS NULL)
     )
   );
 ```
@@ -2923,6 +2989,8 @@ Before moving to Phase 1b:
 
 **Done when:** stakeholders can be invited; magic link works; client portal shows correct projects + flag-gated sections per RLS. ✓
 
+**Migrations applied:** 0010 (project_stakeholders), 0011 (project_milestones), 0012 (per-command RLS policy fix), 0013 (auth_user_stakeholder_projects unstub).
+
 ### Session 7: RLS hardening for stakeholder model
 
 **Tasks:**
@@ -2931,6 +2999,7 @@ Before moving to Phase 1b:
 - [ ] Cross-org isolation verified for all stakeholder-accessible tables
 - [ ] Performance review: query plans on the project list query (with stakeholder filter)
 - [ ] Indexes added where needed
+- [ ] Hotfix: cascade-cancel pending invitations on `removeStakeholder` (Design C from Session 6 UI sanity check finding — without this, a removed stakeholder can still click their unexpired magic link and re-establish access via the unaccepted invitations row)
 
 **Done when:** test suite has 100+ RLS assertions, all passing; no `EXPLAIN` shows seq scans on hot paths.
 
@@ -3186,6 +3255,8 @@ Items flagged during Phase 1a Session 1 (kicked off and shipped 04 May 2026, dep
 | 10 | Worktree `node_modules` symlink ritual. The auto-spawned worktree directory has an empty `node_modules/` (Vitest's `.vite` cache lands there but no packages). Vitest's `server-only` alias is `__dirname`-rooted, so without the symlink action tests crash at import. Fix: `rm -rf node_modules && ln -s ../../../node_modules node_modules`. Add to the worktree ritual alongside `.env.local` and `supabase/.temp/`. | Update SKILL.md Rule 22 to include this. | SKILL.md amendment |
 | 11 | Drizzle-kit regenerates EVERYTHING when snapshots are stale. Migrations 0006–0009 didn't get snapshots committed; first `db:generate` after a multi-session gap re-creates every table from the last snapshot. Fix: trim the generated SQL to only the new statements; the auto-created snapshot for the new migration is correct. | Always commit `db/migrations/meta/NNNN_snapshot.json` alongside the SQL. Long-term: catch missing snapshots in CI. | Tooling improvement |
 | 12 | Vitest fixture latent uuidv7-slice collision. `createWorkflowProjectFixture` used `uuidv7().slice(0, 8)` for "random" client email suffixes — but the first 8 hex chars of uuidv7 are the millisecond timestamp prefix, not random bits. Two parallel forks at the same ms collided on `clients.email` UNIQUE. Fixed by switching to `Math.random().toString(36)`. | Don't slice uuidv7 for randomness; use full uuid or Math.random. | Permanent rule (test fixtures) |
+| 13 | **Pending invitation cascade.** `removeStakeholder` soft-deletes the `project_stakeholders` row but does NOT cancel a paired pending `invitations` row. A removed stakeholder could still click their unexpired magic link and accept, re-creating active access via the unaccepted invitations branch. Surfaced during the post-Session-6 manual UI sanity check. | Address in Session 7 with cascade-cancel logic when `acceptedAt IS NULL` (slotted into §32 row 3). | Session 7 |
+| 14 | **Visibility picker UX (intentional).** Per-flag toggles only appear under the "Custom" profile; picking a named preset (full / progress_only / documents_only / schedule_only) commits to its flag set without showing the per-flag fieldset. This is design-intentional — keeps the model coherent and discourages drift. | Document in any future onboarding for engineers extending `VisibilityProfilePicker`. | Permanent design note |
 
 **Full session handover:** `SESSION-6-HANDOVER.md` in repo root.
 
@@ -3203,7 +3274,7 @@ Items flagged during Phase 1a Session 1 (kicked off and shipped 04 May 2026, dep
 
 ---
 
-**Last reviewed:** 06 May 2026 (Phase 1b S6 shipped — v0.7)
+**Last reviewed:** 06 May 2026 (Phase 1b S6 shipped — v0.8)
 
 ## End of document
 
