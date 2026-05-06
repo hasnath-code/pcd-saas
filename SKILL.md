@@ -150,6 +150,7 @@ When drafting features, reference these existing patterns rather than reinventin
 | **SECURITY DEFINER helpers to break RLS recursion** (SaaS) | Migration 0001 (`is_org_member`, `is_org_admin`, `auth_user_orgs`), 0007 (`auth_user_client_ids`, `auth_user_org_client_ids`) | Any new table whose RLS policy references another table whose RLS policy references back. Pattern fires on join-table designs. |
 | **Browser QA verification loop** (SaaS UI sessions) | Session 5b hotfix process; Mode 7 sign-off | Any session that ships UI changes — add Claude in Chrome verification per fix, not just unit tests. Captures RSC re-render bugs, hydration mismatches, dialog/router races, visual ambiguity. |
 | **`revalidatePath` layout vs page scope** (SaaS) | `actions/invitations.ts cancelInvitation` (uses `'layout'`) | Use `'layout'` scope when the cached fragment lives in a layout above the mutating page; use `'page'` when local. Default `'page'` silently misses Router Cache fragments held in `(org)/layout.tsx`. |
+| **Test fixture suffixes — slice UUIDv7 from the end, not the start** (SaaS) | Session 6 fixture refactor; `SESSION-6-HANDOVER.md` "Surprises §4" | When generating unique identifier suffixes from UUIDv7 in test fixtures: `uuidv7().slice(-8)` (random bits) or `Math.random().toString(36)`, NEVER `uuidv7().slice(0, 8)` (timestamp prefix). Two parallel test forks at the same millisecond produce identical timestamp prefixes and collide on UNIQUE constraints. Session 6 fixture had this bug; surfaced when adding more parallel RLS test files pushed concurrency past the collision threshold. |
 
 ---
 
@@ -188,7 +189,38 @@ Enforce on every response. If a plan violates any, flag immediately.
 
 21. **Browser QA verification before SaaS session sign-off, not just unit tests.** Sessions that modify UI (layouts, forms, dialogs, dropdowns, headers, kebabs, toasts) include a Claude in Chrome verification step before declaring done. Unit tests pass while users still hit RSC re-render crashes, hydration mismatches, dialog/router races, and visual ambiguity. Session 5 shipped with 51→103 passing tests; an external QA pass found 5 bugs that all passed automated tests. The fix loop: investigate (Sentry first if production error) → apply fix → run unit tests → reproduce in browser → screenshot the fixed behavior → commit with screenshot reference. For sessions without UI changes (pure schema/migration sessions), browser QA can be omitted — but unit-test-only sign-off is forbidden the moment a `.tsx` file changes.
 
-22. **Worktree symlink ritual extended for cloud Supabase work.** When a worktree spawns, in addition to symlinking `.env.local` and `.env.test` from the main repo, copy `supabase/.temp/` if cloud Supabase pushes will be needed in this session. Worktrees do NOT inherit `supabase/.temp` automatically — `supabase migration list --linked` will fail with "Cannot find project ref" until the directory exists in the worktree. One-shot copy: `cp -r ../../../supabase/.temp ./supabase/.temp` from the worktree root. Also: `npm` is not on PATH in non-interactive bash sessions on this machine; commands need `export PATH="$HOME/.nvm/versions/node/v20.20.2/bin:$PATH"` prefix.
+    *Pre-step before walking any QA script:* sign in directly within the MCP-driven tab. The Claude in Chrome harness opens a fresh tab in the user's Chrome instance; that specific tab starts unauthenticated even if other tabs in the same browser are signed in. Don't assume cross-tab session sharing — sign in explicitly in the tab Claude in Chrome reports it is driving.
+
+    *Two-context QA limitation:* when QA needs both contexts simultaneously (org user AND stakeholder; two different orgs; etc.), Chrome cookies are domain-wide — only one auth identity per domain at a time. Workaround: substitute one side of the flow with service-role REST calls. The backend behavior is what matters; the UI button → server action chain is already covered by unit tests. Document the substitution in the session handover so future engineers don't think a step was skipped.
+
+22. **Worktree symlink ritual extended for cloud Supabase work.** When a worktree spawns, in addition to symlinking `.env.local`, `.env.test`, and `node_modules` from the main repo, copy `supabase/.temp/` if cloud Supabase pushes will be needed in this session. Worktrees do NOT inherit `supabase/.temp` automatically — `supabase migration list --linked` will fail with "Cannot find project ref" until the directory exists in the worktree. The `node_modules` symlink is required for Vitest's `__dirname`-rooted `server-only` alias; without it, action tests crash at import even though Node's parent-walk resolution handles runtime imports. One-shot ritual from the worktree root:
+
+    ```bash
+    ln -s ../../../.env.local .env.local
+    ln -s ../../../.env.test .env.test
+    ln -s ../../../node_modules node_modules
+    cp -r ../../../supabase/.temp ./supabase/.temp
+    export PATH="$HOME/.nvm/versions/node/v20.20.2/bin:$PATH"
+    ```
+
+    Also: `npm` is not on PATH in non-interactive bash sessions on this machine; commands need the PATH export prefix.
+
+23. **Avoid `FOR ALL` policies when soft-delete filtering matters.** Postgres `FOR ALL` covers SELECT/INSERT/UPDATE/DELETE in one policy. When OR'd with an explicit SELECT policy via Postgres' permissive policy evaluation, the FOR ALL's USING clause can leak soft-deleted rows because the SELECT path matches both policies. Use per-command policies (FOR INSERT, FOR UPDATE, FOR DELETE) instead. The FOR INSERT policy uses WITH CHECK only; SELECT semantics live in the dedicated SELECT policy where soft-delete filtering is explicit.
+
+    Pattern (canonical):
+
+    ```sql
+    CREATE POLICY "<table>_select" ON <table> FOR SELECT
+      USING (deleted_at IS NULL AND <visibility_clause>);
+    CREATE POLICY "<table>_insert" ON <table> FOR INSERT
+      WITH CHECK (<authorization_clause>);
+    CREATE POLICY "<table>_update" ON <table> FOR UPDATE
+      USING (<auth>) WITH CHECK (<auth>);
+    CREATE POLICY "<table>_delete" ON <table> FOR DELETE
+      USING (<auth>);
+    ```
+
+    Migration 0010 originally used FOR ALL and shipped a soft-delete leak. Migration 0012 was a hotfix that converted both `project_stakeholders` and `project_milestones` to per-command policies. Don't repeat the pattern.
 
 ---
 
@@ -414,3 +446,9 @@ Apps Script repo (separate):
   - Section 8.1 adds 2 new gap triggers (external QA finds unit-test-passing bugs; RLS recursion error 42P17).
   - Section 9 Stack 2 status updated to Phase 1b in progress; verification stack now explicit (Vitest + Claude in Chrome + Sentry + Vercel probes).
   - Triggered by: PCD SaaS Phase 1b Session 5 shipped (https://pcd-saas.vercel.app at commit ec6bb2c, 103 passing tests, all 5 hotfixes verified in production via Claude in Chrome QA replay).
+- v3.3 (06 May 2026): **Session 6 lessons baked in.** One new hard rule + four extensions:
+  - Rule 23 (Avoid `FOR ALL` policies when soft-delete filtering matters) — Migrations 0010/0011 mirrored ARCHITECTURE-saas.md §11.6/§11.7's `FOR ALL` literal and shipped a soft-delete leak; Postgres OR's PERMISSIVE policies on the same command, so the FOR ALL bypassed the dedicated SELECT policy's `deleted_at IS NULL` filter. Hotfix migration 0012 converted both tables to per-command policies. Includes canonical per-command pattern (SELECT/INSERT/UPDATE/DELETE).
+  - Rule 22 extended — worktree symlink ritual now includes `node_modules` (in addition to `.env.local`, `.env.test`, `supabase/.temp/`). Vitest's `__dirname`-rooted `server-only` alias crashes at import without the symlink; runtime parent-walk resolution masks the issue until action tests run.
+  - Rule 21 extended — added browser-QA sign-in pre-step (Claude in Chrome opens a fresh tab that starts unauthenticated even if other tabs in the same browser are signed in) and the two-context QA limitation pattern (Chrome cookies are domain-wide; one auth identity per domain → substitute service-role REST for the second side and document in the handover).
+  - Section 3 gains 1 new SaaS pattern (test fixture suffixes from UUIDv7 — slice from end, not start). Session 6 fixture had latent collision; surfaced under higher fork pressure.
+  - Triggered by: PCD SaaS Phase 1b Session 6 shipped (https://pcd-saas.vercel.app at commit 041f493, post-merge QA replayed at 3c9c3d0; 55 RLS / 66 actions / 9 cloud-smoke green; production QA 10/10 PASS).
