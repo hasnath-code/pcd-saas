@@ -49,4 +49,28 @@ describe('cloud Phase 1b tables are anon-blocked', () => {
       expect([401, 403]).toContain(status);
     }
   });
+
+  test('GET /rest/v1/project_stakeholders returns no rows for anon (RLS blocks)', async () => {
+    const { data, status } = await client
+      .from('project_stakeholders')
+      .select('id')
+      .limit(1);
+    if (status === 200) {
+      expect(data ?? []).toEqual([]);
+    } else {
+      expect([401, 403]).toContain(status);
+    }
+  });
+
+  test('GET /rest/v1/project_milestones returns no rows for anon (RLS blocks)', async () => {
+    const { data, status } = await client
+      .from('project_milestones')
+      .select('id')
+      .limit(1);
+    if (status === 200) {
+      expect(data ?? []).toEqual([]);
+    } else {
+      expect([401, 403]).toContain(status);
+    }
+  });
 });
