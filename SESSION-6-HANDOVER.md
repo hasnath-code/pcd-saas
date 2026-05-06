@@ -268,3 +268,13 @@ Inherited from Session 6 (see SESSION-6-HANDOVER):
 - Cloud-smoke: **9/9** (7 prior + 2 new)
 - Build clean / tsc clean / drizzle-kit check clean
 - Production deploy: `dpl_smBkCh4GA7yu8XMVrZMCnwH71d5M` for commit `041f493` (queued at 06:15 UTC, expected READY within ~3 min). Verify `https://pcd-saas.vercel.app/portal/projects` returns 401/redirect for unauth visitors after deploy completes.
+
+---
+
+## Manual UI Sanity Check Results (post-browser-QA)
+
+All 8 UI paths verified by manual walkthrough. Four observations:
+1. Kebab item label is "Remove" not "Remove from project" — cosmetic, no action.
+2. Per-flag toggles only appear under "Custom" visibility profile — intentional design.
+3. Stakeholder invite email delivered with deliveryWarning toast — known Resend production-domain issue (see §35.5 carryover).
+4. Removing a stakeholder does NOT cancel their pending invitations row — Session 7 will add cascade-cancel logic.
