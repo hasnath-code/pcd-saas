@@ -12,6 +12,7 @@ import {
 import { Button } from '@/components/ui/button';
 import { ProjectStageBadge } from '@/components/projects/ProjectStageBadge';
 import { SoftDeleteProjectButton } from '@/components/projects/SoftDeleteProjectButton';
+import { InviteStakeholderForm } from '@/components/stakeholders/InviteStakeholderForm';
 
 export default async function ProjectDetailPage({
   params,
@@ -107,10 +108,27 @@ export default async function ProjectDetailPage({
       </Card>
 
       <Card>
+        <CardHeader className="flex flex-row items-start justify-between gap-4">
+          <div>
+            <CardTitle className="text-base">Stakeholders</CardTitle>
+            <CardDescription>
+              People outside the team who can see this project in their portal.
+            </CardDescription>
+          </div>
+          <InviteStakeholderForm projectId={project.id} />
+        </CardHeader>
+        <CardContent>
+          <p className="text-sm text-muted-foreground">
+            Stakeholder list ships in the next commit.
+          </p>
+        </CardContent>
+      </Card>
+
+      <Card>
         <CardHeader>
           <CardTitle className="text-base">Coming soon</CardTitle>
           <CardDescription>
-            Messages, files, and stakeholder access land in the next sessions.
+            Messages and files land in the next sessions.
           </CardDescription>
         </CardHeader>
       </Card>
