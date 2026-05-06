@@ -23,10 +23,26 @@ export type ProjectRow = {
   stageColor: string | null;
   stageIsTerminal: boolean;
   createdAt: Date;
+  // Phase 1b Session 6: primary client (project_stakeholders WHERE
+  // role='primary_client', deleted_at IS NULL). NULL when project has no
+  // primary client (legacy Session 5 projects, or any project never wired up
+  // with one). The list page renders "—" in this case.
+  primaryClientName: string | null;
+  primaryClientEmail: string | null;
 };
 
 // List active (non-deleted) projects in the org with workflow + stage joined,
 // most recent first. Optional stage filter narrows by current_stage_id.
+//
+// LEFT JOIN to project_stakeholders + clients for the primary client column.
+// Filter project_stakeholders to role='primary_client' + deleted_at IS NULL
+// in the join clause (not the WHERE) so projects without a primary client
+// aren't dropped. UNIQUE(project_id, client_id) means at most one client per
+// (project, role) — but role isn't part of the unique key, so technically two
+// primary_client rows could exist in pathological data. We accept the implicit
+// dedupe (Postgres returns each match as a separate row); the UI shows the
+// first row. A future hardening could add DISTINCT ON (project_id) + ORDER
+// BY but Phase 1b doesn't enforce that strictness.
 export async function listProjectsForOrg(
   orgId: string,
   opts?: { stageId?: string },
@@ -49,14 +65,33 @@ export async function listProjectsForOrg(
       stageColor: workflowStages.color,
       stageIsTerminal: workflowStages.isTerminal,
       createdAt: projects.createdAt,
+      primaryClientName: clients.name,
+      primaryClientEmail: clients.email,
     })
     .from(projects)
     .innerJoin(workflows, eq(workflows.id, projects.workflowId))
     .innerJoin(workflowStages, eq(workflowStages.id, projects.currentStageId))
+    .leftJoin(
+      projectStakeholders,
+      and(
+        eq(projectStakeholders.projectId, projects.id),
+        eq(projectStakeholders.role, 'primary_client'),
+        isNull(projectStakeholders.deletedAt),
+      ),
+    )
+    .leftJoin(clients, eq(clients.id, projectStakeholders.clientId))
     .where(and(...baseConditions))
     .orderBy(desc(projects.createdAt));
 
-  return rows;
+  // Dedupe by project id — the LEFT JOIN can multiply rows if a project
+  // somehow has multiple primary_client stakeholders (shouldn't happen in
+  // practice). First match wins.
+  const seen = new Set<string>();
+  return rows.filter((r) => {
+    if (seen.has(r.id)) return false;
+    seen.add(r.id);
+    return true;
+  });
 }
 
 export type ProjectDetail = ProjectRow & {
@@ -85,10 +120,21 @@ export async function getProjectByIdForOrg(
       stageIsTerminal: workflowStages.isTerminal,
       createdAt: projects.createdAt,
       createdBy: projects.createdBy,
+      primaryClientName: clients.name,
+      primaryClientEmail: clients.email,
     })
     .from(projects)
     .innerJoin(workflows, eq(workflows.id, projects.workflowId))
     .innerJoin(workflowStages, eq(workflowStages.id, projects.currentStageId))
+    .leftJoin(
+      projectStakeholders,
+      and(
+        eq(projectStakeholders.projectId, projects.id),
+        eq(projectStakeholders.role, 'primary_client'),
+        isNull(projectStakeholders.deletedAt),
+      ),
+    )
+    .leftJoin(clients, eq(clients.id, projectStakeholders.clientId))
     .where(
       and(
         eq(projects.id, projectId),
