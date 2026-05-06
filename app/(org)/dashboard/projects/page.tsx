@@ -105,6 +105,7 @@ export default async function ProjectsListPage({
                 <TableRow>
                   <TableHead>Project number</TableHead>
                   <TableHead>Site address</TableHead>
+                  <TableHead>Client</TableHead>
                   <TableHead>Stage</TableHead>
                   <TableHead>Created</TableHead>
                 </TableRow>
@@ -122,6 +123,9 @@ export default async function ProjectsListPage({
                     </TableCell>
                     <TableCell className="text-sm text-muted-foreground">
                       {p.siteAddress}
+                    </TableCell>
+                    <TableCell className="text-sm text-muted-foreground">
+                      {p.primaryClientName ?? '—'}
                     </TableCell>
                     <TableCell>
                       <ProjectStageBadge

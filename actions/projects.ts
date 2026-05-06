@@ -13,11 +13,13 @@ import {
 import { db } from '@/db';
 import {
   clientOrgMemberships,
+  projectStakeholders,
   projects,
   workflows,
   workflowStages,
 } from '@/db/schema';
 import { logAudit } from '@/lib/audit/log';
+import { VISIBILITY_PROFILES } from '@/lib/visibility-profiles';
 
 export type ProjectActionResult<T = void> =
   | (T extends void ? { success: true } : { success: true; data: T })
@@ -126,16 +128,43 @@ export async function createProject(
 
   const projectId = uuidv7();
 
+  // When clientId is supplied we additionally insert a project_stakeholders
+  // row with role='primary_client' (visibility_profile='full', accepted_at=now()
+  // since the org user is implicitly opting the client into the project).
+  // The pair lives in one transaction so a duplicate-project race aborts
+  // both rows together. The Client column on /dashboard/projects reads from
+  // this row going forward (see Session 6 plan decision #5). Legacy Session 5
+  // projects without a stakeholder row show "—" in the column.
   try {
-    await db.insert(projects).values({
-      id: projectId,
-      orgId: ctx.orgId,
-      projectNumber,
-      siteAddress,
-      workflowId,
-      currentStageId: firstStageId,
-      scopeSummary,
-      createdBy: ctx.userId,
+    await db.transaction(async (tx) => {
+      await tx.insert(projects).values({
+        id: projectId,
+        orgId: ctx.orgId,
+        projectNumber,
+        siteAddress,
+        workflowId,
+        currentStageId: firstStageId,
+        scopeSummary,
+        createdBy: ctx.userId,
+      });
+
+      if (clientId) {
+        const fullFlags = VISIBILITY_PROFILES.full;
+        await tx.insert(projectStakeholders).values({
+          id: uuidv7(),
+          projectId,
+          clientId,
+          role: 'primary_client',
+          visibilityProfile: 'full',
+          canMessage: fullFlags.canMessage,
+          canUploadFiles: fullFlags.canUploadFiles,
+          canViewFinancials: fullFlags.canViewFinancials,
+          canViewDrawings: fullFlags.canViewDrawings,
+          canViewSchedule: fullFlags.canViewSchedule,
+          invitedBy: ctx.userId,
+          acceptedAt: new Date(),
+        });
+      }
     });
   } catch (e) {
     // Race-condition fallback: if two concurrent createProject calls slip

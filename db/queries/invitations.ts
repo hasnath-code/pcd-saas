@@ -1,7 +1,7 @@
 import 'server-only';
 import { and, asc, desc, eq, gt, gte, inArray, isNull } from 'drizzle-orm';
 import { db } from '@/db';
-import { emailEvents, invitations, organizations, users } from '@/db/schema';
+import { emailEvents, invitations, organizations, projects, users } from '@/db/schema';
 
 // email_events.event_type CHECK values (see migration 0001).
 export type EmailDeliveryEventType =
@@ -90,11 +90,16 @@ export type InvitationWithOrg = {
   invitation: typeof invitations.$inferSelect;
   orgName: string;
   inviterName: string | null;
+  // Phase 1b Session 6: present when invitation_type='stakeholder' and
+  // invitations.project_id resolves to a non-deleted project. NULL for
+  // team_member invitations (no project context).
+  projectNumber: string | null;
 };
 
 // Token-by-token lookup used on the public landing page. Includes the org
-// name so the page can render "join <orgName> as <role>" without a second
-// query. Returns null for non-existent tokens (404 mode at the page level).
+// name + (for stakeholder invites) the project_number so the page can render
+// "join <orgName> as <role>" or "view project <projectNumber>" without a
+// second query. Returns null for non-existent tokens (404 mode at page level).
 //
 // Session 5: no longer filters on `isNull(deletedAt)` so the landing page
 // can distinguish "invitation cancelled" (deletedAt set) from "invitation
@@ -106,10 +111,15 @@ export async function getInvitationByToken(token: string): Promise<InvitationWit
       invitation: invitations,
       orgName: organizations.name,
       inviterName: users.name,
+      projectNumber: projects.projectNumber,
     })
     .from(invitations)
     .innerJoin(organizations, eq(organizations.id, invitations.orgId))
     .leftJoin(users, eq(users.id, invitations.invitedBy))
+    .leftJoin(
+      projects,
+      and(eq(projects.id, invitations.projectId), isNull(projects.deletedAt)),
+    )
     .where(eq(invitations.token, token))
     .limit(1);
   return rows[0] ?? null;

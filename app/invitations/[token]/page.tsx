@@ -9,6 +9,13 @@ const ROLE_LABEL = {
   member: 'member',
 } as const;
 
+const STAKEHOLDER_ROLE_LABEL = {
+  primary_client: 'the primary client',
+  collaborator: 'a collaborator',
+  observer: 'an observer',
+  billing_contact: 'the billing contact',
+} as const;
+
 function CardShell({
   title,
   body,
@@ -50,7 +57,7 @@ export default async function InvitationLandingPage({
     );
   }
 
-  const { invitation, orgName, inviterName } = result;
+  const { invitation, orgName, inviterName, projectNumber } = result;
   const inviter = inviterName ?? 'A teammate';
 
   // Session 5: cancelled invitations get a distinct, accurate message
@@ -89,11 +96,67 @@ export default async function InvitationLandingPage({
     );
   }
 
+  const acceptHref = `/invitations/${token}/accept`;
+  const signupHref = `/signup?invitation=${encodeURIComponent(token)}`;
+  const loginHref = `/login?invitation=${encodeURIComponent(token)}`;
+
+  // Phase 1b Session 6: branch the CTA copy on invitation_type. The
+  // signup/signin/accept flow is identical (token preserved through to the
+  // accept route, which dispatches to acceptStakeholderInvitation when the
+  // invitation_type='stakeholder'). Both branches use the same CardShell-style
+  // wrapper with two CTAs + a "Already signed in?" link.
+  if (invitation.invitationType === 'stakeholder') {
+    const roleLabel =
+      invitation.stakeholderRole && invitation.stakeholderRole in STAKEHOLDER_ROLE_LABEL
+        ? STAKEHOLDER_ROLE_LABEL[
+            invitation.stakeholderRole as keyof typeof STAKEHOLDER_ROLE_LABEL
+          ]
+        : 'a stakeholder';
+    return (
+      <main className="flex min-h-screen items-center justify-center bg-background p-4">
+        <div className="w-full max-w-md">
+          <Card>
+            <CardHeader>
+              <CardTitle>You&apos;ve been invited to a project</CardTitle>
+              <CardDescription>
+                {inviter} from <strong>{orgName}</strong> has invited you to follow
+                {projectNumber ? (
+                  <>
+                    {' '}project <strong>{projectNumber}</strong>
+                  </>
+                ) : (
+                  <> a project</>
+                )}{' '}
+                as <strong>{roleLabel}</strong>.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              <div className="grid grid-cols-2 gap-3">
+                <Button asChild>
+                  <Link href={signupHref}>Sign up</Link>
+                </Button>
+                <Button asChild variant="outline">
+                  <Link href={loginHref}>Sign in</Link>
+                </Button>
+              </div>
+              <p className="text-center text-xs text-muted-foreground">
+                Already signed in?{' '}
+                <Link href={acceptHref} className="underline">
+                  Accept invitation
+                </Link>
+              </p>
+            </CardContent>
+          </Card>
+        </div>
+      </main>
+    );
+  }
+
   if (invitation.invitationType !== 'team_member') {
     return (
       <CardShell
-        title="Invitation not supported yet"
-        body="Stakeholder invitations land in Phase 1b. Contact your team for a different invitation."
+        title="Invitation type unrecognized"
+        body="Contact your team — this invitation type isn't recognized."
       />
     );
   }
@@ -101,9 +164,6 @@ export default async function InvitationLandingPage({
   const roleLabel = invitation.role && invitation.role in ROLE_LABEL
     ? ROLE_LABEL[invitation.role as keyof typeof ROLE_LABEL]
     : 'team member';
-  const acceptHref = `/invitations/${token}/accept`;
-  const signupHref = `/signup?invitation=${encodeURIComponent(token)}`;
-  const loginHref = `/login?invitation=${encodeURIComponent(token)}`;
 
   return (
     <main className="flex min-h-screen items-center justify-center bg-background p-4">

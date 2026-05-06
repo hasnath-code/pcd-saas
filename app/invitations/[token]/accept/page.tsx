@@ -4,11 +4,17 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Button } from '@/components/ui/button';
 import { createClient } from '@/lib/supabase/server';
 import { acceptInvitation } from '@/actions/users';
+import { acceptStakeholderInvitation } from '@/actions/stakeholders';
+import { getInvitationByToken } from '@/db/queries/invitations';
 
 const ERROR_MESSAGES: Record<string, { title: string; body: string }> = {
   invalid: {
     title: 'Invitation not found',
     body: 'This invitation link is invalid or has been revoked.',
+  },
+  cancelled: {
+    title: 'Invitation cancelled',
+    body: 'This invitation was cancelled by the organization and is no longer valid.',
   },
   expired: {
     title: 'Invitation expired',
@@ -25,6 +31,10 @@ const ERROR_MESSAGES: Record<string, { title: string; body: string }> = {
   multi_org_not_yet_supported: {
     title: 'Multi-org membership coming soon',
     body: "You're already a member of another organization. Contact support@plancraftdaily.com if you need access to this invitation right now.",
+  },
+  client_already_linked: {
+    title: 'This invitation can\'t be claimed by your account',
+    body: "This client identity is already linked to a different account. Contact your team if you need help resolving this.",
   },
 };
 
@@ -57,7 +67,7 @@ export default async function AcceptInvitationPage({
 
   // Page-level auth check — middleware leaves /invitations/ public so the
   // landing page is reachable without auth, but the accept route needs the
-  // user signed in to attribute the new users row.
+  // user signed in to attribute the new users / clients row.
   const supabase = await createClient();
   const {
     data: { user },
@@ -66,6 +76,32 @@ export default async function AcceptInvitationPage({
     redirect(`/login?invitation=${encodeURIComponent(token)}`);
   }
 
+  // Phase 1b Session 6: dispatch on invitation_type. Look up the invitation
+  // first so we know which action + redirect to use. This adds one DB read
+  // but keeps the accept route invitation-type-aware without a generic
+  // dispatcher in actions (the two actions have different return shapes).
+  const invitationLookup = await getInvitationByToken(token);
+  if (!invitationLookup) {
+    return <ErrorCard {...ERROR_MESSAGES.invalid} />;
+  }
+
+  if (invitationLookup.invitation.invitationType === 'stakeholder') {
+    const result = await acceptStakeholderInvitation({ token });
+    if ('success' in result) {
+      redirect(`/portal/projects/${result.data.projectId}`);
+    }
+    const reason = result.reason ?? result.error;
+    const copy =
+      ERROR_MESSAGES[reason] ??
+      ERROR_MESSAGES[result.error] ??
+      {
+        title: "Couldn't accept invitation",
+        body: `Something went wrong: ${reason}`,
+      };
+    return <ErrorCard title={copy.title} body={copy.body} />;
+  }
+
+  // team_member (default + Phase 1a path).
   const result = await acceptInvitation({ token });
   if ('success' in result) {
     redirect('/dashboard');
