@@ -1,0 +1,61 @@
+name: RLS Gate
+
+on:
+  pull_request:
+    branches: [main]
+
+# Cancel in-progress runs for the same PR when a new commit lands.
+concurrency:
+  group: rls-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rls-tests:
+    name: rls + actions + cloud-smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # supabase CLI is a devDependency (package.json), so npx supabase
+      # resolves to the locally-installed version. supabase start auto-applies
+      # all migrations under supabase/migrations/.
+      - name: Start local Supabase
+        run: npx supabase start
+
+      - name: Run RLS tests
+        run: npm run test:rls
+
+      - name: Run action-layer tests
+        run: npm run test:actions
+
+      # Cloud smoke verifies anon-keyed RLS denial against the production
+      # Supabase project. Requires CLOUD_SUPABASE_URL + CLOUD_SUPABASE_ANON_KEY
+      # to be configured as repo secrets. If they are not yet set the step
+      # logs a warning and exits 0 — a defensive fallback so the very PR that
+      # lands this workflow doesn't block on missing secrets. Once secrets are
+      # configured, future runs gate on cloud-smoke as well.
+      - name: Run cloud-smoke tests
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.CLOUD_SUPABASE_URL }}
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.CLOUD_SUPABASE_ANON_KEY }}
+        run: |
+          if [ -z "$NEXT_PUBLIC_SUPABASE_URL" ] || [ -z "$NEXT_PUBLIC_SUPABASE_ANON_KEY" ]; then
+            echo "::warning::Cloud secrets (CLOUD_SUPABASE_URL, CLOUD_SUPABASE_ANON_KEY) not set; skipping test:cloud-smoke. Configure them in repo settings to enable the cloud-smoke gate."
+            exit 0
+          fi
+          npm run test:cloud-smoke
+
+      - name: Stop local Supabase
+        if: always()
+        run: npx supabase stop --no-backup
