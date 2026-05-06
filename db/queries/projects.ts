@@ -1,7 +1,15 @@
 import 'server-only';
-import { and, asc, desc, eq, isNull } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, isNull } from 'drizzle-orm';
 import { db } from '@/db';
-import { projects, workflowStages, workflows } from '@/db/schema';
+import {
+  clients,
+  invitations,
+  projectStakeholders,
+  projects,
+  users,
+  workflowStages,
+  workflows,
+} from '@/db/schema';
 
 export type ProjectRow = {
   id: string;
@@ -106,4 +114,95 @@ export async function getProjectByIdForOrg(
     .orderBy(asc(workflowStages.position));
 
   return { ...project, workflowStages: stages };
+}
+
+export type StakeholderRow = {
+  id: string;
+  clientId: string;
+  clientName: string;
+  clientEmail: string;
+  role: string;
+  visibilityProfile: string;
+  canMessage: boolean;
+  canUploadFiles: boolean;
+  canViewFinancials: boolean;
+  canViewDrawings: boolean;
+  canViewSchedule: boolean;
+  acceptedAt: Date | null;
+  invitedAt: Date;
+};
+
+// Active (non-deleted) stakeholders on a project. Org-isolation enforced via
+// the projects join + orgId filter; RLS would also block but explicit filter
+// keeps the query deterministic.
+export async function listStakeholdersForProject(
+  projectId: string,
+  orgId: string,
+): Promise<StakeholderRow[]> {
+  return db
+    .select({
+      id: projectStakeholders.id,
+      clientId: projectStakeholders.clientId,
+      clientName: clients.name,
+      clientEmail: clients.email,
+      role: projectStakeholders.role,
+      visibilityProfile: projectStakeholders.visibilityProfile,
+      canMessage: projectStakeholders.canMessage,
+      canUploadFiles: projectStakeholders.canUploadFiles,
+      canViewFinancials: projectStakeholders.canViewFinancials,
+      canViewDrawings: projectStakeholders.canViewDrawings,
+      canViewSchedule: projectStakeholders.canViewSchedule,
+      acceptedAt: projectStakeholders.acceptedAt,
+      invitedAt: projectStakeholders.invitedAt,
+    })
+    .from(projectStakeholders)
+    .innerJoin(clients, eq(clients.id, projectStakeholders.clientId))
+    .innerJoin(projects, eq(projects.id, projectStakeholders.projectId))
+    .where(
+      and(
+        eq(projectStakeholders.projectId, projectId),
+        eq(projects.orgId, orgId),
+        isNull(projectStakeholders.deletedAt),
+      ),
+    )
+    .orderBy(asc(projectStakeholders.invitedAt));
+}
+
+export type StakeholderInvitationRow = {
+  id: string;
+  email: string;
+  stakeholderRole: string | null;
+  visibilityProfile: string | null;
+  expiresAt: Date;
+  invitedByName: string | null;
+};
+
+// Pending stakeholder invitations on a project (not accepted, not cancelled,
+// not expired). Used by the project detail page's pending list.
+export async function listStakeholderInvitationsForProject(
+  projectId: string,
+  orgId: string,
+): Promise<StakeholderInvitationRow[]> {
+  return db
+    .select({
+      id: invitations.id,
+      email: invitations.email,
+      stakeholderRole: invitations.stakeholderRole,
+      visibilityProfile: invitations.visibilityProfile,
+      expiresAt: invitations.expiresAt,
+      invitedByName: users.name,
+    })
+    .from(invitations)
+    .leftJoin(users, eq(users.id, invitations.invitedBy))
+    .where(
+      and(
+        eq(invitations.projectId, projectId),
+        eq(invitations.orgId, orgId),
+        eq(invitations.invitationType, 'stakeholder'),
+        isNull(invitations.acceptedAt),
+        isNull(invitations.deletedAt),
+        gt(invitations.expiresAt, new Date()),
+      ),
+    )
+    .orderBy(asc(invitations.createdAt));
 }

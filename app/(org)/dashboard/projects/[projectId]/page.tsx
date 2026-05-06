@@ -1,7 +1,11 @@
 import Link from 'next/link';
 import { notFound, redirect } from 'next/navigation';
 import { AuthError, requireOrgUser } from '@/lib/auth/requireAuth';
-import { getProjectByIdForOrg } from '@/db/queries/projects';
+import {
+  getProjectByIdForOrg,
+  listStakeholderInvitationsForProject,
+  listStakeholdersForProject,
+} from '@/db/queries/projects';
 import {
   Card,
   CardContent,
@@ -9,10 +13,21 @@ import {
   CardHeader,
   CardTitle,
 } from '@/components/ui/card';
+import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from '@/components/ui/table';
 import { ProjectStageBadge } from '@/components/projects/ProjectStageBadge';
 import { SoftDeleteProjectButton } from '@/components/projects/SoftDeleteProjectButton';
 import { InviteStakeholderForm } from '@/components/stakeholders/InviteStakeholderForm';
+import { StakeholdersList } from '@/components/stakeholders/StakeholdersList';
+import { CancelInvitationButton } from '@/components/team/CancelInvitationButton';
 
 export default async function ProjectDetailPage({
   params,
@@ -30,6 +45,11 @@ export default async function ProjectDetailPage({
   const { projectId } = await params;
   const project = await getProjectByIdForOrg(projectId, ctx.orgId);
   if (!project) notFound();
+
+  const [stakeholders, pendingInvites] = await Promise.all([
+    listStakeholdersForProject(projectId, ctx.orgId),
+    listStakeholderInvitationsForProject(projectId, ctx.orgId),
+  ]);
 
   const canDelete = ctx.role === 'owner' || ctx.role === 'admin';
 
@@ -118,11 +138,55 @@ export default async function ProjectDetailPage({
           <InviteStakeholderForm projectId={project.id} />
         </CardHeader>
         <CardContent>
-          <p className="text-sm text-muted-foreground">
-            Stakeholder list ships in the next commit.
-          </p>
+          <StakeholdersList rows={stakeholders} />
         </CardContent>
       </Card>
+
+      {pendingInvites.length > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">Pending stakeholder invitations</CardTitle>
+            <CardDescription>
+              {pendingInvites.length} awaiting acceptance.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Email</TableHead>
+                  <TableHead>Role</TableHead>
+                  <TableHead>Profile</TableHead>
+                  <TableHead className="w-12" />
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {pendingInvites.map((inv) => (
+                  <TableRow key={inv.id}>
+                    <TableCell className="font-medium">{inv.email}</TableCell>
+                    <TableCell>
+                      <Badge variant="secondary">
+                        {inv.stakeholderRole ?? 'collaborator'}
+                      </Badge>
+                    </TableCell>
+                    <TableCell>
+                      <Badge variant="outline">
+                        {inv.visibilityProfile ?? 'progress_only'}
+                      </Badge>
+                    </TableCell>
+                    <TableCell className="text-right">
+                      <CancelInvitationButton
+                        invitationId={inv.id}
+                        email={inv.email}
+                      />
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </CardContent>
+        </Card>
+      )}
 
       <Card>
         <CardHeader>
