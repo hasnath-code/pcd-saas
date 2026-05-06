@@ -2899,19 +2899,29 @@ Before moving to Phase 1b:
 
 **Done when:** new orgs auto-clone "Simple" workflow ✓; org users can create/edit/delete projects ✓; RLS isolates per org ✓.
 
-### Session 6: Stakeholders + visibility profiles
+### Session 6: Stakeholders + visibility profiles ✓ SHIPPED 2026-05-06
 
 **Tasks:**
-- [ ] Migration: `project_stakeholders`, `project_milestones`
-- [ ] RLS policies (with visibility profile checks)
-- [ ] RLS tests for visibility profiles (each preset × each protected resource)
-- [ ] `actions/stakeholders.ts`: `inviteStakeholder`, `acceptStakeholderInvite`, `updateStakeholder`, `removeStakeholder`
-- [ ] Stakeholder invite flow: send email, magic link, redirect to client portal placeholder
-- [ ] Visibility profile preset UI (with custom override)
-- [ ] Project detail: stakeholder list panel
-- [ ] Client portal placeholder route: `/client/projects` showing only the stakeholder's accessible projects
+- [x] Migration: `project_stakeholders` (0010), `project_milestones` (0011)
+- [x] Bug-fix migration `0012_per_command_modify_policies.sql` — drops the FOR ALL modify policies (which were OR'd with the FOR SELECT policy and leaked soft-deleted rows) and replaces with per-command INSERT/UPDATE/DELETE policies. Pattern matches 0008_projects.sql.
+- [x] Migration `0013_auth_user_stakeholder_projects.sql` — unstubs the empty-set placeholder from 0001 with a real implementation querying project_stakeholders + clients filtered by auth.uid() + accepted_at NOT NULL + soft-delete-aware. Mirrors 0007's unstub of auth_user_stakeholder_orgs.
+- [x] Two new SECURITY DEFINER helpers in 0010 (per Rule 20):
+  - `auth_user_org_project_ids() → SETOF uuid`
+  - `auth_user_stakeholder_project_visibility(p_project_id uuid) → TABLE(5 booleans)`
+- [x] RLS tests for visibility profiles (full / progress_only / documents_only / schedule_only / custom × can_view_schedule × visible_to_stakeholders matrix in `tests/rls/projects-stakeholder-visibility.test.ts`)
+- [x] `actions/stakeholders.ts`: `inviteStakeholder`, `acceptStakeholderInvitation` (renamed from spec's `acceptStakeholderInvite` to mirror existing `acceptInvitation`), `updateStakeholder`, `removeStakeholder`
+- [x] `actions/milestones.ts`: `createMilestone`, `updateMilestone`, `softDeleteMilestone`
+- [x] Stakeholder invite flow: send email, magic link, accept route dispatches on `invitation.invitationType` and redirects to `/portal/projects/{projectId}`
+- [x] Visibility profile preset UI (with custom override) — `VisibilityProfilePicker` component
+- [x] Project detail: stakeholder list panel + Edit/Remove dialogs + pending stakeholder invitations row
+- [x] Client portal at `app/portal/*` (richer than the §32-original `/client/projects` placeholder — per-project pages with flag-gated conditional sections; portal layout requires `requireStakeholder`)
+- [x] Project list adds "Client" column reading the primary_client stakeholder (decision: createProject extended to insert this row when clientId is provided)
+- [x] `lib/visibility-profiles.ts` — pure-data module with `VISIBILITY_PROFILES` const, `applyVisibilityProfile`, `inferVisibilityProfile`
+- [x] `requireStakeholder()` implemented (was a stub) returning `{ authUserId, clientId }`
+- [x] `findOrCreateClientTx` extracted from `findOrCreateClient` for use inside outer transactions (Drizzle doesn't nest)
+- [x] `actions/invitations.ts cancelInvitation` reused for stakeholder cancellation (type-agnostic; no new action)
 
-**Done when:** stakeholders can be invited; magic link works; client portal placeholder shows correct projects per RLS.
+**Done when:** stakeholders can be invited; magic link works; client portal shows correct projects + flag-gated sections per RLS. ✓
 
 ### Session 7: RLS hardening for stakeholder model
 
@@ -3160,9 +3170,40 @@ Items flagged during Phase 1a Session 1 (kicked off and shipped 04 May 2026, dep
 - Drizzle parity: `drizzle-kit check` reports no drift
 - Phase 1a `createOrganization` REST refactored to Drizzle `db.transaction(...)` — atomic signup
 
+### §35.6 Session 6 (kickoff → ship: 06 May 2026)
+
+| # | Item | Action | Pull-forward to |
+|---|---|---|---|
+| 1 | Visibility profile UPDATE auto-flips to `'custom'` when individual flag changes arrive without an explicit profile arg. Per §14, the preset is documentation, not a constraint. | Session 7 RLS hardening tests should not assume a stable `visibility_profile` value across updates — only the flag values matter for RLS. | Session 7 |
+| 2 | `findOrCreateClient` has a tx-friendly sibling: `findOrCreateClientTx(tx, input, orgId)`. Public action unchanged. Inside outer transactions (e.g. `inviteStakeholder`), use the Tx variant directly — Drizzle does NOT support nested transactions. | Pattern mirrors `cloneSimpleWorkflowForOrg(tx, orgId)` in `actions/orgs.ts`. Future multi-table actions composing client creation should use this pattern. | Phase 1c onwards |
+| 3 | `createProject` has a side-effect: inserts a `project_stakeholders` row with `role='primary_client', visibility_profile='full', accepted_at=now()` when caller passes `clientId`. The org user adding their own client is implicitly accepted; client doesn't need to magic-link in. | Session 7 fixtures that exercise project creation must account for this. Phase 1c session that adds project edit flow should preserve this primary_client row across edits. | Session 7+ |
+| 4 | Magic-link branching pattern: `app/invitations/[token]/accept/page.tsx` dispatches on `invitation.invitationType`. Adding a new invitation kind (e.g. cross-org transfer in Phase 6) means: new branch in the accept route + new branch in the landing page + new server action. Token-preservation through `?invitation=<token>` on signup/signin is unchanged. | Phase 6 cross-org transfer flow. | Phase 6 |
+| 5 | `cancelInvitation` is type-agnostic — filters only on (id, orgId). Stakeholder cancellation reuses the team-invite cancel UI exactly. Don't add `cancelStakeholderInvitation`; existing path is the right path. | Reuse for any future invitation type. | Open-ended |
+| 6 | Two new SECURITY DEFINER helpers in 0010: `auth_user_org_project_ids()` + `auth_user_stakeholder_project_visibility(uuid)`. The latter returns a TABLE of 5 booleans (parameterized flag bag). Used by project_milestones (gates `can_view_schedule`); will be reused by Phase 1c project_files (gates `can_view_drawings`). | Phase 1c project_files RLS should use `auth_user_stakeholder_project_visibility` for the can_view_drawings check. | Phase 1c (S10) |
+| 7 | `auth_user_stakeholder_projects()` unstubbed in 0013. Stakeholders now see projects via `projects_select_org_or_stakeholder` (in 0008). Linchpin verification in `tests/rls/projects-stakeholder-visibility.test.ts`. | Session 7 RLS tests can rely on this — extend the matrix. | Session 7 |
+| 8 | **FOR ALL is a footgun.** Architecture spec literal `FOR ALL` on modify policies caused soft-deleted rows to leak past the SELECT policy's `deleted_at IS NULL` filter (multiple PERMISSIVE policies on the same command are OR'd). Fixed in 0012 by replacing FOR ALL with per-command INSERT/UPDATE/DELETE policies. **Future tables: use per-command policies** (matches 0008_projects.sql convention). Or use RESTRICTIVE policies if you really need an AND. | All future RLS migrations. SKILL.md may want a Rule 23 about this. | Permanent rule |
+| 9 | Stakeholder portal at `app/portal/*` (richer than the §32-original `/client/projects` placeholder — per-project pages with flag-gated conditional sections). Portal layout requires `requireStakeholder`; on `not_authorized/no_stakeholder_identity` redirects to `/dashboard` (org user wandered into wrong portal). | Phase 1c session 9 (messages) + session 10 (files) slot under `/portal/projects/[projectId]/`. | Phase 1c |
+| 10 | Worktree `node_modules` symlink ritual. The auto-spawned worktree directory has an empty `node_modules/` (Vitest's `.vite` cache lands there but no packages). Vitest's `server-only` alias is `__dirname`-rooted, so without the symlink action tests crash at import. Fix: `rm -rf node_modules && ln -s ../../../node_modules node_modules`. Add to the worktree ritual alongside `.env.local` and `supabase/.temp/`. | Update SKILL.md Rule 22 to include this. | SKILL.md amendment |
+| 11 | Drizzle-kit regenerates EVERYTHING when snapshots are stale. Migrations 0006–0009 didn't get snapshots committed; first `db:generate` after a multi-session gap re-creates every table from the last snapshot. Fix: trim the generated SQL to only the new statements; the auto-created snapshot for the new migration is correct. | Always commit `db/migrations/meta/NNNN_snapshot.json` alongside the SQL. Long-term: catch missing snapshots in CI. | Tooling improvement |
+| 12 | Vitest fixture latent uuidv7-slice collision. `createWorkflowProjectFixture` used `uuidv7().slice(0, 8)` for "random" client email suffixes — but the first 8 hex chars of uuidv7 are the millisecond timestamp prefix, not random bits. Two parallel forks at the same ms collided on `clients.email` UNIQUE. Fixed by switching to `Math.random().toString(36)`. | Don't slice uuidv7 for randomness; use full uuid or Math.random. | Permanent rule (test fixtures) |
+
+**Full session handover:** `SESSION-6-HANDOVER.md` in repo root.
+
+**State at Session 6 close:**
+- 14 commits total: 12 worktree commits + 1 merge commit + 1 docs commit (this commit)
+- Local Supabase: migrations 0001..0013 applied; reference data seeded
+- Cloud Supabase: migrations 0001..0013 applied; cloud anon curl on `project_stakeholders` and `project_milestones` returns no rows / 401
+- RLS tests: 55/55 (46 prior + 9 new across project-stakeholders / project-milestones / projects-stakeholder-visibility)
+- Action tests: 66/66 (53 prior + 13 new across stakeholders / milestones)
+- Cloud-smoke: 9/9 (7 prior + 2 new for project_stakeholders / project_milestones anon-blocked)
+- Build clean / tsc clean / drizzle-kit check clean
+- Magic-link landing branches on `invitation_type`; accept route dispatches to `acceptStakeholderInvitation` for stakeholder kinds; landed page redirects to `/portal/projects/{id}` on success
+- Stakeholder portal at `/portal/*` with per-project pages and §14-flag-gated conditional sections; org users wandering in get bounced to `/dashboard`
+- `requireStakeholder()` is no longer a stub — Phase 1b achieves end-to-end stakeholder identity
+
 ---
 
-**Last reviewed:** 06 May 2026 (Phase 1b S5 shipped — v0.6)
+**Last reviewed:** 06 May 2026 (Phase 1b S6 shipped — v0.7)
 
 ## End of document
 
