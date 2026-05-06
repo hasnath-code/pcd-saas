@@ -1,9 +1,9 @@
 # PCD Portal SaaS — Architecture Reference
 
-**Version:** 0.8 (Phase 1b Session 6 shipped — stakeholders + visibility profiles + portal + post-merge QA replay)
+**Version:** 0.9 (Phase 1b Session 7 shipped — RLS hardening matrix + cascade-cancel hotfix + CI gate)
 **Last updated:** 06 May 2026
 **Maintainer:** Hasnath
-**Codebase status:** Phase 1b in progress — Session 6 shipped `project_stakeholders` + `project_milestones` (with per-command RLS hotfix migration 0012), the visibility-profile model + custom override, stakeholder portal at `/portal/*`, magic-link branching by invitation type, primary_client side-effect on `createProject`, and 2 new SECURITY DEFINER helpers (`auth_user_org_project_ids`, `auth_user_stakeholder_project_visibility`) plus the 0013 unstub of `auth_user_stakeholder_projects`. 55 RLS + 66 action + 9 cloud-smoke tests green; production QA 10/10 PASS at deploy `dpl_smBkCh4GA7yu8XMVrZMCnwH71d5M`. 2 sessions remaining in Phase 1b (S7 RLS hardening, S8 workflow management).
+**Codebase status:** Phase 1b in progress — Session 7 shipped a comprehensive RLS test matrix (5 visibility profiles × 3 protected tables × 4 ops), 6 edge-case scenarios, 6 security-boundary regression tests, the `removeStakeholder` cascade-cancel hotfix (Design C — preserves accepted-invitation history), action-layer matrix coverage for visibility runtime overrides, and a GitHub Actions CI gate (`.github/workflows/rls-gate.yml`). 136 RLS + 77 action + 9 cloud-smoke tests green (was 55 + 66 + 9 = 130; now 222). Two new test infra files: `tests/rls/_helpers.ts` (canonical assertion library) + `tests/fixtures/stakeholder-fixtures.ts` (7 fixture builders covering happy + 6 edge-case states). 1 session remaining in Phase 1b (S8 workflow management).
 **Production URL:** https://pcd-saas.vercel.app
 **Repo:** https://github.com/hasnath-code/pcd-saas
 
@@ -474,6 +474,12 @@ The universal rules every table follows. RLS is the primary security boundary in
 ### Policy shape convention
 
 **All RLS policies use per-command shape (`FOR SELECT` / `FOR INSERT` / `FOR UPDATE` / `FOR DELETE`) — never `FOR ALL`.** See SKILL.md Hard Rule 23 for rationale. Migration 0010 originally shipped `FOR ALL` policies on `project_stakeholders` and `project_milestones`; migration 0012 converted them to the canonical per-command shape after the soft-delete leak surfaced in tests. All future tables must follow per-command from creation.
+
+### Matrix testing convention (Session 7)
+
+For tables with stakeholder-visible RLS branches, RLS coverage uses a **parameterized matrix** in `tests/rls/visibility-matrix.test.ts` (template). The matrix iterates the 5 visibility profiles (`full / progress_only / documents_only / schedule_only / custom`) × the protected tables × the 4 operations (SELECT positive / INSERT denial / UPDATE denial / DELETE denial). Every assertion derives expected behavior from the canonical SECURITY DEFINER gate (`auth_user_stakeholder_project_visibility(uuid)`) — tests do not query `project_stakeholders` directly to "check what flags are set." When Phase 1c adds `messages` and `project_files`, extend the same matrix file rather than duplicating the structure.
+
+Shared assertion helpers live in `tests/rls/_helpers.ts` (`assertVisibleIds`, `assertNotVisible`, `assertWriteDenied`, `assertRpcReturns`); the 7 fixture builders in `tests/fixtures/stakeholder-fixtures.ts` cover the happy path + 6 edge-case states (pending, removed, soft-deleted client, expired invitation, multi-org stakeholder, owner+stakeholder dual-context).
 
 ### Standard policy patterns
 
@@ -2991,17 +2997,20 @@ Before moving to Phase 1b:
 
 **Migrations applied:** 0010 (project_stakeholders), 0011 (project_milestones), 0012 (per-command RLS policy fix), 0013 (auth_user_stakeholder_projects unstub).
 
-### Session 7: RLS hardening for stakeholder model
+### Session 7: RLS hardening for stakeholder model ✓ SHIPPED 2026-05-06
 
 **Tasks:**
-- [ ] Comprehensive RLS test matrix: every visibility profile × every protected resource × every operation
-- [ ] Edge case tests: stakeholder removed mid-project, two roles in different orgs, upgrading to org owner
-- [ ] Cross-org isolation verified for all stakeholder-accessible tables
-- [ ] Performance review: query plans on the project list query (with stakeholder filter)
-- [ ] Indexes added where needed
-- [ ] Hotfix: cascade-cancel pending invitations on `removeStakeholder` (Design C from Session 6 UI sanity check finding — without this, a removed stakeholder can still click their unexpired magic link and re-establish access via the unaccepted invitations row)
+- [x] Comprehensive RLS test matrix: 5 visibility profiles × 3 protected tables × 4 operations parameterized via `describe.each` / `it.each` in `tests/rls/visibility-matrix.test.ts`
+- [x] Edge case tests in `tests/rls/edge-cases.test.ts` covering pending, removed, soft-deleted-client, expired-invitation, multi-org, and dual-context (owner + stakeholder) scenarios
+- [x] Security-boundary regression tests in `tests/rls/security-boundary.test.ts` (anti-hijack already_accepted + client_already_linked, cross-org email_mismatch, service-role bypass intent, helper SET search_path safety)
+- [x] Action-layer matrix: `tests/actions/visibility-runtime-override.test.ts` (5 tests for the auto-flip-to-custom logic) + `tests/actions/duplicate-stakeholder-actions.test.ts` (3 serial duplicate-detection tests)
+- [x] Test infrastructure: `tests/rls/_helpers.ts` (4 shared assertion helpers) + `tests/fixtures/stakeholder-fixtures.ts` (7 fixture builders)
+- [x] Hotfix: cascade-cancel pending invitations on `removeStakeholder` (Design C — preserves history for already-accepted invitations); introduced a Drizzle transaction in the action since none existed
+- [x] CI gate: `.github/workflows/rls-gate.yml` runs `test:rls + test:actions + test:cloud-smoke` on every PR to main; cloud-smoke gracefully skips when secrets are not yet configured
+- [→ S8] Performance review of query plans + index tuning — descoped from this session per the no-schema-changes constraint; carried into Session 8 (workflow management) or as a standalone follow-up
+- [→ user] Branch protection rule on `main` requiring "RLS Gate / rls-tests" — manual UI step; document in handover
 
-**Done when:** test suite has 100+ RLS assertions, all passing; no `EXPLAIN` shows seq scans on hot paths.
+**Done when:** test suite has 100+ RLS assertions, all passing; cascade-cancel logic verified; CI gate landed. ✓ (136 RLS / 77 actions / 9 cloud-smoke = 222 total)
 
 ### Session 8: Workflow management
 
@@ -3272,9 +3281,39 @@ Items flagged during Phase 1a Session 1 (kicked off and shipped 04 May 2026, dep
 - Stakeholder portal at `/portal/*` with per-project pages and §14-flag-gated conditional sections; org users wandering in get bounced to `/dashboard`
 - `requireStakeholder()` is no longer a stub — Phase 1b achieves end-to-end stakeholder identity
 
+### §35.7 Session 7 (kickoff → ship: 06 May 2026)
+
+| # | Item | Action | Pull-forward to |
+|---|---|---|---|
+| 1 | **`removeStakeholder` is now transactional.** The action introduces a `db.transaction(...)` wrapper around the soft-delete + cascade-cancel of the paired pending invitation. Cascade fires only when `invitations.acceptedAt IS NULL` (Design C — already-accepted invitations are preserved as historical records). Audit log writes a second entry with `metadata.reason = 'cascade_from_remove_stakeholder'` when the cascade fires. | Future `removeStakeholder` or analogous remove actions: keep the cascade-cancel pattern. Don't add a second action for "cancel paired invitation"; the cascade is the canonical path. | Permanent — applies to any future remove flow with a paired invitation row |
+| 2 | **Matrix testing convention** (documented in §9). Stakeholder-visible RLS tests use a parameterized matrix across the 5 visibility profiles × protected tables × 4 ops. Phase 1c sessions adding `messages` and `project_files` should extend `tests/rls/visibility-matrix.test.ts` rather than duplicating the structure. The shared assertions (`assertVisibleIds`, `assertNotVisible`, `assertWriteDenied`, `assertRpcReturns`) are in `tests/rls/_helpers.ts`. | Phase 1c S9 (messages) + S10 (project_files): extend visibility-matrix.test.ts. | Phase 1c |
+| 3 | **`tests/fixtures/stakeholder-fixtures.ts` is the canonical fixture set for stakeholder tests.** Seven builders: `buildAcceptedStakeholderFixture(profile)`, `buildPendingStakeholderFixture()`, `buildRemovedStakeholderFixture()`, `buildSoftDeletedClientFixture()`, `buildExpiredInvitationFixture()`, `buildMultiOrgStakeholderFixture()`, `buildOwnerAndStakeholderFixture()`. Each layers on `createWorkflowProjectFixture()` and exposes a sequential cleanup. | New stakeholder edge-case scenarios should add a builder here, not inline a fixture in a test file. | Phase 1c onwards |
+| 4 | **`describe.each` / `it.each` patterns introduced.** First use of Vitest's parameterized describe/it blocks in this codebase. Vitest reports each iteration as a separate test (a single `describe.each` over 5 profiles + an inner `it.each` over 3 tables = 15 reports). Plan source counts vs Vitest reports diverge — plan tracks source-level structure; CI/runner output shows expanded counts. | Future matrix tests: same pattern. Document Vitest's expansion semantics if onboarding doc mentions test counts. | Permanent test convention |
+| 5 | **CI gate: `.github/workflows/rls-gate.yml`.** Runs `test:rls + test:actions + test:cloud-smoke` on every PR to main. Cloud-smoke is gracefully skipped when `CLOUD_SUPABASE_URL` / `CLOUD_SUPABASE_ANON_KEY` repo secrets are not set (defensive fallback for the very PR landing the gate). Branch protection on `main` requiring this check is **manual UI** — see SESSION-7-HANDOVER.md for setup steps. The user must configure the cloud-smoke secrets to enable that part of the gate. | Permanent — every Phase 1c+ migration that touches RLS goes through this gate. | Permanent |
+| 6 | **Anti-hijack two-layer defense documented.** `acceptStakeholderInvitation` checks `already_accepted` BEFORE `email_mismatch` (so a different-email auth user replaying an accepted token gets `already_accepted`, not `email_mismatch` — no email leak in the response). Second-line defense: if `clients.auth_user_id` has been mutated to a different valid auth user, the legitimate stakeholder accepting their own token gets `client_already_linked`, and the link is NOT silently overwritten. Verified in `tests/rls/security-boundary.test.ts`. | Future invitation-accept flows (cross-org transfer in Phase 6, etc.): mirror this two-layer pattern. | Phase 6+ |
+| 7 | **Helper SET search_path is regression-tested.** `auth_user_stakeholder_project_visibility(uuid)` and `auth_user_org_project_ids()` both have `SET search_path = public, auth, pg_temp`. Tests in `tests/rls/security-boundary.test.ts` query `pg_proc.proconfig` and assert the SET clause is present. Future migrations dropping the SET clause would fail these tests. | Permanent regression catch. Apply same test pattern to any new SECURITY DEFINER helper. | Permanent |
+| 8 | **Existing re-invite test updated.** The test at `tests/actions/stakeholders.test.ts:162` ("re-invite after removal → undelete path resets fields") previously soft-deleted the invitation row manually before re-inviting. After the cascade-cancel hotfix, that manual cancel is now redundant; the test was updated to call `removeStakeholder()` which cascades the cancel atomically. | Pattern: when the action grows new responsibilities, update existing tests to exercise them rather than working around them. | Test maintenance |
+| 9 | **Worktree pre-flight ritual was incomplete on Session 6 close.** This worktree (`pedantic-goldwasser-747ca1`) was missing all SKILL Rule 22 artifacts (`.env.local` symlink, `node_modules` symlink, `supabase/.temp/` copy). Recreated inline at Session 7 kickoff via `ln -s ../../../{.env.local,node_modules}` + `mkdir + cp` for `supabase/.temp/`. Note: `.env.test` is referenced in the SKILL ritual but is NOT actually used by `tests/setup.ts` — the setup loads `.env.local` and uses `npx supabase status -o env` for local creds. SKILL.md Rule 22 should drop the `.env.test` step or document it as conditional. | Update SKILL Rule 22 to drop `.env.test` from the ritual list. | SKILL.md amendment |
+| 10 | **Performance review + index tuning descoped.** Original §32 row 3 included these; the Session 7 plan locked scope to "no schema changes." Carried as either a S8 follow-up (workflow management session) or a standalone hardening task. The two SECURITY DEFINER helpers (`auth_user_org_project_ids`, `auth_user_stakeholder_project_visibility`) bypass RLS via SET ROLE postgres so query plans on RLS-bound tables are dominated by these helpers — review their SQL bodies before any index push. | Session 8 or follow-up. EXPLAIN the project-list query and the milestone-list query as the highest-traffic stakeholder paths. | Session 8 / follow-up |
+| 11 | **`tests/rls/edge-cases.test.ts` and `tests/rls/security-boundary.test.ts` are hybrid.** They live in `tests/rls/` but import server actions (`acceptStakeholderInvitation`) with the standard auth/email/ratelimit mocks for the security-relevant action assertions. This is a deliberate scope choice — the action's rejection-path coverage belongs adjacent to the RLS coverage of the same scenario. Mirror this pattern when Phase 1c adds equivalent action paths. | Phase 1c when adding e.g. message-accept/reject flows. | Phase 1c |
+
+**Full session handover:** `SESSION-7-HANDOVER.md` in repo root.
+
+**State at Session 7 close:**
+- 9 commits on the session branch (this branch, off main at 570baa1)
+- Local Supabase: migrations 0001..0013 applied (no new migrations this session — explicit no-schema-change scope)
+- Cloud Supabase: unchanged from Session 6
+- RLS tests: 136/136 (was 55; +60 visibility-matrix +15 edge-cases +6 security-boundary)
+- Action tests: 77/77 (was 66; +3 cascade-hotfix +5 visibility-runtime-override +3 duplicate-detection)
+- Cloud-smoke: 9/9 (unchanged)
+- Build clean / tsc clean
+- New CI workflow `.github/workflows/rls-gate.yml` (runs on PRs to main)
+- `removeStakeholder` is now transactional and cascade-cancels pending invitations (Design C)
+- Production smoke test deferred until merge-to-main (no UI changes; only the cascade-cancel touches a user-facing path indirectly via the existing remove flow)
+
 ---
 
-**Last reviewed:** 06 May 2026 (Phase 1b S6 shipped — v0.8)
+**Last reviewed:** 06 May 2026 (Phase 1b S7 shipped — v0.9)
 
 ## End of document
 
