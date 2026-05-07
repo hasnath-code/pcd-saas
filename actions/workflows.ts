@@ -431,11 +431,16 @@ export async function deleteWorkflow(input: unknown): Promise<WorkflowActionResu
     return { error: 'conflict', reason: 'already_deleted' };
   }
 
+  // Including org_id in the WHERE — defense-in-depth (workflow ids are
+  // globally unique so workflow_id alone is correct, but the org_id filter
+  // lets the planner cleanly hit idx_projects_org instead of an idx_projects_stage
+  // bitmap fallback. Verified via Phase E perf audit.
   const inUse = await db
     .select({ id: projects.id })
     .from(projects)
     .where(
       and(
+        eq(projects.orgId, ctx.orgId),
         eq(projects.workflowId, workflowId),
         isNull(projects.deletedAt),
       ),
