@@ -25,6 +25,7 @@ import {
 } from '@/components/ui/table';
 import { ProjectStageBadge } from '@/components/projects/ProjectStageBadge';
 import { SoftDeleteProjectButton } from '@/components/projects/SoftDeleteProjectButton';
+import { StageSelector } from '@/components/projects/StageSelector';
 import { InviteStakeholderForm } from '@/components/stakeholders/InviteStakeholderForm';
 import { StakeholdersList } from '@/components/stakeholders/StakeholdersList';
 import { CancelInvitationButton } from '@/components/team/CancelInvitationButton';
@@ -121,9 +122,18 @@ export default async function ProjectDetailPage({
               );
             })}
           </div>
-          <p className="mt-3 text-xs text-muted-foreground">
-            Stage transitions ship in a future update.
-          </p>
+          <div className="mt-4 border-t pt-4">
+            <StageSelector
+              projectId={project.id}
+              currentStageId={project.currentStageId}
+              stages={project.workflowStages.map((s) => ({
+                id: s.id,
+                name: s.name,
+                position: s.position,
+                isTerminal: s.isTerminal,
+              }))}
+            />
+          </div>
         </CardContent>
       </Card>
 
