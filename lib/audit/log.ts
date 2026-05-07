@@ -11,6 +11,14 @@ export type AuditAction =
   | 'update'
   | 'soft_delete'
   | 'restore'
+  // Session 8: hard delete for tables that don't carry deleted_at (e.g.
+  // workflow_stages — stages don't have history independent of their parent).
+  | 'delete'
+  // Session 8: project current_stage_id transition. Metadata locks the schema
+  // for forward-compatibility with the Phase 1c notification dispatch
+  // (project_activity table reads from this same metadata shape — see
+  // ARCHITECTURE-saas.md §12.7 + Session 8 plan Hard Rule 8).
+  | 'stage_changed'
   | 'permission_change'
   | 'invite_sent'
   | 'invite_accepted'

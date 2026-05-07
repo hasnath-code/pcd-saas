@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from 'vitest';
+import { v7 as uuidv7 } from 'uuid';
 import { asAnon } from '../helpers/as-anon';
 import { asUser } from '../helpers/as-user';
 import {
@@ -83,6 +84,74 @@ describe('workflows RLS', () => {
       ]);
     expect(data ?? []).toEqual([]);
   });
+
+  // ── Session 8: workflow CRUD additions ────────────────────────────────────
+
+  test('User A cannot INSERT a workflow scoped to Org B', async () => {
+    const c = await asUser(f.userA.email, f.userA.password);
+    const newId = uuidv7();
+    const { data } = await c
+      .from('workflows')
+      .insert({
+        id: newId,
+        org_id: f.orgB.id,
+        slug: 'cross-org-attempt',
+        name: 'Cross Org Attempt',
+        is_system_template: false,
+        is_default: false,
+      })
+      .select();
+    expect(data ?? []).toEqual([]);
+    // Confirm via service role that no row landed.
+    const { data: check } = await f.service
+      .from('workflows')
+      .select('id')
+      .eq('id', newId);
+    expect(check ?? []).toEqual([]);
+  });
+
+  test('User A cannot INSERT a system-template workflow', async () => {
+    const c = await asUser(f.userA.email, f.userA.password);
+    const newId = uuidv7();
+    const { data } = await c
+      .from('workflows')
+      .insert({
+        id: newId,
+        org_id: null, // system templates have NULL org_id per the CHECK constraint
+        slug: 'pwn-template',
+        name: 'PWN Template',
+        is_system_template: true,
+        is_default: false,
+      })
+      .select();
+    expect(data ?? []).toEqual([]);
+  });
+
+  test('User A cannot DELETE Org B workflow', async () => {
+    const c = await asUser(f.userA.email, f.userA.password);
+    const { data } = await c
+      .from('workflows')
+      .delete()
+      .eq('id', f.extras.orgBWorkflow.id)
+      .select();
+    expect(data ?? []).toEqual([]);
+    // Service-role confirms it's still there.
+    const { data: check } = await f.service
+      .from('workflows')
+      .select('id')
+      .eq('id', f.extras.orgBWorkflow.id);
+    expect(check).toHaveLength(1);
+  });
+
+  test('User A cannot DELETE the system template', async () => {
+    const c = await asUser(f.userA.email, f.userA.password);
+    const { data } = await c
+      .from('workflows')
+      .delete()
+      .eq('id', f.extras.systemTemplate.id)
+      .select();
+    expect(data ?? []).toEqual([]);
+  });
 });
 
 describe('workflow_stages RLS', () => {
@@ -129,5 +198,96 @@ describe('workflow_stages RLS', () => {
       .select('id')
       .eq('workflow_id', f.extras.systemTemplate.id);
     expect(data ?? []).toEqual([]);
+  });
+
+  // ── Session 8: workflow_stages CRUD additions ─────────────────────────────
+
+  test('User A cannot INSERT a stage into Org B workflow', async () => {
+    const c = await asUser(f.userA.email, f.userA.password);
+    const newId = uuidv7();
+    const { data } = await c
+      .from('workflow_stages')
+      .insert({
+        id: newId,
+        workflow_id: f.extras.orgBWorkflow.id,
+        slug: 'pwn',
+        name: 'PWN',
+        position: 99,
+        is_terminal: false,
+      })
+      .select();
+    expect(data ?? []).toEqual([]);
+    // Service-role confirms no row landed.
+    const { data: check } = await f.service
+      .from('workflow_stages')
+      .select('id')
+      .eq('id', newId);
+    expect(check ?? []).toEqual([]);
+  });
+
+  test('User A cannot INSERT a stage into the system template', async () => {
+    const c = await asUser(f.userA.email, f.userA.password);
+    const { data } = await c
+      .from('workflow_stages')
+      .insert({
+        id: uuidv7(),
+        workflow_id: f.extras.systemTemplate.id,
+        slug: 'pwn',
+        name: 'PWN',
+        position: 99,
+        is_terminal: false,
+      })
+      .select();
+    expect(data ?? []).toEqual([]);
+  });
+
+  test('User A cannot DELETE Org B stages', async () => {
+    // Pick any stage in Org B's workflow.
+    const { data: orgBStages } = await f.service
+      .from('workflow_stages')
+      .select('id')
+      .eq('workflow_id', f.extras.orgBWorkflow.id)
+      .limit(1);
+    const targetId = orgBStages?.[0]?.id;
+    expect(targetId).toBeDefined();
+
+    const c = await asUser(f.userA.email, f.userA.password);
+    const { data } = await c
+      .from('workflow_stages')
+      .delete()
+      .eq('id', targetId!)
+      .select();
+    expect(data ?? []).toEqual([]);
+    // Service-role confirms it's still there.
+    const { data: check } = await f.service
+      .from('workflow_stages')
+      .select('id')
+      .eq('id', targetId!);
+    expect(check).toHaveLength(1);
+  });
+
+  test('User A cannot UPDATE Org B stages', async () => {
+    const { data: orgBStages } = await f.service
+      .from('workflow_stages')
+      .select('id, name')
+      .eq('workflow_id', f.extras.orgBWorkflow.id)
+      .limit(1);
+    const target = orgBStages?.[0];
+    expect(target).toBeDefined();
+
+    const c = await asUser(f.userA.email, f.userA.password);
+    const { data } = await c
+      .from('workflow_stages')
+      .update({ name: 'PWNED' })
+      .eq('id', target!.id)
+      .select();
+    expect(data ?? []).toEqual([]);
+    // Service-role: name unchanged.
+    const { data: check } = await f.service
+      .from('workflow_stages')
+      .select('name')
+      .eq('id', target!.id)
+      .single();
+    expect(check?.name).toBe(target!.name);
   });
 });
