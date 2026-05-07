@@ -60,6 +60,19 @@ export default async function SettingsPage() {
       <CompanyDetailsForm initial={companyInitial} canEdit={canEdit} />
       <BankDetailsForm initial={bankInitial} canEdit={canEdit} />
       <DefaultTermsForm initial={termsInitial} canEdit={canEdit} />
+
+      <div className="rounded-md border p-4">
+        <h2 className="text-base font-semibold">Workflows</h2>
+        <p className="mt-1 text-sm text-muted-foreground">
+          Manage the stages your projects move through.
+        </p>
+        <Link
+          href="/settings/workflows"
+          className="mt-3 inline-block text-sm font-medium text-primary hover:underline"
+        >
+          Manage workflows →
+        </Link>
+      </div>
     </main>
   );
 }

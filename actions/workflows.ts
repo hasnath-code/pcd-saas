@@ -1,16 +1,22 @@
 'use server';
 
+import { z } from 'zod';
 import { v7 as uuidv7 } from 'uuid';
 import { and, eq, isNull } from 'drizzle-orm';
 import { revalidatePath } from 'next/cache';
 import {
   AuthError,
   requireOrgAdmin,
+  requireOrgUser,
   type ServerActionErrorCode,
 } from '@/lib/auth/requireAuth';
 import { db } from '@/db';
 import { projects, workflows, workflowStages } from '@/db/schema';
 import { logAudit } from '@/lib/audit/log';
+import {
+  getWorkflowWithStages,
+  type WorkflowDetail,
+} from '@/db/queries/workflows';
 import {
   AddWorkflowStageInput,
   CreateWorkflowInput,
@@ -119,7 +125,7 @@ export async function createWorkflow(
     },
   });
 
-  revalidatePath('/dashboard/settings/workflows');
+  revalidatePath('/settings/workflows');
 
   return { success: true, data: { workflowId } };
 }
@@ -180,7 +186,7 @@ export async function updateWorkflow(input: unknown): Promise<WorkflowActionResu
     metadata: { fields: Object.keys(updates) },
   });
 
-  revalidatePath('/dashboard/settings/workflows');
+  revalidatePath('/settings/workflows');
 
   return { success: true };
 }
@@ -286,7 +292,7 @@ export async function addWorkflowStage(
     metadata: { workflow_id: workflowId, slug, position, is_terminal: isTerminal },
   });
 
-  revalidatePath('/dashboard/settings/workflows');
+  revalidatePath('/settings/workflows');
 
   return { success: true, data: { stageId } };
 }
@@ -381,7 +387,7 @@ export async function removeWorkflowStage(
     metadata: { workflow_id: stage.workflowId, was_terminal: stage.isTerminal },
   });
 
-  revalidatePath('/dashboard/settings/workflows');
+  revalidatePath('/settings/workflows');
 
   return { success: true };
 }
@@ -452,7 +458,34 @@ export async function deleteWorkflow(input: unknown): Promise<WorkflowActionResu
     resourceId: workflowId,
   });
 
-  revalidatePath('/dashboard/settings/workflows');
+  revalidatePath('/settings/workflows');
 
   return { success: true };
+}
+
+// Read-only fetch for the EditWorkflowDialog. Wraps getWorkflowWithStages with
+// the standard auth + discriminated-union shape so client components can call
+// it directly. Any org member (not just admins) can read; mutation actions
+// gate on admin role.
+const FetchWorkflowInput = z.object({ workflowId: z.string().uuid() });
+
+export async function fetchWorkflowDetail(
+  input: unknown,
+): Promise<WorkflowActionResult<WorkflowDetail>> {
+  let ctx: Awaited<ReturnType<typeof requireOrgUser>>;
+  try {
+    ctx = await requireOrgUser();
+  } catch (e) {
+    if (e instanceof AuthError) return { error: e.code, reason: e.message };
+    throw e;
+  }
+
+  const parsed = parseInput(FetchWorkflowInput, input);
+  if (!parsed.ok) return parsed.result;
+
+  const detail = await getWorkflowWithStages(parsed.data.workflowId, ctx.orgId);
+  if (!detail) {
+    return { error: 'not_found', reason: 'workflow' };
+  }
+  return { success: true, data: detail };
 }
