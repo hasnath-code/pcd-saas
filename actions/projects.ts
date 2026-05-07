@@ -310,6 +310,139 @@ export async function softDeleteProject(
   return { success: true };
 }
 
+const MoveProjectToStageInput = z.object({
+  projectId: z.string().uuid(),
+  toStageId: z.string().uuid(),
+});
+
+// Move a project to a different stage of its workflow. Forward and backward
+// transitions are both allowed (mistakes happen — the UI surfaces a
+// confirmation for backward moves but the server doesn't block).
+//
+// Single-row UPDATE; no transaction required because the audit log is fired
+// after the row commits and lives in a separate table that doesn't roll back
+// with the project update — by design, audit gaps surface in Sentry rather
+// than blocking the user-facing mutation.
+//
+// Audit metadata schema is locked for forward-compatibility with the Phase 1c
+// notification dispatch (see ARCHITECTURE-saas.md §12.7 + Session 8 plan
+// Hard Rule 8): from_stage_id/name/position, to_stage_id/name/position,
+// workflow_id, is_backward_transition, is_terminal_destination.
+//
+// Cross-workflow stage targets are rejected (validation_error) — the target
+// stage must belong to the project's current workflow. Cross-org projects
+// surface as not_found.
+export async function moveProjectToStage(
+  input: unknown,
+): Promise<
+  ProjectActionResult<{
+    isBackwardTransition: boolean;
+    isTerminalDestination: boolean;
+  }>
+> {
+  let ctx: Awaited<ReturnType<typeof requireOrgUser>>;
+  try {
+    ctx = await requireOrgUser();
+  } catch (e) {
+    if (e instanceof AuthError) return { error: e.code, reason: e.message };
+    throw e;
+  }
+
+  const parsed = MoveProjectToStageInput.safeParse(input);
+  if (!parsed.success) {
+    return {
+      error: 'validation_error',
+      reason: parsed.error.issues[0]?.message ?? 'Invalid input',
+    };
+  }
+  const { projectId, toStageId } = parsed.data;
+
+  const projectRows = await db
+    .select({
+      id: projects.id,
+      orgId: projects.orgId,
+      workflowId: projects.workflowId,
+      currentStageId: projects.currentStageId,
+    })
+    .from(projects)
+    .where(and(eq(projects.id, projectId), isNull(projects.deletedAt)))
+    .limit(1);
+  if (projectRows.length === 0 || projectRows[0].orgId !== ctx.orgId) {
+    return { error: 'not_found', reason: 'project' };
+  }
+  const project = projectRows[0];
+
+  // No-op if the user picked the current stage. Surface as validation_error
+  // so the UI can hide the menu item or react accordingly; cheaper than
+  // logging a no-op audit row.
+  if (project.currentStageId === toStageId) {
+    return { error: 'validation_error', reason: 'already_on_stage' };
+  }
+
+  // Fetch both stages with their position/terminal/workflow_id in one query.
+  // If toStageId doesn't exist or doesn't belong to the project's workflow,
+  // we return validation_error.
+  const stageRows = await db
+    .select({
+      id: workflowStages.id,
+      workflowId: workflowStages.workflowId,
+      name: workflowStages.name,
+      position: workflowStages.position,
+      isTerminal: workflowStages.isTerminal,
+    })
+    .from(workflowStages)
+    .where(
+      and(
+        eq(workflowStages.workflowId, project.workflowId),
+        // toStageId OR currentStageId — fetched together
+      ),
+    );
+  const fromStage = stageRows.find((s) => s.id === project.currentStageId);
+  const toStage = stageRows.find((s) => s.id === toStageId);
+  if (!fromStage) {
+    // Shouldn't happen — projects.current_stage_id FK guarantees it. Defensive.
+    return { error: 'internal_error', reason: 'current_stage_missing' };
+  }
+  if (!toStage) {
+    return { error: 'validation_error', reason: 'stage_not_in_project_workflow' };
+  }
+
+  const isBackwardTransition = toStage.position < fromStage.position;
+  const isTerminalDestination = toStage.isTerminal === true;
+
+  await db
+    .update(projects)
+    .set({ currentStageId: toStageId })
+    .where(eq(projects.id, projectId));
+
+  await logAudit({
+    orgId: ctx.orgId,
+    userId: ctx.userId,
+    action: 'stage_changed',
+    resourceType: 'project',
+    resourceId: projectId,
+    metadata: {
+      from_stage_id: fromStage.id,
+      from_stage_name: fromStage.name,
+      from_stage_position: fromStage.position,
+      to_stage_id: toStage.id,
+      to_stage_name: toStage.name,
+      to_stage_position: toStage.position,
+      workflow_id: project.workflowId,
+      is_backward_transition: isBackwardTransition,
+      is_terminal_destination: isTerminalDestination,
+    },
+  });
+
+  revalidatePath(`/dashboard/projects/${projectId}`, 'layout');
+  revalidatePath(`/portal/projects/${projectId}`, 'layout');
+
+  return {
+    success: true,
+    data: { isBackwardTransition, isTerminalDestination },
+  };
+}
+
 // Admin-only restore.
 export async function restoreProject(
   input: unknown,
