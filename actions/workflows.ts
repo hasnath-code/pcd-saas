@@ -431,10 +431,13 @@ export async function deleteWorkflow(input: unknown): Promise<WorkflowActionResu
     return { error: 'conflict', reason: 'already_deleted' };
   }
 
-  // Including org_id in the WHERE — defense-in-depth (workflow ids are
-  // globally unique so workflow_id alone is correct, but the org_id filter
-  // lets the planner cleanly hit idx_projects_org instead of an idx_projects_stage
-  // bitmap fallback. Verified via Phase E perf audit.
+  // org_id filter required for index plan + correctness — see
+  // SESSION-8-HANDOVER Phase E. Without it, the planner falls back to a
+  // Bitmap Heap Scan via idx_projects_stage's partial-index condition. With
+  // it, this is a clean Index Scan via idx_projects_org. RLS would enforce
+  // the org boundary on real client requests, but `db` here uses the postgres
+  // pooler role and bypasses RLS — so org_id in the WHERE is a correctness
+  // gain too, not just a perf one.
   const inUse = await db
     .select({ id: projects.id })
     .from(projects)

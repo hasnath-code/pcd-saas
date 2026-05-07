@@ -1,6 +1,6 @@
 # PCD Portal SaaS — Architecture Reference
 
-**Version:** 0.9 (Phase 1b Session 7 shipped — RLS hardening matrix + cascade-cancel hotfix + CI gate)
+**Version:** 0.10 (Phase 1b Session 8 shipped — workflow CRUD + stage transitions + PCD seed v2 + perf audit; Phase 1b complete)
 **Last updated:** 06 May 2026
 **Maintainer:** Hasnath
 **Codebase status:** Phase 1b in progress — Session 7 shipped a comprehensive RLS test matrix (5 visibility profiles × 3 protected tables × 4 ops), 6 edge-case scenarios, 6 security-boundary regression tests, the `removeStakeholder` cascade-cancel hotfix (Design C — preserves accepted-invitation history), action-layer matrix coverage for visibility runtime overrides, and a GitHub Actions CI gate (`.github/workflows/rls-gate.yml`). 136 RLS + 77 action + 9 cloud-smoke tests green (was 55 + 66 + 9 = 130; now 222). Two new test infra files: `tests/rls/_helpers.ts` (canonical assertion library) + `tests/fixtures/stakeholder-fixtures.ts` (7 fixture builders covering happy + 6 edge-case states). 1 session remaining in Phase 1b (S8 workflow management).
@@ -1649,14 +1649,16 @@ async function cloneSystemTemplateForOrg(orgId: string, templateSlug: string) {
 
 Stage changes happen via `actions/projects.ts → moveProjectToStage(projectId, stageId)`:
 
-1. Verify caller has org access to the project
-2. Verify target stage belongs to project's workflow
-3. Update `projects.current_stage_id`
-4. Insert `project_activity` row with `event_type = 'project.stage_changed'`
-5. Trigger notifications to stakeholders (subject to their visibility profiles)
-6. Audit log entry
+1. Verify caller has org access to the project (cross-org → not_found)
+2. Verify target stage belongs to project's workflow (else `validation_error/stage_not_in_project_workflow`)
+3. Update `projects.current_stage_id` (single-row UPDATE; no transaction needed)
+4. Insert `audit_logs` row with `action = 'stage_changed'`, `resource_type = 'project'`, and metadata locked to a 9-field schema (Phase 1b destination — see note below)
+5. *(Phase 1c)* Trigger notifications to stakeholders (subject to their visibility profiles)
+6. *(Phase 1c)* Insert `project_activity` row mirroring the audit log
 
-No automatic transitions in Phase 1. Future phases may add rules ("when invoice marked paid, advance to next stage") but Phase 1 keeps it manual.
+Forward and backward transitions are both allowed (mistakes happen — UI surfaces a confirm() prompt for backward, server doesn't block). No automatic transitions in Phase 1. Future phases may add rules ("when invoice marked paid, advance to next stage") but Phase 1 keeps it manual.
+
+**Phase 1b destination for stage_changed events:** `audit_logs` table (§10.7). The dedicated `project_activity` table lands in Phase 1c (Session 11) and notification dispatch reads from there — but for Phase 1b we route stage_changed to `audit_logs` with a forward-compatible metadata schema so Phase 1c can backfill `project_activity` from `audit_logs` rows if needed. The locked metadata fields are: `from_stage_id`, `from_stage_name`, `from_stage_position`, `to_stage_id`, `to_stage_name`, `to_stage_position`, `workflow_id`, `is_backward_transition`, `is_terminal_destination`. **Do not narrow this schema** — Phase 1c notification dispatch consumes all 9 fields and any narrowing requires a migration of historical rows.
 
 ---
 
@@ -3012,17 +3014,19 @@ Before moving to Phase 1b:
 
 **Done when:** test suite has 100+ RLS assertions, all passing; cascade-cancel logic verified; CI gate landed. ✓ (136 RLS / 77 actions / 9 cloud-smoke = 222 total)
 
-### Session 8: Workflow management
+### Session 8: Workflow management ✓ shipped
 
 **Tasks:**
-- [ ] Stage transitions: `actions/projects.ts → moveProjectToStage`
-- [ ] Custom workflow CRUD: `actions/workflows.ts`
-- [ ] Workflow editor UI (add/edit/delete stages, reorder, set terminal)
-- [ ] Workflow assignment dropdown in project create
-- [ ] Activity log entry on stage change (placeholder — full activity in 1c)
-- [ ] One-time migration to seed "PCD Surveyor" workflow on Hasnath's org
+- [x] Stage transitions: `actions/projects.ts → moveProjectToStage` (locked audit metadata for Phase 1c)
+- [x] Custom workflow CRUD: `actions/workflows.ts` (5 actions — create/update/delete + addStage/removeStage; admin-gated; cross-org + system-template guards)
+- [x] Workflow editor UI: page at `/settings/workflows` + Create/Edit dialogs (add/remove stages; reorder deferred to post-launch UX work)
+- [x] ~~Workflow assignment dropdown in project create~~ — already shipped in Session 5 (`createProject` takes `workflowId` from input)
+- [x] Activity log entry on stage change → `audit_logs.action='stage_changed'` (Phase 1b destination; `project_activity` arrives Session 11)
+- [x] PCD Surveyor seed updated 8 → 10 stages: `scripts/seed-hasnath-pcd-surveyor.ts` (standalone script, not a migration; idempotent re-run)
 
-**Done when:** org admins can create custom workflows; projects can transition stages; PCD Surveyor template seeded on the designated org.
+**Plus** (descoped from Session 7 → §35.7 entry 10): Phase E performance audit. EXPLAIN ANALYZE on the 5 hot paths against cloud Supabase confirmed all queries are index-scan with sub-2ms execution. No new indexes shipped; one in-action tightening in `deleteWorkflow` (org_id + workflow_id) for clean idx_projects_org plan.
+
+**Done.** Phase 1b is closed.
 
 ### Phase 1b exit criteria
 
@@ -3311,9 +3315,34 @@ Items flagged during Phase 1a Session 1 (kicked off and shipped 04 May 2026, dep
 - `removeStakeholder` is now transactional and cascade-cancels pending invitations (Design C)
 - Production smoke test deferred until merge-to-main (no UI changes; only the cascade-cancel touches a user-facing path indirectly via the existing remove flow)
 
+### §35.8 Session 8 (kickoff → ship: 07 May 2026)
+
+| # | Item | Action | Pull-forward to |
+|---|---|---|---|
+| 1 | **`stage_changed` audit metadata schema is LOCKED.** 9 fields: `from_stage_id`, `from_stage_name`, `from_stage_position`, `to_stage_id`, `to_stage_name`, `to_stage_position`, `workflow_id`, `is_backward_transition`, `is_terminal_destination`. Phase 1c notification dispatch consumes all 9. Any narrowing requires a migration of historical rows. | Phase 1c S11 (notifications): read this schema directly. Don't define a parallel one. | Permanent |
+| 2 | **`audit_logs.action` extended with `'stage_changed'` and `'delete'`.** Closed-union type in `lib/audit/log.ts`. `'stage_changed'` for project stage transitions; `'delete'` for hard delete on tables without `deleted_at` (workflow_stages). | Future closed-union extensions: keep the type narrow + per-domain. | Permanent |
+| 3 | **System-template guard ordering matters.** Initial bug: cross-org check ran before system-template check, but system templates have `org_id IS NULL`, so the comparison shadowed the system-template branch (returned not_found instead of not_authorized). Fix: check `isSystemTemplate` FIRST, then cross-org. Pattern: when a resource has multiple "visible by everyone" branches (system templates, public refs, etc.), check the public-visibility branch before the org-membership branch. | Future: any reference table with mixed-visibility (system-seeded + per-org) follows this guard order. | Permanent |
+| 4 | **Defense-in-depth: include `org_id` in workflow_in_use checks even though workflow IDs are globally unique.** The action's `db` instance bypasses RLS via the postgres pooler role. RLS would catch the boundary on a real client query, but action-layer queries hit the DB without that net. Including `org_id` makes the planner cleanly use `idx_projects_org` (verified Phase E EXPLAIN ANALYZE) AND eliminates a class of cross-org leak that would otherwise rely on RLS-on-actions semantics. | Pattern for any future "in-use" check that filters by FK to a per-org resource. | Permanent |
+| 5 | **`tests/rls/workflows.test.ts` extended in place rather than creating workflows-cross-org.test.ts.** The Session 8 plan called for a separate file but the existing file already had cross-org SELECT/UPDATE coverage; +8 new tests covering INSERT/DELETE cross-org + system-template INSERT/DELETE were appended directly. Cleaner than splitting. | Future RLS additions: extend existing per-table file before creating a new one. | Test convention |
+| 6 | **No `idx_projects_workflow_id`.** Phase E audit identified the missing index but proved it's not needed at typical scale: `countActiveProjectsByWorkflow` filters by `org_id` first (idx_projects_org covers it); `deleteWorkflow`'s in-use check now also filters by org_id (entry 4). Re-evaluate if "find all projects on workflow X" becomes a frequent cross-org admin query (unlikely). | Phase 4+ if architect lifecycle introduces global workflow analytics. | Future |
+| 7 | **Phase F (browser QA) ran post-merge, NOT during the session branch.** The plan called for QA before docs commit but `gh` CLI wasn't available on the worktree machine to open the PR programmatically. User opened the PR via web UI and ran Phase F themselves on the deployed preview. Future sessions: confirm `gh` CLI availability during pre-flight, OR plan for user-driven QA from the start. | Pre-flight ritual update: include `which gh` in Rule 22. | SKILL.md amendment |
+
+**Full session handover:** `SESSION-8-HANDOVER.md` in repo root.
+
+**State at Session 8 close:**
+- 7 commits on the session branch (this branch, off main at e60ca15)
+- Local Supabase: migrations 0001..0013 applied (no new migrations — schema sufficient per Phase A1 verification)
+- Cloud Supabase: unchanged from Session 7
+- RLS tests: 147/147 (was 136; +8 workflows write/cross-org +3 project-stage-transition)
+- Action tests: 100/100 (was 77; +16 workflows CRUD +7 stage-transition)
+- Cloud-smoke: 9/9 (unchanged)
+- Build clean / tsc clean
+- Phase 1b is closed
+- PCD Surveyor seed script updated to 10 stages but not yet run against the user's real org (manual step post-merge — see SESSION-8-HANDOVER.md)
+
 ---
 
-**Last reviewed:** 06 May 2026 (Phase 1b S7 shipped — v0.9)
+**Last reviewed:** 07 May 2026 (Phase 1b S8 shipped — v0.10; Phase 1b complete)
 
 ## End of document
 
