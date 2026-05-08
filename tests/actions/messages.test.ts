@@ -15,6 +15,8 @@ vi.mock('@/lib/auth/requireAuth', async (importOriginal) => {
   };
 });
 
+vi.mock('next/cache', () => ({ revalidatePath: vi.fn() }));
+
 import { deleteMessage, editMessage, sendMessage } from '@/actions/messages';
 import * as auth from '@/lib/auth/requireAuth';
 

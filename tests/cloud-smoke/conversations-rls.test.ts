@@ -1,50 +1,45 @@
+// Cloud smoke: anon-keyed REST reads on RLS-protected Phase 1c tables MUST
+// return empty arrays (RLS blocks) or HTTP 401/403 — never expose data.
+// Mirrors tests/cloud-smoke/projects-rls.test.ts structure.
+//
+// Run with: npm run test:cloud-smoke
+import { createClient } from '@supabase/supabase-js';
 import { describe, expect, test } from 'vitest';
 
-// Cloud-smoke check: anon GET on Phase 1c tables must return empty datasets
-// (RLS enforces that authenticated reads require a matching identity).
-// Mirrors tests/cloud-smoke/projects-rls.test.ts pattern.
-//
-// Skipped unless CLOUD_SMOKE=1 is set in env (matches the npm run test:cloud-smoke
-// gate). The CI workflow .github/workflows/rls-gate.yml sets this.
-
-const CLOUD_SUPABASE_URL = process.env.CLOUD_SUPABASE_URL;
-const CLOUD_SUPABASE_ANON_KEY = process.env.CLOUD_SUPABASE_ANON_KEY;
-
-const skip = process.env.CLOUD_SMOKE !== '1' || !CLOUD_SUPABASE_URL || !CLOUD_SUPABASE_ANON_KEY;
-
-const describeOrSkip = skip ? describe.skip : describe;
-
-describeOrSkip('Phase 1c cloud RLS (anon)', () => {
-  async function anonGet(table: string): Promise<Response> {
-    return fetch(`${CLOUD_SUPABASE_URL}/rest/v1/${table}?select=id&limit=1`, {
-      headers: {
-        apikey: CLOUD_SUPABASE_ANON_KEY!,
-        Authorization: `Bearer ${CLOUD_SUPABASE_ANON_KEY}`,
-      },
-    });
-  }
-
-  test('anon GET /rest/v1/conversations returns empty array', async () => {
-    const res = await anonGet('conversations');
-    expect(res.status).toBe(200);
-    const body = await res.json();
-    expect(Array.isArray(body)).toBe(true);
-    expect(body).toEqual([]);
+describe('cloud Phase 1c tables are anon-blocked', () => {
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL!;
+  const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
+  const client = createClient(url, anonKey, {
+    auth: { autoRefreshToken: false, persistSession: false },
   });
 
-  test('anon GET /rest/v1/conversation_participants returns empty array', async () => {
-    const res = await anonGet('conversation_participants');
-    expect(res.status).toBe(200);
-    const body = await res.json();
-    expect(Array.isArray(body)).toBe(true);
-    expect(body).toEqual([]);
+  test('GET /rest/v1/conversations returns no rows for anon (RLS blocks)', async () => {
+    const { data, status } = await client.from('conversations').select('id').limit(1);
+    if (status === 200) {
+      expect(data ?? []).toEqual([]);
+    } else {
+      expect([401, 403]).toContain(status);
+    }
   });
 
-  test('anon GET /rest/v1/messages returns empty array', async () => {
-    const res = await anonGet('messages');
-    expect(res.status).toBe(200);
-    const body = await res.json();
-    expect(Array.isArray(body)).toBe(true);
-    expect(body).toEqual([]);
+  test('GET /rest/v1/conversation_participants returns no rows for anon (RLS blocks)', async () => {
+    const { data, status } = await client
+      .from('conversation_participants')
+      .select('id')
+      .limit(1);
+    if (status === 200) {
+      expect(data ?? []).toEqual([]);
+    } else {
+      expect([401, 403]).toContain(status);
+    }
+  });
+
+  test('GET /rest/v1/messages returns no rows for anon (RLS blocks)', async () => {
+    const { data, status } = await client.from('messages').select('id').limit(1);
+    if (status === 200) {
+      expect(data ?? []).toEqual([]);
+    } else {
+      expect([401, 403]).toContain(status);
+    }
   });
 });

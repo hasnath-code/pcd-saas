@@ -50,6 +50,27 @@
 
 # Open Debt
 
+## DEBT-023 — Test fixtures creating users must use service.auth.admin.createUser
+**Added:** 09 May 2026 (Session 9)
+**Codebase:** SaaS
+**Severity:** Low
+**Type:** Documentation / Missing test (test infrastructure)
+**Status:** Open
+
+**The debt:** `public.users.auth_user_id` has a FK to `auth.users`. Test fixtures that insert `users` rows directly with a fake `uuidv7()` either fail the FK constraint or silently no-op (depending on PostgREST error handling), producing confusing test failures downstream — typically a server action returning `cross_org_user` because the fixture user was never actually created.
+
+**Why it exists:** The pattern is documented inline in `tests/fixtures/two-orgs.ts:79+` but not surfaced in test-writing conventions or a shared helper. Session 9's `addConversationParticipant` fixture initially used fake UUIDs and hit the bug — ~25 minutes of debugging before tracing it back.
+
+**Cost of leaving it:** Sessions 10–12 may repeat the pattern. Each instance costs ~15–30 minutes of debugging. Easy to step on because the fix isn't obvious from the failure mode (silent no-op or downstream auth check failure, not a clear FK error).
+
+**Fix sketch:** Add a tiny helper `tests/helpers/create-test-user.ts` that wraps `service.auth.admin.createUser` + `public.users` insert in a single call. Document at the top of `tests/fixtures/two-orgs.ts` (or in `tests/README.md` if/when one exists). Probably 30 lines including types.
+
+**Trigger:** Next session that needs to add a new test user (likely Session 10 or 11).
+
+**Cross-references:** `tests/fixtures/two-orgs.ts:79+`, `tests/actions/conversations.test.ts` (addConversationParticipant fixture)
+
+---
+
 ## DEBT-022 — Conversations: new org members not auto-joined to existing one_to_one threads
 **Added:** 09 May 2026 (Session 9)
 **Codebase:** SaaS
@@ -573,6 +594,7 @@ For quick lookup of what needs to happen at each upcoming milestone:
 - DEBT-017: POST-SESSION-CHECKLIST update for N/A discipline
 - DEBT-019: Drizzle journal/snapshots gap for 0012-0017 (tooling)
 - DEBT-022: Auto-join new org members to existing one-to-one conversations
+- DEBT-023: Test-user fixture helper (auth.admin.createUser convention)
 
 ## Indefinite (revisit at trigger)
 - DEBT-015: RLS performance at scale (>$10K MRR or visible latency)

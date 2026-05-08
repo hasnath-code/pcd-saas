@@ -20,6 +20,8 @@ vi.mock('@/lib/auth/requireAuth', async (importOriginal) => {
   };
 });
 
+vi.mock('next/cache', () => ({ revalidatePath: vi.fn() }));
+
 import {
   addConversationParticipant,
   createGroupConversation,
@@ -114,24 +116,42 @@ describe('createGroupConversation', () => {
 
 describe('addConversationParticipant', () => {
   let f: ConversationsFixture;
-  let secondUser: { userId: string };
+  let secondUser: { userId: string; authUserId: string };
 
   beforeAll(async () => {
     f = await createConversationFixture();
-    // Add a second org-A user we can add to the conversation.
+    // Add a second org-A user we can add to the conversation. users.auth_user_id
+    // has a FK to auth.users, so we need a real auth user — same pattern as
+    // tests/fixtures/two-orgs.ts:79+.
+    const ts = Date.now();
+    const rnd = Math.random().toString(36).slice(2, 8);
+    const email = `second-${ts}-${rnd}@test.local`;
+    const password = `pwSecond-${ts}-${rnd}-x9X`;
+    const { data: authDat, error: authErr } = await f.service.auth.admin.createUser({
+      email,
+      password,
+      email_confirm: true,
+    });
+    if (authErr || !authDat?.user) {
+      throw new Error(`fixture: secondUser auth createUser: ${authErr?.message ?? 'no user'}`);
+    }
     const id = uuidv7();
-    await f.service.from('users').insert({
+    const { error: insertErr } = await f.service.from('users').insert({
       id,
-      auth_user_id: uuidv7(),
+      auth_user_id: authDat.user.id,
       org_id: f.orgA.id,
-      email: `second-${Date.now()}@test.local`,
+      email,
       name: 'Second teammate',
       role: 'member',
     });
-    secondUser = { userId: id };
+    if (insertErr) {
+      throw new Error(`fixture: secondUser users insert: ${insertErr.message}`);
+    }
+    secondUser = { userId: id, authUserId: authDat.user.id };
   });
   afterAll(async () => {
     await f.service.from('users').delete().eq('id', secondUser.userId);
+    await f.service.auth.admin.deleteUser(secondUser.authUserId);
     await f.cleanup();
   });
   beforeEach(() => {
