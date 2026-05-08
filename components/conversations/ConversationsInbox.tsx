@@ -22,10 +22,10 @@ const GROUPS = [
   { type: 'group', heading: 'Project — group' },
 ] as const;
 
-function formatRelative(when: Date | null): string {
+function formatRelative(when: Date | string | null): string {
   if (!when) return '';
-  const now = Date.now();
-  const ms = now - when.getTime();
+  const d = new Date(when);
+  const ms = Date.now() - d.getTime();
   const min = 60 * 1000;
   const hr = 60 * min;
   const day = 24 * hr;
@@ -33,7 +33,7 @@ function formatRelative(when: Date | null): string {
   if (ms < hr) return `${Math.floor(ms / min)}m`;
   if (ms < day) return `${Math.floor(ms / hr)}h`;
   if (ms < 7 * day) return `${Math.floor(ms / day)}d`;
-  return when.toLocaleDateString();
+  return d.toLocaleDateString();
 }
 
 function deriveTitle(item: ConversationListItem, callerName: string): string {
