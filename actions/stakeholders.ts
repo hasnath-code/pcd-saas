@@ -26,6 +26,10 @@ import { stakeholderInvitationEmail } from '@/lib/email/templates/stakeholder-in
 import { rateLimit } from '@/lib/ratelimit';
 import { findOrCreateClientTx } from '@/actions/clients';
 import {
+  autoCreateGeneralConversationTx,
+  autoCreateOneToOneConversationTx,
+} from '@/actions/conversations';
+import {
   applyVisibilityProfile,
   type VisibilityFlags,
   type VisibilityProfile,
@@ -250,6 +254,15 @@ export async function inviteStakeholder(
         invitedBy: ctx.userId,
       });
 
+      // Decision 9.1B: auto-create org↔client general conversation when a new
+      // client membership lands. Idempotent — no-op if a general conversation
+      // for this (org, client) already exists.
+      await autoCreateGeneralConversationTx(tx, {
+        orgId: ctx.orgId,
+        clientId: co.clientId,
+        createdByUserId: ctx.userId,
+      });
+
       return { clientId: co.clientId };
     });
     clientId = result.clientId;
@@ -414,6 +427,19 @@ export async function acceptStakeholderInvitation(
         .update(invitations)
         .set({ acceptedAt: new Date() })
         .where(eq(invitations.id, invitation.id));
+
+      // Decision 9.1A: auto-create the per-project one_to_one conversation now
+      // that the stakeholder has accepted. Idempotent. createdBy is the org
+      // user who originally invited (preserves the "X invited Sarah, X
+      // initiated this thread" semantics; falls back to NULL if invitedBy is
+      // somehow soft-deleted, since conversations.created_by is ON DELETE SET
+      // NULL).
+      await autoCreateOneToOneConversationTx(tx, {
+        stakeholderClientId: client.id,
+        projectId: invitation.projectId!,
+        orgId: invitation.orgId,
+        createdByUserId: invitation.invitedBy,
+      });
     });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);

@@ -66,7 +66,7 @@ export async function autoCreateOneToOneConversationTx(
     stakeholderClientId: string;
     projectId: string;
     orgId: string;
-    createdByUserId: string;
+    createdByUserId: string | null;
   },
 ): Promise<{ conversationId: string; created: boolean }> {
   const existing = await tx
@@ -141,7 +141,7 @@ export async function autoCreateGeneralConversationTx(
   opts: {
     orgId: string;
     clientId: string;
-    createdByUserId: string;
+    createdByUserId: string | null;
   },
 ): Promise<{ conversationId: string; created: boolean }> {
   const existing = await tx
