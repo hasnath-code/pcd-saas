@@ -16,3 +16,7 @@ export * from './clients';
 export * from './projects';
 export * from './project-stakeholders';
 export * from './project-milestones';
+// Phase 1c
+export * from './conversations';
+export * from './conversation-participants';
+export * from './messages';
