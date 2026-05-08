@@ -22,6 +22,7 @@ import {
 } from '@/components/ui/table';
 import { EditWorkflowDialog } from './EditWorkflowDialog';
 import { deleteWorkflow } from '@/actions/workflows';
+import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 
 export type WorkflowsListRow = {
   workflowId: string;
@@ -39,11 +40,13 @@ export function WorkflowsList({
   canManage: boolean;
 }) {
   const [editTarget, setEditTarget] = useState<string | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<WorkflowsListRow | null>(null);
   const [isDeleting, startDelete] = useTransition();
   const router = useRouter();
 
-  function onDelete(row: WorkflowsListRow) {
-    if (!confirm(`Delete "${row.workflowName}"? This cannot be undone.`)) return;
+  function onDelete() {
+    if (!deleteTarget) return;
+    const row = deleteTarget;
     startDelete(async () => {
       const result = await deleteWorkflow({ workflowId: row.workflowId });
       if ('error' in result) {
@@ -55,9 +58,11 @@ export function WorkflowsList({
         } else {
           toast.error(`Couldn't delete: ${reason}`);
         }
+        setDeleteTarget(null);
         return;
       }
       toast.success(`Deleted "${row.workflowName}".`);
+      setDeleteTarget(null);
       router.refresh();
     });
   }
@@ -126,7 +131,7 @@ export function WorkflowsList({
                           variant="ghost"
                           size="sm"
                           disabled={isDeleting || w.projectCount > 0}
-                          onClick={() => onDelete(w)}
+                          onClick={() => setDeleteTarget(w)}
                         >
                           Delete
                         </Button>
@@ -149,6 +154,19 @@ export function WorkflowsList({
           }}
         />
       )}
+
+      <ConfirmDialog
+        open={deleteTarget !== null}
+        onOpenChange={(open) => {
+          if (!open) setDeleteTarget(null);
+        }}
+        title={`Delete "${deleteTarget?.workflowName ?? ''}"?`}
+        description="This cannot be undone."
+        confirmText="Delete"
+        variant="destructive"
+        busy={isDeleting}
+        onConfirm={onDelete}
+      />
     </>
   );
 }

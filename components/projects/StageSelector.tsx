@@ -1,6 +1,6 @@
 'use client';
 
-import { useTransition } from 'react';
+import { useState, useTransition } from 'react';
 import { useRouter } from 'next/navigation';
 import { toast } from 'sonner';
 import { Label } from '@/components/ui/label';
@@ -11,6 +11,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
+import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { moveProjectToStage } from '@/actions/projects';
 
 type StageOption = {
@@ -20,17 +21,15 @@ type StageOption = {
   isTerminal: boolean;
 };
 
-// Replaces the placeholder "Stage transitions ship in a future update." with
-// an interactive Select. Backward transitions surface a confirm() dialog
-// (the action allows them; we just want the user to pause). Forward + same-
-// position transitions go through immediately.
+// Stage transition surface for the project detail page. Forward + same-
+// position transitions go through immediately. Backward transitions surface
+// a shadcn AlertDialog (Decision 9.7 / DEBT-016 — supersedes ADR-024 native
+// confirm).
 //
-// The visual stage timeline above this control stays read-only — it remains
-// the at-a-glance progress view; this is the action surface.
-//
-// confirm() is used here for parity with WorkflowsList + EditWorkflowDialog
-// (the codebase doesn't ship shadcn's AlertDialog yet); replace with a styled
-// dialog when AlertDialog lands.
+// The Select is controlled by `currentStageId`; a cancelled backward
+// transition leaves the value pinned to the current stage automatically (the
+// prop never changes mid-render). On confirm, the action fires, router
+// refreshes, and the new currentStageId flows in via the parent.
 export function StageSelector({
   projectId,
   currentStageId,
@@ -42,6 +41,8 @@ export function StageSelector({
 }) {
   const router = useRouter();
   const [isPending, startTransition] = useTransition();
+  const [pendingBackwardTarget, setPendingBackwardTarget] =
+    useState<StageOption | null>(null);
 
   const sorted = [...stages].sort((a, b) => a.position - b.position);
   const current = sorted.find((s) => s.id === currentStageId);
@@ -74,11 +75,16 @@ export function StageSelector({
     const target = sorted.find((s) => s.id === toStageId);
     if (!target) return;
     if (current && target.position < current.position) {
-      const ok = confirm(
-        `Move this project back to "${target.name}"? This is unusual but sometimes necessary. The change is logged.`,
-      );
-      if (!ok) return;
+      setPendingBackwardTarget(target);
+      return;
     }
+    transition(target);
+  }
+
+  function onBackwardConfirmed() {
+    if (!pendingBackwardTarget) return;
+    const target = pendingBackwardTarget;
+    setPendingBackwardTarget(null);
     transition(target);
   }
 
@@ -106,6 +112,18 @@ export function StageSelector({
         Forward transitions apply immediately. Going backward asks for
         confirmation.
       </p>
+
+      <ConfirmDialog
+        open={pendingBackwardTarget !== null}
+        onOpenChange={(open) => {
+          if (!open) setPendingBackwardTarget(null);
+        }}
+        title={`Move project back to "${pendingBackwardTarget?.name ?? ''}"?`}
+        description="This is unusual but sometimes necessary. The change is logged."
+        confirmText="Move backward"
+        busy={isPending}
+        onConfirm={onBackwardConfirmed}
+      />
     </div>
   );
 }

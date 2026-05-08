@@ -22,6 +22,7 @@ import {
   removeWorkflowStage,
   updateWorkflow,
 } from '@/actions/workflows';
+import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 
 type StageRow = {
   id: string;
@@ -48,6 +49,7 @@ export function EditWorkflowDialog({
   const [newStageTerminal, setNewStageTerminal] = useState(false);
   const [isSavingMeta, startSaveMeta] = useTransition();
   const [isMutatingStage, startMutateStage] = useTransition();
+  const [removeStageTarget, setRemoveStageTarget] = useState<StageRow | null>(null);
 
   // Fetch the workflow when the dialog opens. Re-fetch on workflowId change.
   useEffect(() => {
@@ -136,14 +138,9 @@ export function EditWorkflowDialog({
     });
   }
 
-  function onRemoveStage(stage: StageRow) {
-    if (
-      !confirm(
-        `Remove stage "${stage.name}"? Any project currently on this stage will block removal.`,
-      )
-    ) {
-      return;
-    }
+  function onRemoveStageConfirmed() {
+    if (!removeStageTarget) return;
+    const stage = removeStageTarget;
     startMutateStage(async () => {
       const result = await removeWorkflowStage({ stageId: stage.id });
       if ('error' in result) {
@@ -159,10 +156,12 @@ export function EditWorkflowDialog({
         } else {
           toast.error(`Couldn't remove: ${reason}`);
         }
+        setRemoveStageTarget(null);
         return;
       }
       setStages((prev) => prev.filter((s) => s.id !== stage.id));
       toast.success(`Removed "${stage.name}".`);
+      setRemoveStageTarget(null);
       router.refresh();
     });
   }
@@ -232,7 +231,7 @@ export function EditWorkflowDialog({
                       variant="ghost"
                       size="icon"
                       type="button"
-                      onClick={() => onRemoveStage(s)}
+                      onClick={() => setRemoveStageTarget(s)}
                       disabled={isMutatingStage}
                       aria-label={`Remove stage ${s.name}`}
                     >
@@ -278,6 +277,19 @@ export function EditWorkflowDialog({
           </Button>
         </DialogFooter>
       </DialogContent>
+
+      <ConfirmDialog
+        open={removeStageTarget !== null}
+        onOpenChange={(next) => {
+          if (!next) setRemoveStageTarget(null);
+        }}
+        title={`Remove stage "${removeStageTarget?.name ?? ''}"?`}
+        description="Any project currently on this stage will block removal."
+        confirmText="Remove"
+        variant="destructive"
+        busy={isMutatingStage}
+        onConfirm={onRemoveStageConfirmed}
+      />
     </Dialog>
   );
 }
