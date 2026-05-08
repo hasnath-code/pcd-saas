@@ -33,10 +33,90 @@
 
 ---
 
+## ADR-028 — `conversation_participants.left_at` for soft-leave (vs hard-delete)
+**Date:** 09 May 2026 (Session 9)
+**Codebase:** SaaS
+**Status:** Accepted
+
+**Context:** Removing a stakeholder from a conversation needs to (a) revoke their access immediately, (b) preserve the audit trail (who was in this thread, when), and (c) emit a system message ("X was removed"). ARCHITECTURE-saas.md §12.2 didn't specify a soft-delete column for participants — neither `deleted_at` nor `left_at`.
+
+**Decision:** Add a `left_at timestamptz NULL` column. Default queries (RLS SELECT, action queries) filter `left_at IS NULL`. Removal is `UPDATE … SET left_at = now()`, paired with a system message in the same transaction. Hard DELETE remains org-admin-only as a recovery path.
+
+**Alternatives rejected:**
+- Hard-delete on remove — destroys participation history; can't audit who was in a thread three months ago. Also makes the system message ("X was removed") confusing — no row to refer back to.
+- Reuse `deleted_at` (consistent with other tables) — semantically wrong here because participants aren't "deleted records," they're former members. The verb mismatch would muddy queries that walk multiple soft-delete tables.
+
+**Reconsider if:** A retention policy needs to scrub historical participants for GDPR compliance — at that point a periodic worker can hard-delete `left_at < now() - retention_period` rows.
+
+**Cross-references:** db/migrations/0015_conversation_participants.sql, db/schema/conversation-participants.ts, ARCHITECTURE-saas.md §12.2
+
+---
+
+## ADR-027 — System messages stored in `messages` with `sender_type='system'`; participant-only this session
+**Date:** 09 May 2026 (Session 9)
+**Codebase:** SaaS
+**Status:** Accepted (extended in Session 11)
+
+**Context:** Inbound user-perception of "system messages" in a conversation includes participant changes ("X added Y"), stage transitions, file uploads, and milestone completions. Where do those events live: in `messages` itself, or in a separate timeline table that the UI overlays into the chat?
+
+The strategic decision document for Session 9 picked S4b: `project_activity` is the single source of truth for non-message system events; messages-table system rows are reserved for events that don't fit `project_activity` cleanly. But `project_activity` is Session 11. So Session 9 needs an interim choice that doesn't paint Session 11 into a corner.
+
+**Decision:** Session 9 inserts system rows into `messages` with `sender_type='system'` + `sender_id=NULL` ONLY for participant-change events (add/remove). Stage / file / milestone system messages defer to Session 11. The CHECK constraint `messages_sender_id_consistency` (sender_type='system' AND sender_id IS NULL) is enforced at the DB level. RLS does NOT permit authenticated INSERTs with sender_type='system' — only the postgres pooler role (Drizzle transactions) writes them.
+
+**Alternatives rejected:**
+- Wait until Session 11 ships participant-change system messages too — leaves no observable trace of add/remove in Session 9, and the participant changes ARE chat events (they happen in the chat UX), unlike stage transitions which span Project / Conversation contexts.
+- Build a separate `conversation_events` table now — duplicates `project_activity` shape and adds a Phase 1c table that ADR-007 (schema-forever after Phase 1c) would lock in.
+- Stuff every event type into `messages` — works for Session 9 but loses the project-level timeline view. Session 11 wants `project_activity` for cross-conversation events.
+
+**Reconsider if:** Session 11 reveals `project_activity` would benefit from absorbing participant-change events too — at that point migrate participant changes to `project_activity` and drop the `system` sender_type from messages. Backfill via a one-shot script reading existing system rows.
+
+**Cross-references:** ARCHITECTURE-saas.md §12.3, §12.7, db/migrations/0016_messages.sql, lib/conversations.ts (autoCreate*Tx + insertSystemMessageTx), ADR-020
+
+---
+
+## ADR-026 — `last_read_at` on `conversation_participants` (vs separate `conversation_reads` table)
+**Date:** 09 May 2026 (Session 9)
+**Codebase:** SaaS
+**Status:** Accepted
+
+**Context:** Inbox unread counts need a per-participant high-watermark of "last time I looked at this conversation." Two ways to model: a column on `conversation_participants` or a separate `conversation_reads(conversation_id, participant_*, last_read_at)` table.
+
+**Decision:** Column on `conversation_participants`. Spec §12.2 already shows `last_read_at` there. Update happens on conversation detail page mount via `markConversationRead`.
+
+**Alternatives rejected:**
+- Separate `conversation_reads` table — adds a join for inbox queries with no win at our scale. The unread count subquery is already correlated; adding another table just slows it.
+- Per-message read receipts (`message_reads` table) — orders of magnitude more rows and we don't need per-message granularity in MVP. Reconsider for Phase 4+ if customers ask for "seen at 2:31pm" ticks.
+
+**Reconsider if:** We need read-receipts at message granularity (MVP doesn't), or we offer offline-aware sync that needs a write-once log of read events.
+
+**Cross-references:** db/schema/conversation-participants.ts, actions/conversations.ts markConversationRead, db/queries/conversations.ts (unread count subquery)
+
+---
+
+## ADR-025 — Migrate native window.confirm() to shadcn AlertDialog (supersedes ADR-024)
+**Date:** 09 May 2026 (Session 9)
+**Codebase:** SaaS
+**Status:** Accepted
+
+**Context:** ADR-024 accepted native `window.confirm()` as a Phase 1b workaround pending shadcn AlertDialog. Three callsites accumulated: WorkflowsList delete-workflow (S8), EditWorkflowDialog remove-stage (S8), StageSelector backward-transition (S8). Native confirms cause two problems: (1) Browser-Claude automation cannot interact with them (DEBT-016), forcing manual QA for any flow that touches them; (2) UX feels cheap on a paid product.
+
+**Decision:** Add shadcn `<AlertDialog>` (radix-ui umbrella, matching codebase convention) + thin `<ConfirmDialog>` wrapper for the standard two-button confirm flow. Migrate all three callsites + use the wrapper for new Session 9 confirms (delete message, remove participant). Resolves DEBT-016. Supersedes ADR-024.
+
+**Alternatives rejected:**
+- Keep native confirms — DEBT-016 stays open forever; QA burden doesn't shrink.
+- Build a custom modal — duplicates work shadcn already does correctly; would need a11y review.
+- Use `<Dialog>` (already shipped) — it's not the right primitive: AlertDialog has `aria-describedby`, focus-trap, and `escape-cancel` semantics that match destructive confirmations specifically.
+
+**Reconsider if:** AlertDialog's UX feels heavy for low-stakes confirms (e.g. dismissable banners). We can use a different lighter component for those — AlertDialog stays for destructive / one-way actions.
+
+**Cross-references:** components/ui/alert-dialog.tsx, components/ui/confirm-dialog.tsx, DEBT-016 (resolved), ADR-024 (superseded)
+
+---
+
 ## ADR-024 — Native window.confirm() acceptable for Phase 1b backward-transition UX
 **Date:** 07 May 2026 (Session 8)
 **Codebase:** SaaS
-**Status:** Accepted (revisit pre-launch)
+**Status:** Superseded by ADR-025 (09 May 2026, Session 9)
 
 **Context:** The StageSelector component needs a confirmation dialog when a user picks a stage with lower position than current ("are you sure you want to move backwards?"). shadcn AlertDialog isn't shipped in the codebase yet. Other parts of the codebase (WorkflowsList, EditWorkflowDialog) already use native `window.confirm()` for similar prompts.
 

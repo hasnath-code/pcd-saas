@@ -50,6 +50,90 @@
 
 # Open Debt
 
+## DEBT-022 — Conversations: new org members not auto-joined to existing one_to_one threads
+**Added:** 09 May 2026 (Session 9)
+**Codebase:** SaaS
+**Severity:** Low
+**Type:** Workaround
+**Status:** Open
+
+**The debt:** Decision 9.1A says one-to-one conversations include "stakeholder + ALL active org members" at creation time. New org members joining the org AFTER the one_to_one was created are NOT auto-added — they have to be manually added via `addConversationParticipant`.
+
+**Why it exists:** Auto-joining all existing one-to-ones on new-user-creation requires either a tx hook in `inviteUser`/`acceptInvitation` (cross-cutting) or a periodic sweep job. Either is a chunk of work; deferred from Session 9 to keep scope tight.
+
+**Cost of leaving it:** New team members miss historical conversations until an admin manually adds them. Confusing UX ("why can't Sarah see this thread?"). Annoying at small org scale, painful at large org scale.
+
+**Fix sketch:** Add an `autoJoinOneToOneConversationsTx(tx, { userId, orgId })` helper called inside the `users` insert path (`actions/orgs.ts createOrganization`, `actions/team.ts acceptTeamInvitation` if it exists, `actions/users.ts` invite-accept paths). Looks up all one_to_one conversations in the org and inserts a participant row for the new user. Idempotent via UNIQUE constraint.
+
+**Trigger:** When customer or QA flags it, or as part of the Phase 4+ team-management UX polish session.
+
+**Cross-references:** Decision 9.1A, actions/conversations.ts autoCreateOneToOneConversationTx
+
+---
+
+## DEBT-021 — Message rate limiting deferred
+**Added:** 09 May 2026 (Session 9)
+**Codebase:** SaaS
+**Severity:** Medium
+**Type:** Deferred decision / Operational
+**Status:** Open
+
+**The debt:** Decision 9.5B explicitly deferred message-send rate limiting to a later session. Currently `sendMessage` has Zod length validation (1..10000) but no per-user/per-conversation limit on send frequency. A scripted attack could flood a conversation with thousands of messages per minute.
+
+**Why it exists:** Rate limiting needs the Upstash Redis layer wired through `actions/messages.ts` and a thoughtful policy (per-user globally, per-user-per-conversation, with bursts). Out of Session 9's scope.
+
+**Cost of leaving it:** Pre-launch — none (no real users). At launch — abuse vector. A single malicious participant could DoS a conversation, send notifications fan-out (Session 11+), and consume Resend quota.
+
+**Fix sketch:** Wrap `sendMessage` (and probably `editMessage`) in `rateLimit('send_message', ${userId}:${conversationId})` using the existing pattern from `actions/auth.ts` rate-limited paths. Limits: ~30 sends per minute per user globally, ~10 per minute per (user, conversation). Tune from real traffic post-launch.
+
+**Trigger:** Pre-launch operational pass (alongside DEBT-006 items).
+
+**Cross-references:** Decision 9.5B, lib/ratelimit.ts
+
+---
+
+## DEBT-020 — System message sources beyond participant changes deferred to Session 11
+**Added:** 09 May 2026 (Session 9 / S4b sub-decision)
+**Codebase:** SaaS
+**Severity:** Low
+**Type:** Deferred decision
+**Status:** Open
+
+**The debt:** ADR-027 ships system messages for participant add/remove only. Stage transitions, file uploads, and milestone events are conversation-relevant but won't surface in a thread until Session 11 (`project_activity` table). Until then, the in-thread audit trail only tells half the story.
+
+**Why it exists:** The single-source-of-truth choice (S4b: `project_activity` is canonical for non-message events) requires the table to exist. Building it is Session 11's job.
+
+**Cost of leaving it:** Phase F runbooks may show stage transitions happening on the project page but no system message in the conversation. UX gap, not a security/data problem.
+
+**Fix sketch:** Session 11: ship `project_activity` per spec §12.7. Then either (a) project-detail UI overlays activity events alongside conversation messages chronologically, or (b) `messages` gets a derived `system` row populated by a trigger watching project_activity. Decision rests with Session 11's plan.
+
+**Trigger:** Session 11 kickoff (Phase 1c notifications + activity timeline).
+
+**Cross-references:** ADR-027, ARCHITECTURE-saas.md §12.7
+
+---
+
+## DEBT-019 — Drizzle journal/snapshots not updated for migrations 0014-0017
+**Added:** 09 May 2026 (Session 9 follow-on of §35.6 entry 11)
+**Codebase:** SaaS
+**Severity:** Low
+**Type:** Operational / Tooling
+**Status:** Open
+
+**The debt:** Migrations 0014-0017 (conversations + participants + messages + helper unstub) are hand-written. `db/migrations/meta/_journal.json` only has entries through idx 11 (0011); 0012/0013 already weren't journaled (per §35.6 entry 11). Session 9 inherits the same gap.
+
+**Why it exists:** Hand-written migrations don't auto-update the drizzle-kit journal. Session 6 carryover already documented this. Adding journal entries by hand is fiddly and the journal isn't read by the actual migration runner (Supabase CLI applies files in numerical order).
+
+**Cost of leaving it:** Next time someone runs `npx drizzle-kit generate` after schema edits, drizzle-kit may regenerate "missing" migrations because its snapshot doesn't reflect the hand-written schema. Workaround already known from S6: trim regenerated SQL to only new statements.
+
+**Fix sketch:** One-shot tooling improvement session. Either (a) regenerate the entire snapshot graph from the current schema and add stub journal entries pointing at hand-written tags, or (b) write a small `scripts/post-migrate.mjs` that reconciles journal/snapshot when a hand-written migration lands. Low priority — current workflow works.
+
+**Trigger:** When the journal drift causes a real friction event (e.g. a regen wipes out hand-written work). Until then, the workaround in §35.6 entry 11 is sufficient.
+
+**Cross-references:** ARCHITECTURE-saas.md §35.6 entry 11, db/migrations/meta/_journal.json
+
+---
+
 ## DEBT-018 — Vercel deployment recommendations
 **Added:** 07 May 2026 (Session 8 Phase F)
 **Codebase:** SaaS
@@ -93,6 +177,7 @@
 **Codebase:** SaaS (operational)
 **Severity:** Low
 **Type:** Workaround
+**Status:** Resolved 09 May 2026 (Session 9, commit 003f3a7) — see ADR-025
 
 **The debt:** Browser-Claude automation cannot see or interact with native browser dialogs (`window.confirm`, `window.alert`, `window.prompt`). Affects automated Phase F testing of any flow with confirmations.
 
@@ -104,7 +189,9 @@
 
 **Trigger:** When shadcn `AlertDialog` is added to the codebase (probably Phase 1c when other shadcn components land), migrate these three call sites in one commit.
 
-**Cross-references:** ADR-024, components affected listed above
+**Resolution (09 May 2026):** Session 9 added shadcn AlertDialog (components/ui/alert-dialog.tsx) + ConfirmDialog wrapper (components/ui/confirm-dialog.tsx). Migrated all three callsites in commit 003f3a7. ADR-024 superseded by ADR-025. Phase F runbooks for those flows can now be browser-verified end-to-end; native confirm guidance in POST-SESSION-CHECKLIST.md item 9 retained as a general principle for any future native modal callsite.
+
+**Cross-references:** ADR-025 (supersedes ADR-024), components/ui/alert-dialog.tsx, components/ui/confirm-dialog.tsx
 
 ---
 
@@ -405,6 +492,20 @@
 
 # Resolved Debt
 
+## DEBT-R003 — shadcn AlertDialog migration
+**Resolved:** 09 May 2026 in Session 9 commit `003f3a7`
+**Codebase:** SaaS
+**Severity:** Low → Resolved
+**Type:** Workaround (was DEBT-016)
+
+**The debt was:** Browser-Claude could not verify native browser dialogs; three callsites used `window.confirm()` (StageSelector backward transition, WorkflowsList delete workflow, EditWorkflowDialog remove stage), forcing manual QA for those flows.
+
+**Resolution:** Added shadcn AlertDialog (`components/ui/alert-dialog.tsx`) + thin `ConfirmDialog` wrapper. Migrated all three callsites + used the wrapper for new Session 9 confirms (delete message, remove participant). ADR-024 superseded by ADR-025.
+
+**Cross-references:** ADR-025, components/ui/confirm-dialog.tsx
+
+---
+
 ## DEBT-R002 — Cascade-cancel pending invitations on stakeholder removal
 **Resolved:** 06 May 2026 in Session 7 commit `694314a` (squashed in `e60ca15`)
 **Codebase:** SaaS
@@ -450,6 +551,7 @@ For quick lookup of what needs to happen at each upcoming milestone:
 - DEBT-011: Audit log retention policy
 - DEBT-004: Retention worker policy (general)
 - DEBT-018: Vercel deployment recommendations
+- DEBT-021: Message rate limiting
 
 ## Phase 4 prep (architect lifecycle)
 - DEBT-007: Push notification implementation
@@ -468,8 +570,9 @@ For quick lookup of what needs to happen at each upcoming milestone:
 - DEBT-002: Stale session-5-kickoff.md
 - DEBT-013: Apps Script PropertiesService monitoring
 - DEBT-014: UI test infrastructure (when Phase F exceeds 90 min)
-- DEBT-016: shadcn AlertDialog migration (when shadcn lands)
 - DEBT-017: POST-SESSION-CHECKLIST update for N/A discipline
+- DEBT-019: Drizzle journal/snapshots gap for 0012-0017 (tooling)
+- DEBT-022: Auto-join new org members to existing one-to-one conversations
 
 ## Indefinite (revisit at trigger)
 - DEBT-015: RLS performance at scale (>$10K MRR or visible latency)
