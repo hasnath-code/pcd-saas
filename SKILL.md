@@ -5,6 +5,8 @@ description: Use this skill whenever working on the PCD Portal — Plan Craft Da
 
 # PCD Portal Development Skill
 
+# SKILL.md v3.4
+
 You are helping develop the PCD Portal — an automation system for Plan Craft Daily Ltd, a UK measured building survey and CAD drafting company. The system manages the full project lifecycle: quoting, invoicing, payment tracking, Trello sync, Drive folder management, email threading, upselling, and client-facing document pages.
 
 **This skill is alive.** It contains a built-in health check system (Section 8) that detects when the architecture reference, response patterns, or rules are insufficient for the project's current state and proposes upgrades. The skill is designed to grow from a small Apps Script tool into a multi-tenant SaaS product guide without being replaced.
@@ -25,6 +27,9 @@ If both stacks are touched in a single conversation (e.g. data migration), read 
 **Never guess at field names, action names, status values, table names, RLS policy names, or env var names — verify against the matching reference.**
 
 For SaaS sessions: at the start of any session that ships work, also read the most recent `SESSION-N-HANDOVER.md` and `ARCHITECTURE-saas.md §35` (Session Carryover). These capture state that postdates the architecture spec and must not be redundantly re-derived.
+
+- Check `DEBT-LOG.md` for carryovers relevant to the current task before drafting a plan. If a carryover exists, surface it explicitly in the plan rather than rediscovering it mid-execution.
+- Check `DECISIONS.md` when an architectural choice is being proposed. If the decision is already logged there, reference the ADR and don't relitigate. If the proposed decision contradicts an existing ADR, flag the conflict and either propose superseding the ADR or revising the plan.
 
 If you cannot find something in the reference the user is asking about, that's a **skill gap signal** — see Section 8.
 
@@ -221,6 +226,8 @@ Enforce on every response. If a plan violates any, flag immediately.
     ```
 
     Migration 0010 originally used FOR ALL and shipped a soft-delete leak. Migration 0012 was a hotfix that converted both `project_stakeholders` and `project_milestones` to per-command policies. Don't repeat the pattern.
+
+24. **Honor the post-session checklist.** Before any session merges to main, run through `POST-SESSION-CHECKLIST.md`. No silent skips — every applicable item is either checked or explicitly marked N/A. The checklist enforces that `DECISIONS.md`, `DEBT-LOG.md`, and ARCHITECTURE updates happen at session-end so docs don't decay. This rule converts SKILL.md Section 8.3 from a prompt to a blocker.
 
 ---
 
@@ -452,3 +459,4 @@ Apps Script repo (separate):
   - Rule 21 extended — added browser-QA sign-in pre-step (Claude in Chrome opens a fresh tab that starts unauthenticated even if other tabs in the same browser are signed in) and the two-context QA limitation pattern (Chrome cookies are domain-wide; one auth identity per domain → substitute service-role REST for the second side and document in the handover).
   - Section 3 gains 1 new SaaS pattern (test fixture suffixes from UUIDv7 — slice from end, not start). Session 6 fixture had latent collision; surfaced under higher fork pressure.
   - Triggered by: PCD SaaS Phase 1b Session 6 shipped (https://pcd-saas.vercel.app at commit 041f493, post-merge QA replayed at 3c9c3d0; 55 RLS / 66 actions / 9 cloud-smoke green; production QA 10/10 PASS).
+- v3.4 (07 May 2026): Discipline framework integration. Adopts `DECISIONS.md` and `DEBT-LOG.md` (drafted 06 May 2026 but never installed) plus `POST-SESSION-CHECKLIST.md`. Adds Hard Rule 24 (post-session checklist load-bearing at merge time) and extends Section 1 (DECISIONS and DEBT-LOG read during planning, not just at merge). Closes the planning-time integration gap that the 06 May session acknowledged but didn't implement. Sessions 5-8 had shipped without these files; framework now in place for Session 9 (Phase 1c kickoff).
