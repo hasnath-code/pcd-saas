@@ -171,8 +171,8 @@ export async function listConversationsForOrgUser(opts: {
   }));
 
   items.sort((a, b) => {
-    const aT = a.lastMessageAt?.getTime() ?? 0;
-    const bT = b.lastMessageAt?.getTime() ?? 0;
+    const aT = a.lastMessageAt ? new Date(a.lastMessageAt).getTime() : 0;
+    const bT = b.lastMessageAt ? new Date(b.lastMessageAt).getTime() : 0;
     return bT - aT;
   });
 
@@ -316,8 +316,8 @@ export async function listConversationsForStakeholder(opts: {
   }));
 
   items.sort((a, b) => {
-    const aT = a.lastMessageAt?.getTime() ?? 0;
-    const bT = b.lastMessageAt?.getTime() ?? 0;
+    const aT = a.lastMessageAt ? new Date(a.lastMessageAt).getTime() : 0;
+    const bT = b.lastMessageAt ? new Date(b.lastMessageAt).getTime() : 0;
     return bT - aT;
   });
 
