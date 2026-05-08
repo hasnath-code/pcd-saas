@@ -50,6 +50,12 @@ export default async function OrgLayout({ children }: { children: ReactNode }) {
                   Projects
                 </Link>
                 <Link
+                  href="/conversations"
+                  className="text-muted-foreground hover:text-foreground"
+                >
+                  Conversations
+                </Link>
+                <Link
                   href="/settings/team"
                   className="text-muted-foreground hover:text-foreground"
                 >

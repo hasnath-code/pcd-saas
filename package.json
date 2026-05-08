@@ -43,6 +43,8 @@
     "react": "19.1.0",
     "react-dom": "19.1.0",
     "react-hook-form": "^7.75.0",
+    "react-markdown": "^10.1.0",
+    "rehype-sanitize": "^6.0.0",
     "resend": "^6.12.2",
     "server-only": "^0.0.1",
     "shadcn": "^4.6.0",
