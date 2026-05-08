@@ -1,5 +1,5 @@
 import 'server-only';
-import { and, desc, eq, gt, inArray, isNotNull, isNull, or, sql } from 'drizzle-orm';
+import { and, eq, inArray, isNull, sql } from 'drizzle-orm';
 import { db } from '@/db';
 import {
   clientOrgMemberships,
@@ -488,6 +488,64 @@ export async function listMessagesForConversation(
     editedAt: r.editedAt,
     deletedAt: r.deletedAt,
   }));
+}
+
+// Aggregate unread count across all conversations the caller (org user OR
+// stakeholder) participates in. Used to render the nav-bar badge in the
+// (org) and /portal layouts. Cheap — one indexed scan per active
+// participant row joined to their unread messages.
+export async function totalUnreadForOrgUser(opts: {
+  orgId: string;
+  userId: string;
+}): Promise<number> {
+  const rows = await db
+    .select({
+      total: sql<number>`COALESCE(SUM(unread.cnt), 0)::int`,
+    })
+    .from(
+      sql`(
+        SELECT COUNT(*)::int AS cnt
+        FROM ${conversationParticipants} cp
+        JOIN ${messages} m ON m.conversation_id = cp.conversation_id
+        JOIN ${conversations} c ON c.id = cp.conversation_id
+        WHERE cp.participant_type = 'user'
+          AND cp.participant_id = ${opts.userId}
+          AND cp.left_at IS NULL
+          AND c.org_id = ${opts.orgId}
+          AND c.deleted_at IS NULL
+          AND m.deleted_at IS NULL
+          AND (cp.last_read_at IS NULL OR m.created_at > cp.last_read_at)
+          AND NOT (m.sender_type = 'user' AND m.sender_id = ${opts.userId})
+        GROUP BY cp.id
+      ) unread`,
+    );
+  return rows[0]?.total ?? 0;
+}
+
+export async function totalUnreadForStakeholder(opts: {
+  clientId: string;
+}): Promise<number> {
+  const rows = await db
+    .select({
+      total: sql<number>`COALESCE(SUM(unread.cnt), 0)::int`,
+    })
+    .from(
+      sql`(
+        SELECT COUNT(*)::int AS cnt
+        FROM ${conversationParticipants} cp
+        JOIN ${messages} m ON m.conversation_id = cp.conversation_id
+        JOIN ${conversations} c ON c.id = cp.conversation_id
+        WHERE cp.participant_type = 'client'
+          AND cp.participant_id = ${opts.clientId}
+          AND cp.left_at IS NULL
+          AND c.deleted_at IS NULL
+          AND m.deleted_at IS NULL
+          AND (cp.last_read_at IS NULL OR m.created_at > cp.last_read_at)
+          AND NOT (m.sender_type = 'client' AND m.sender_id = ${opts.clientId})
+        GROUP BY cp.id
+      ) unread`,
+    );
+  return rows[0]?.total ?? 0;
 }
 
 // For the new-conversation modal: lists active org users + clients linked to

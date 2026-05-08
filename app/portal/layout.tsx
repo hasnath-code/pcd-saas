@@ -2,6 +2,8 @@ import type { ReactNode } from 'react';
 import Link from 'next/link';
 import { redirect } from 'next/navigation';
 import { AuthError, requireStakeholder } from '@/lib/auth/requireAuth';
+import { totalUnreadForStakeholder } from '@/db/queries/conversations';
+import { Badge } from '@/components/ui/badge';
 
 // Stakeholder portal shell. All /portal/* routes require an auth user with a
 // matching public.clients row (auth_user_id linked). Org users without a
@@ -12,8 +14,9 @@ import { AuthError, requireStakeholder } from '@/lib/auth/requireAuth';
 // projects across orgs they've accepted into. The header is intentionally
 // minimal so the per-project page header carries the project context.
 export default async function PortalLayout({ children }: { children: ReactNode }) {
+  let stakeholderCtx;
   try {
-    await requireStakeholder();
+    stakeholderCtx = await requireStakeholder();
   } catch (e) {
     if (e instanceof AuthError) {
       if (e.code === 'not_authenticated') {
@@ -25,6 +28,10 @@ export default async function PortalLayout({ children }: { children: ReactNode }
     }
     throw e;
   }
+
+  const unreadCount = await totalUnreadForStakeholder({
+    clientId: stakeholderCtx.clientId,
+  });
 
   return (
     <>
@@ -40,6 +47,17 @@ export default async function PortalLayout({ children }: { children: ReactNode }
                 className="text-muted-foreground hover:text-foreground"
               >
                 My projects
+              </Link>
+              <Link
+                href="/portal/conversations"
+                className="inline-flex items-center gap-1.5 text-muted-foreground hover:text-foreground"
+              >
+                Conversations
+                {unreadCount > 0 ? (
+                  <Badge className="rounded-full bg-primary px-1.5 text-primary-foreground">
+                    {unreadCount > 99 ? '99+' : unreadCount}
+                  </Badge>
+                ) : null}
               </Link>
             </nav>
           </div>
