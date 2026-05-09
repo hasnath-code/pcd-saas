@@ -3,7 +3,12 @@ import { cookies } from 'next/headers';
 import Link from 'next/link';
 import { requireAuthOrRedirect } from '@/lib/auth/requireAuth';
 import { listMyMemberships } from '@/db/queries/orgs';
+import { totalUnreadForOrgUser } from '@/db/queries/conversations';
+import { db } from '@/db';
+import { users } from '@/db/schema';
+import { and, eq, isNull } from 'drizzle-orm';
 import { OrgSwitcher } from '@/components/org/OrgSwitcher';
+import { Badge } from '@/components/ui/badge';
 
 // All routes in (org) — dashboard, projects, settings, team — require an
 // authenticated session. Middleware also redirects unauthed users; this layout
@@ -33,6 +38,29 @@ export default async function OrgLayout({ children }: { children: ReactNode }) {
     ? memberships.filter((m) => m.orgId !== active.orgId)
     : [];
 
+  // Resolve the active user's users.id for the unread badge query. Cheap
+  // single-row lookup; safe to skip if no active org (mid-onboarding).
+  let unreadCount = 0;
+  if (active) {
+    const userRows = await db
+      .select({ id: users.id })
+      .from(users)
+      .where(
+        and(
+          eq(users.authUserId, authUser.id),
+          eq(users.orgId, active.orgId),
+          isNull(users.deletedAt),
+        ),
+      )
+      .limit(1);
+    if (userRows.length > 0) {
+      unreadCount = await totalUnreadForOrgUser({
+        orgId: active.orgId,
+        userId: userRows[0].id,
+      });
+    }
+  }
+
   return (
     <>
       {active && (
@@ -48,6 +76,17 @@ export default async function OrgLayout({ children }: { children: ReactNode }) {
                   className="text-muted-foreground hover:text-foreground"
                 >
                   Projects
+                </Link>
+                <Link
+                  href="/conversations"
+                  className="inline-flex items-center gap-1.5 text-muted-foreground hover:text-foreground"
+                >
+                  Conversations
+                  {unreadCount > 0 ? (
+                    <Badge className="rounded-full bg-primary px-1.5 text-primary-foreground">
+                      {unreadCount > 99 ? '99+' : unreadCount}
+                    </Badge>
+                  ) : null}
                 </Link>
                 <Link
                   href="/settings/team"

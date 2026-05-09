@@ -11,6 +11,7 @@ import {
 import { db, type DbOrTx } from '@/db';
 import { clients, clientOrgMemberships } from '@/db/schema';
 import { logAudit } from '@/lib/audit/log';
+import { autoCreateGeneralConversationTx } from '@/actions/conversations';
 
 export type ClientActionResult<T = void> =
   | (T extends void ? { success: true } : { success: true; data: T })
@@ -134,7 +135,18 @@ export async function findOrCreateClient(
 
   let result: { clientId: string; created: boolean };
   try {
-    result = await db.transaction(async (tx) => findOrCreateClientTx(tx, parsed.data, ctx.orgId));
+    result = await db.transaction(async (tx) => {
+      const r = await findOrCreateClientTx(tx, parsed.data, ctx.orgId);
+      // Decision 9.1B: auto-create the org↔client general conversation when a
+      // new client_org_memberships row lands. autoCreateGeneralConversationTx
+      // is idempotent — re-runs on existing memberships are no-ops.
+      await autoCreateGeneralConversationTx(tx, {
+        orgId: ctx.orgId,
+        clientId: r.clientId,
+        createdByUserId: ctx.userId,
+      });
+      return r;
+    });
   } catch (e) {
     const reason = e instanceof Error ? e.message : String(e);
     return { error: 'internal_error', reason: `find_or_create_client:${reason}` };

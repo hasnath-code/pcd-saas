@@ -1,9 +1,9 @@
 # PCD Portal SaaS — Architecture Reference
 
-**Version:** 0.10 (Phase 1b Session 8 shipped — workflow CRUD + stage transitions + PCD seed v2 + perf audit; Phase 1b complete)
-**Last updated:** 06 May 2026
+**Version:** 0.12 (Phase 1c Session 9 shipped + Phase F closed — conversations + messages core, realtime, shadcn AlertDialog migration; runtime hotfixes for Date coercion ×2 + Resend verified-domain sender; 8 follow-up DEBT entries logged; Phase 1c in progress)
+**Last updated:** 09 May 2026
 **Maintainer:** Hasnath
-**Codebase status:** Phase 1b in progress — Session 7 shipped a comprehensive RLS test matrix (5 visibility profiles × 3 protected tables × 4 ops), 6 edge-case scenarios, 6 security-boundary regression tests, the `removeStakeholder` cascade-cancel hotfix (Design C — preserves accepted-invitation history), action-layer matrix coverage for visibility runtime overrides, and a GitHub Actions CI gate (`.github/workflows/rls-gate.yml`). 136 RLS + 77 action + 9 cloud-smoke tests green (was 55 + 66 + 9 = 130; now 222). Two new test infra files: `tests/rls/_helpers.ts` (canonical assertion library) + `tests/fixtures/stakeholder-fixtures.ts` (7 fixture builders covering happy + 6 edge-case states). 1 session remaining in Phase 1b (S8 workflow management).
+**Codebase status:** Phase 1c in progress — Session 9 shipped messaging core (`conversations`, `conversation_participants`, `messages` tables; per-command RLS with `auth_user_conversation_ids()` SECURITY DEFINER helper to break recursion; realtime subscription on messages; shadcn AlertDialog supersedes 3 native confirm callsites; auto-create one-to-one + general conversations on stakeholder accept and `client_org_memberships` insert). 4 new ADRs (025-028); DEBT-016 resolved. Phase F manual QA executed pre-merge: 11 PASS / 1 FAIL deferred / 2 N/A / 1 SKIP across the 14-step runbook; three runtime hotfixes shipped (commits `9fc485b`, `3e650b4`, `6bba94b`); 8 follow-up DEBT entries logged (024-031). 2 sessions remaining in Phase 1c (S10 file uploads, S11 notifications + activity).
 **Production URL:** https://pcd-saas.vercel.app
 **Repo:** https://github.com/hasnath-code/pcd-saas
 
@@ -43,8 +43,8 @@ Each project has multiple **stakeholders** (clients, collaborators, observers) w
 | Phase | Status | Description |
 |---|---|---|
 | 1a | **✓ Complete** (S1 + S2 + S3 + S4 shipped) | Foundation: auth, multi-tenancy, RLS, settings, webhooks, email |
-| 1b | Next | Project core: workflows, clients, projects, stakeholders |
-| 1c | Pending | Communication: conversations, files, notifications, activity |
+| 1b | **✓ Complete** (S5 + S6 + S7 + S8 shipped) | Project core: workflows, clients, projects, stakeholders |
+| 1c | **In progress** (S9 shipped — conversations + messages) | Communication: conversations, files, notifications, activity |
 | 2 | Pending | Surveyor lifecycle (quote/invoice/receipt) ported from Apps Script |
 | 3 | Pending | Client portal (stakeholder-facing UI) |
 | 4 | Pending | Architect lifecycle (RIBA stages, drawing packages) |
@@ -3042,16 +3042,18 @@ Before moving to Phase 1b:
 ### Session 9: Conversations + messaging core
 
 **Tasks:**
-- [ ] Migration: `conversations`, `conversation_participants`, `messages`
-- [ ] RLS policies + tests
-- [ ] Drizzle schema: `db/schema/conversations.ts`
-- [ ] `actions/messages.ts`: `createConversation`, `addParticipant`, `sendMessage`, `markRead`
-- [ ] Realtime subscription helpers
-- [ ] Conversation UI: thread view, message list, send box
-- [ ] Project detail: conversations panel showing per-stakeholder threads + group thread
-- [ ] General threads (org ↔ client, project_id NULL)
+- [x] Migrations: 0014 conversations, 0015 conversation_participants, 0016 messages, 0017 conversation_helpers
+- [x] Per-command RLS policies (ADR-016) + RLS tests in tests/rls/{conversations, conversation-participants, messages}.test.ts
+- [x] Drizzle schemas: db/schema/{conversations, conversation-participants, messages}.ts
+- [x] `actions/conversations.ts`: createGroupConversation, addConversationParticipant, removeConversationParticipant, markConversationRead, autoCreateOneToOneConversationTx, autoCreateGeneralConversationTx
+- [x] `actions/messages.ts`: sendMessage (Zod 1..10000), editMessage (sender-only), deleteMessage (soft, sender-only)
+- [x] Realtime subscription hook: hooks/use-conversation-messages.ts (postgres_changes filtered by conversation_id; messages table added to supabase_realtime publication in 0016)
+- [x] Conversation UI: /conversations + /conversations/[id] org-side; /portal/conversations + /portal/conversations/[id] portal-side; ConversationsInbox / ConversationDetailClient / MessageBubble (react-markdown + rehype-sanitize allowlist) / MessageComposer / NewConversationDialog / ParticipantsManager
+- [x] Auto-create hooks wired into `acceptStakeholderInvitation` (one_to_one) and `findOrCreateClient` + `inviteStakeholder` (general)
+- [x] shadcn AlertDialog + ConfirmDialog wrapper; 3 native-confirm callsites migrated (ADR-025 supersedes ADR-024)
+- [x] Inbox + per-conversation unread counts + nav badges (org + portal layouts)
 
-**Done when:** surveyor and stakeholder can exchange messages in realtime; RLS isolates threads.
+**Done when:** surveyor and stakeholder can exchange messages in realtime; RLS isolates threads. **✓ shipped 09 May 2026.**
 
 ### Session 10: File uploads
 
@@ -3340,9 +3342,55 @@ Items flagged during Phase 1a Session 1 (kicked off and shipped 04 May 2026, dep
 - Phase 1b is closed
 - PCD Surveyor seed script updated to 10 stages but not yet run against the user's real org (manual step post-merge — see SESSION-8-HANDOVER.md)
 
+### §35.9 Session 9 (kickoff → ship: 09 May 2026)
+
+| # | Item | Action | Pull-forward to |
+|---|---|---|---|
+| 1 | **`auth_user_conversation_ids()` SECURITY DEFINER helper shipped proactively in 0014 (stub) → 0017 (real body).** Mirrors the 0001 → 0013 pattern for `auth_user_stakeholder_projects()`. The conversations ↔ conversation_participants recursion (textbook 42P17) is broken before tests run. Helper is pinned `SET search_path = public, auth, pg_temp` per Phase 1a/1b convention. | Future tables that cross-reference participants: extend the helper rather than inline subquery. | Permanent |
+| 2 | **`conversation_participants.left_at` for soft-leave (ADR-028).** Spec §12.2 didn't show a soft-delete column; we added `left_at`. Default queries filter `left_at IS NULL`; `removeConversationParticipant` sets it to `now()` paired with a system message in the same tx. | Future participant-style tables (e.g. project_stakeholders if redesigned): consider whether `left_at` is the better verb than `deleted_at`. | Permanent design pattern |
+| 3 | **System messages = participant changes only this session (ADR-027 / S4b sub-decision).** Stage transitions, file uploads, and milestone events that COULD be system messages are deferred to Session 11 when `project_activity` ships. The `messages_sender_id_consistency` CHECK (sender_type='system' AND sender_id IS NULL) is enforced; RLS does NOT permit authenticated INSERTs with sender_type='system' — only postgres pooler tx writes them. | Session 11: ship `project_activity` per spec §12.7. Decide then whether non-message events live there only, or also produce derived `system` rows in `messages`. | Session 11 |
+| 4 | **shadcn AlertDialog + ConfirmDialog wrapper (ADR-025; supersedes ADR-024).** Three native `confirm()` callsites migrated: WorkflowsList (delete workflow), EditWorkflowDialog (remove stage), StageSelector (backward stage). New Session 9 surfaces (delete message, remove participant) all use the wrapper. DEBT-016 resolved. | Future destructive flows: use `<ConfirmDialog>`, not `window.confirm`. | Permanent rule |
+| 5 | **Auto-create one-to-one + general conversations on stakeholder accept + `client_org_memberships` insert.** `acceptStakeholderInvitation` now calls `autoCreateOneToOneConversationTx` inside its existing tx. `findOrCreateClient` (public action) and `inviteStakeholder` both call `autoCreateGeneralConversationTx` after the membership insert. Helpers are idempotent. | If new code paths create memberships (e.g. cross-org transfer in Phase 6), they MUST call `autoCreateGeneralConversationTx` to keep general threads in lockstep with memberships. | Permanent design rule |
+| 6 | **NewConversationDialog + addConversationParticipant validate cross-org clients via `client_org_memberships` join.** Without this check, an attacker could grant a cross-org auth user visibility into the org's conversations via `auth_user_conversation_ids()`. RLS would technically also reject (the conversation_participants_insert_org_admins policy chains through the conversation's org-admin check) but action-layer validation gives a clean error. | Future actions accepting client_id input across an org boundary: replicate this defense-in-depth join. | Permanent rule |
+| 7 | **`messages_select` policy does NOT filter `deleted_at IS NULL`** (Q6 / Decision 9.4B). Soft-deleted rows remain visible to participants; the projection layer in `db/queries/conversations.ts` (`displayBody`) and `hooks/use-conversation-messages.ts` (`projectRow`) replaces body with `'[deleted]'`. The raw `body` is preserved in DB. | Phase 1c S11 + later: when adding analytics or notification dispatch, read from the projection layer or replicate the deleted-body collapse. | Permanent contract |
+| 8 | **Realtime: `messages` added to `supabase_realtime` publication in 0016.** Subscriptions filter by `conversation_id=eq.<id>`. RLS enforces visibility at the subscription layer per spec §19. `conversation_participants` was NOT added to the publication this session — left_at and last_read_at updates don't propagate live. Inbox badge refresh relies on `router.refresh()` after mark-read. | Session 11+: if real-time inbox updates are needed (e.g. participant join feedback), add conversation_participants to the publication. | Session 11 candidate |
+| 9 | **Drizzle journal/snapshot drift (DEBT-019).** Migrations 0012-0017 are hand-written and don't have entries in `db/migrations/meta/_journal.json`. Inherits the §35.6 entry 11 gap. Workaround documented; tooling fix deferred. | Same as §35.6 entry 11 — trim regenerated SQL when drizzle-kit regenerates. | Indefinite |
+| 10 | **Manual QA + cloud Supabase verification deferred to user.** Local Docker daemon was offline during the session, so migrations 0014-0017 + 14-step Phase F runbook are pending user execution. Tests are written but unrun. Build is clean (`npm run build` succeeded with all conversation routes). | User: start Docker → `npm run db:reset` → `npm run db:seed:local` → `npm run test:rls` (target ~175) + `npm run test:actions` (target ~125) + `npm run test:cloud-smoke` (target ~12). Then walk Phase F per the kickoff brief. Then `supabase db push --linked` to apply 0014-0017 to cloud. | User action before merge |
+| 11 | **New org members not auto-joined to existing one_to_one conversations (DEBT-022).** Decision 9.1A's "all active org members" applies at conversation-creation time. New users joining the org afterward must be added manually. Documented as DEBT-022; deferred. | Phase 4+ team-management polish. | Open |
+| 12 | **Markdown sanitization allowlist** in `components/conversations/MessageBubble.tsx`: `p`, `strong`, `em`, `a`, `code`, `pre`, `blockquote`, `ul`/`ol`/`li`, `br`. Anchor `href` restricted to `^https?:|^mailto:`. NO tables, NO images, NO raw HTML. | Future markdown surfaces (notifications, project descriptions): reuse this `sanitizeSchema` constant rather than duplicating. | Permanent — extract if a 2nd surface needs it |
+| 13 | **Phase F manual QA executed pre-merge — 11 PASS / 1 FAIL deferred / 2 N/A / 1 SKIP across the 14-step runbook.** Three runtime bugs caught and fixed live: commits `9fc485b` (sort comparator coercion in `db/queries/conversations.ts`), `3e650b4` (`formatRelative` widening in `components/conversations/ConversationsInbox.tsx`), `6bba94b` (Resend verified-domain sender `noreply@plancraftdaily.co.uk` replaces `onboarding@resend.dev`). XSS sanitization (Step 12, CRITICAL) confirmed working — rehype-sanitize blocks `<script>` injection. | Future sessions: walk all 14 steps, track strict PASS/FAIL/N/A/SKIP per DEBT-017. Phase F is the canonical pre-merge gate. | Permanent |
+| 14 | **Eight follow-up DEBT entries logged from Phase F (DEBT-024 through DEBT-031).** Pre-launch ops: 024 (Resend paid tier for external recipients), 025 (Sentry user/org scope context). Opportunistic: 026 (`getAppUrl()` helper), 027 (`sql<Date>` runtime lie — point-of-use patched, structural refactor deferred), 028 (OrbStack idle shutdown). Session 11 candidates: 029 (realtime UI not auto-updating — Step 7 FAIL), 030 (project detail page lacks conversation deep-link — Step 4 setup), 031 (no unread badge in nav — Step 11 N/A). | Sessions 10–12: cross-reference these IDs when touching adjacent surfaces. Session 11 inherits 029 + 030 + 031 explicitly. | Open |
+| 15 | **`sql<Date>`-tagged subqueries return ISO string at runtime, not Date (DEBT-027 — Bug class).** Drizzle column-level type coercion only runs for properly-mapped table columns; `sql<Date \| null>` annotations on raw SQL subqueries (e.g. `db/queries/conversations.ts:66`, `:221`) propagate a runtime lie into downstream consumer types. Caught at point-of-use in two places during Phase F. Future `sql<>` raw-expression authors: prefer `sql<string \| null>` + explicit `new Date()` coercion at the consumer boundary, OR coerce inside the query result `.map()`. | Permanent rule for Drizzle raw `sql<>` usage — the `<>` generic does NOT round-trip the runtime type. | Permanent |
+
+**Full session handover:** `SESSION-9-HANDOVER.md` in repo root.
+
+**State at Session 9 close (pre-merge):**
+- 10 commits on the `session-9-phase-1c-messaging-core` branch (off main at 06c0961)
+- Local Supabase: Docker daemon offline at session close — migrations 0014..0017 not yet applied locally
+- Cloud Supabase: not yet pushed (pending user action)
+- RLS tests: written (3 new files) but unrun. Target +28 → 175. File counts: 7 + 7 + 6 + a few system-message edges = ~28
+- Action tests: written (2 new files) but unrun. Target +25 → 125. File counts: 12 (conversations) + 11 (messages) = 23
+- Cloud-smoke: 1 new file with 3 tests (anon GET on conversations / conversation_participants / messages). Target +3 → 12.
+- TypeScript clean: `npx tsc --noEmit` exits clean
+- Build clean: `npm run build` succeeded — /conversations 4.99 kB / 283 kB; /portal/conversations/[id] 519 B / 384 kB (markdown deps add ~40 kB First Load on detail page)
+- 4 new ADRs (025-028); DEBT-016 resolved; 4 new debts logged (019, 020, 021, 022)
+- Phase 1c is **in progress** — Session 10 (file uploads) + Session 11 (notifications + activity) remain
+
+**State at Session 9 close (post-Phase F, ready to merge):**
+- 13 commits on the `session-9-phase-1c-messaging-core` branch (off main at 06c0961). Three Phase F hotfixes added: `9fc485b` (sort comparator coercion), `3e650b4` (`formatRelative` widening), `6bba94b` (Resend verified-domain sender)
+- Cloud Supabase: migrations 0014-0017 applied via `supabase db push --linked`. Anon-curl on the three new tables returns `42501 permission denied` (stricter than RLS — anon has no `GRANT SELECT` at the role layer, matching existing repo convention)
+- RLS tests: **172/172** (was 147; +25)
+- Action tests: **122/122** (was 100; +22)
+- Cloud-smoke: **12/12** (was 9; +3 post-push)
+- TypeScript clean: `npx tsc --noEmit` exits clean
+- Build clean (unchanged from pre-merge state above)
+- Phase F: 11 PASS / 1 FAIL deferred (DEBT-029) / 2 N/A (DEBT-031, group-msg solo-org limitation) / 1 SKIP (Step 1 pre-existing data) — see SESSION-9-HANDOVER.md for full breakdown
+- 4 new ADRs (025-028); DEBT-016 resolved; 13 new debts logged (019-031). Pre-launch ops adds: 024, 025. Opportunistic adds: 022, 023, 026, 027, 028. Session 11 candidates: 029, 030, 031.
+- Phase 1c is **in progress** — Session 10 (file uploads) + Session 11 (notifications + activity) remain
+
 ---
 
-**Last reviewed:** 07 May 2026 (Phase 1b S8 shipped — v0.10; Phase 1b complete)
+**Last reviewed:** 09 May 2026 (Phase 1c S9 shipped + Phase F closed — v0.12; Phase 1c in progress)
 
 ## End of document
 
