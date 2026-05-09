@@ -6,6 +6,7 @@ import {
   listStakeholderInvitationsForProject,
   listStakeholdersForProject,
 } from '@/db/queries/projects';
+import { listFilesForProject } from '@/db/queries/files';
 import {
   Card,
   CardContent,
@@ -14,7 +15,6 @@ import {
   CardTitle,
 } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
-import { Button } from '@/components/ui/button';
 import {
   Table,
   TableBody,
@@ -29,6 +29,8 @@ import { StageSelector } from '@/components/projects/StageSelector';
 import { InviteStakeholderForm } from '@/components/stakeholders/InviteStakeholderForm';
 import { StakeholdersList } from '@/components/stakeholders/StakeholdersList';
 import { CancelInvitationButton } from '@/components/team/CancelInvitationButton';
+import { FileList } from '@/components/files/FileList';
+import { FileUploadZone } from '@/components/files/FileUploadZone';
 
 export default async function ProjectDetailPage({
   params,
@@ -47,12 +49,14 @@ export default async function ProjectDetailPage({
   const project = await getProjectByIdForOrg(projectId, ctx.orgId);
   if (!project) notFound();
 
-  const [stakeholders, pendingInvites] = await Promise.all([
+  const [stakeholders, pendingInvites, files] = await Promise.all([
     listStakeholdersForProject(projectId, ctx.orgId),
     listStakeholderInvitationsForProject(projectId, ctx.orgId),
+    listFilesForProject(projectId),
   ]);
 
   const canDelete = ctx.role === 'owner' || ctx.role === 'admin';
+  const isAdmin = ctx.role === 'owner' || ctx.role === 'admin';
 
   return (
     <main className="mx-auto max-w-4xl space-y-6 p-8">
@@ -200,11 +204,18 @@ export default async function ProjectDetailPage({
 
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">Coming soon</CardTitle>
+          <CardTitle className="text-base">Files</CardTitle>
           <CardDescription>
-            Messages and files land in the next sessions.
+            Drawings, surveys, and documents shared on this project.
           </CardDescription>
         </CardHeader>
+        <CardContent className="space-y-4">
+          <FileUploadZone projectId={project.id} source="surveyor_upload" />
+          <FileList
+            files={files}
+            viewer={{ kind: 'org_user', userId: ctx.userId, isAdmin }}
+          />
+        </CardContent>
       </Card>
     </main>
   );
