@@ -20,3 +20,4 @@ export * from './project-milestones';
 export * from './conversations';
 export * from './conversation-participants';
 export * from './messages';
+export * from './project-files';
