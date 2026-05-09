@@ -50,6 +50,86 @@
 
 # Open Debt
 
+## DEBT-035 — File restore UI surface
+**Added:** 10 May 2026 (Session 10 / Phase F Step 13 marked N/A)
+**Codebase:** SaaS
+**Severity:** Low
+**Type:** Deferred decision
+
+**The debt:** `restoreFile` server action exists in `actions/files.ts` (org-admin-only, clears `deleted_at` + audit-logs `restore`) but no UI surface exposes it. Once a file is soft-deleted via `softDeleteFile`, an admin currently has to undo it via service-role SQL or Supabase Studio.
+
+**Why it exists:** Session 10 scope shipped the action layer to keep the server-side contract complete (mirroring Phase 1b's restore patterns on workflows + projects + stakeholders) but didn't carve room for the admin recycle-bin UI. Phase F Step 13 ("Hasnath restores via recycle bin or admin path") was marked N/A because no UI exists.
+
+**Cost of leaving it:** Stakeholders/org users who soft-delete a file by mistake have no in-app recovery path. Workaround is admin-managed via DB. Friction grows as files become a high-traffic surface — pre-launch this is unsustainable.
+
+**Fix sketch:** Add a `/dashboard/projects/[id]/files/recycle` page (org admin only) that lists soft-deleted `project_files` rows with a "Restore" button calling `restoreFile`. ~2 hours including test coverage. Could also bundle into a future "admin" panel that includes other admin recovery flows.
+
+**Trigger:** Pre-launch operational pass (alongside DEBT-006 items) OR sooner if any production user reports an accidental soft-delete.
+
+**Cross-references:** `actions/files.ts:restoreFile`; SESSION-10-HANDOVER.md Phase F Step 13; ADR-022 (soft-delete + admin restore convention)
+
+---
+
+## DEBT-034 — Stakeholder routing UX (clients with both `users` and `clients` rows)
+**Added:** 10 May 2026 (Session 10 / Phase F observation)
+**Codebase:** SaaS
+**Severity:** Medium
+**Type:** Deferred decision
+
+**The debt:** Stakeholders who have both a `users` row (e.g. they joined an org as a team member) AND a `clients` row (they were also invited as a stakeholder on someone else's project), or first-time stakeholders, route to `/dashboard` after sign-in instead of `/portal`. RLS still blocks data exposure across contexts, but the destination UI is wrong for the stakeholder context. Phase F observed this on Sarah's account and noted "data pollution from test fixtures" — but the underlying routing logic is the actual bug.
+
+**Why it exists:** `requireOrgUser` resolves first (favouring `users` row presence); only if the auth user has zero `users` rows does `requireStakeholder` get a chance. There's no "active context" notion the way `active_org_id` exists for multi-org users. Acceptable for Phase 1b (no real stakeholders yet) but Session 10's two-sided file flow makes the gap user-visible.
+
+**Cost of leaving it:** UX-only — stakeholders see an org-side dashboard they don't belong in (RLS strips the data so they see "no projects"); they'd have to manually navigate to `/portal/projects`. Friction at launch when real stakeholders sign up. Not a security issue.
+
+**Fix sketch:** Two options. (a) After auth, add a route resolver that checks for `clients` row + `client_org_memberships` and prefers `/portal` if the user has at least one stakeholder relationship and the URL doesn't explicitly point elsewhere. (b) Add a context-switcher header chip ("Org view ↔ Portal view") for users who hold both identities, defaulting to whichever was used last. Option (a) is cleaner for the typical case; (b) handles the edge case of someone who's both a team member AND a stakeholder. ~2-3 hours for (a), ~half-day for (b).
+
+**Trigger:** Pre-launch (before first commercial onboarding). If launch is delayed and the dogfood phase is short, can defer to Phase 2.
+
+**Cross-references:** `lib/auth/requireAuth.ts:requireOrgUser`; SESSION-10-HANDOVER.md Phase F observations; ADR-009 (single-clients-row guarantee — the basis for the routing decision)
+
+---
+
+## DEBT-033 — `messages.attachments` Zod widening deferred
+**Added:** 10 May 2026 (Session 10)
+**Codebase:** SaaS
+**Severity:** Low
+**Type:** Deferred decision
+
+**The debt:** Per Session 9 inherited assumption #2, the `sendMessage` Zod schema was supposed to be widened in Session 10 to accept file metadata in the `attachments` array (currently `z.array(z.unknown()).max(0).default([])` — explicit empty-only). Session 10 shipped file uploads as a standalone surface; the message-attachment integration was decoupled from scope.
+
+**Why it exists:** Session 10 scope was already at the upper end of a single session (~6-7 hours focused). Wiring `messages.attachments` would have required: extending the Zod schema, the message composer UI to support file picking, the message bubble UI to render file links, an action to validate the attached `file_id` belongs to a file the sender uploaded on the same conversation's project. Decoupling kept Session 10 shippable.
+
+**Cost of leaving it:** Users can't drag a file into a conversation thread the way Slack/Teams users expect. Workaround is upload-then-mention in two steps. Discoverability gap, not a security one. Increases chance of broken cross-references if a file is soft-deleted while still referenced in a message body.
+
+**Fix sketch:** (a) Extend `SendMessageInput` Zod with `attachments: z.array(z.object({ fileId: z.string().uuid() })).max(5)`. (b) Action validates each fileId via `project_files` SELECT (RLS auto-filters to caller-visible rows on the conversation's project). (c) Composer adds a paperclip button + file picker that calls `createUploadUrl`/`confirmUpload` then references the resulting fileId. (d) Bubble renders inline file chips with download links. ~4-6 hours including tests.
+
+**Trigger:** Session 11 if notification dispatch needs file metadata in message payloads. Otherwise opportunistic when next polishing the conversation UI.
+
+**Cross-references:** SESSION-9-HANDOVER.md Inherited Assumption #2; `actions/messages.ts:SendMessageInput`; `actions/files.ts`
+
+---
+
+## DEBT-032 — Thumbnail + PDF preview generation deferred
+**Added:** 10 May 2026 (Session 10 / decision 10.3 revised at plan time)
+**Codebase:** SaaS
+**Severity:** Low
+**Type:** Deferred decision
+
+**The debt:** Original Session 10 brief called for image thumbnails + PDF first-page previews generated either synchronously in `confirmUpload` (small images <5 MB) or asynchronously via Vercel Cron / Edge Functions (PDFs + larger images). Dropped from scope at plan time; file rows show generic lucide mimetype icons. `project_files.thumbnail_path` column kept nullable so a future session can populate it without a migration.
+
+**Why it exists:** Library investigation surfaced three blockers: (1) `pdf-poppler` requires native libpoppler — won't link on Vercel serverless; (2) `pdfjs-dist` is pure-JS but ~5 MB function bundle + slow per-page rendering; (3) async pipeline (Cron / Inngest) is net-new infrastructure not yet shipped, adding ~150 LOC + observability surface. Decision 10.3 was revised at plan time (user-confirmed) to drop preview generation entirely; mimetype icons make the file list usable without thumbnails. Phase F confirmed the descope is acceptable for Session 10 ship.
+
+**Cost of leaving it:** UX gap — users can't tell at a glance which file is which without opening it. Mitigated by filename + uploader + date in the row. Becomes more visible once a project accumulates 10+ files. Not a blocker; lucide icons cover the mime-type-family signal (PDF / image / spreadsheet / archive distinguishable).
+
+**Fix sketch:** Pick one approach and ship in a follow-up session. (a) Sync image-only thumbs in `confirmUpload` using `sharp` (Next.js already bundles it for Image optimization) — handles JPG/PNG/WebP <5 MB; ~2 hours. (b) Defer PDFs to a server-side worker via Inngest or Trigger.dev that runs `pdfjs-dist` outside Vercel function limits; ~1 day including infra setup. Probably (a) first as a quick win, then (b) if customer feedback demands PDF previews.
+
+**Trigger:** Customer feedback after launch ("I can't tell my drawings apart"), OR opportunistically when a future session needs a worker pipeline anyway (Inngest for notifications could host PDF rendering as a side-effect).
+
+**Cross-references:** ARCHITECTURE-saas.md §12.4 (`thumbnail_path` column); SESSION-10-HANDOVER.md decision 10.3 revision; commits `67efdb4` (column), `bcb24d8` (lucide icons); `components/files/FileRow.tsx:iconForMime`
+
+---
+
 ## DEBT-031 — No unread badge in conversation nav
 **Added:** 09 May 2026 (Session 9 / Phase F Step 11)
 **Codebase:** SaaS
@@ -71,22 +151,23 @@
 ---
 
 ## DEBT-030 — Project detail UI doesn't link to conversations
-**Added:** 09 May 2026 (Session 9 / Phase F Step 4 setup)
+**Added:** 09 May 2026 (Session 9 / Phase F Step 4 setup); file portion resolved 10 May 2026 (Session 10 commit `bcb24d8`)
 **Codebase:** SaaS
 **Severity:** Low
 **Type:** Deferred decision
+**Status:** Open (file portion resolved Session 10; conversations deep-link portion remains)
 
-**The debt:** Both `/projects/[id]` (org-side) and `/portal/projects/[id]` (portal-side) project detail pages still show "Coming soon — Messages and files land in the next sessions" placeholder. Real `/conversations` and `/portal/conversations` surfaces exist and work, but a user in project context has no path to project-specific messaging from there.
+**The debt:** ~~Both `/projects/[id]` (org-side) and `/portal/projects/[id]` (portal-side) project detail pages still show "Coming soon — Messages and files land in the next sessions" placeholder.~~ **Updated 10 May 2026:** Session 10 replaced the file-sharing placeholder on both surfaces with the actual `FileList` + `FileUploadZone`. The remaining open item is the conversations deep-link from project detail — both surfaces have file UI now but still don't link to per-project conversation views.
 
 **Why it exists:** Session 9 shipped messaging as a top-level surface and didn't update the placeholder OR add deep-link buttons. Two design questions deferred: do project detail pages embed a per-project conversation list, or deep-link to the standalone surface filtered by `project_id`?
 
-**Cost of leaving it:** Users navigate to a project, see "Coming soon," don't realize messaging is live elsewhere. Discoverability gap; not a security/data problem.
+**Cost of leaving it:** Users navigate to a project, see file UI but no messaging surface, don't realize per-project conversation context is one extra click away on `/conversations?project_id=X` (which already filters by URL param). Discoverability gap; not a security/data problem.
 
-**Fix sketch:** Two options. (a) Replace placeholder with embedded `ConversationsInbox` component filtered to the project's conversations (~3 hours). (b) Replace with a button "Open project conversations" linking to `/conversations?project_id=X` (~1 hour). Option (a) is more cohesive UX; (b) is faster.
+**Fix sketch:** Two options. (a) Replace with embedded `ConversationsInbox` component filtered to the project's conversations (~3 hours). (b) Add a button "Open project conversations" linking to `/conversations?project_id=X` (~1 hour). Option (a) is more cohesive UX; (b) is faster. Session 10 declined to bundle this since the file-list addition already grew the project detail page significantly.
 
-**Trigger:** Session 11 — file uploads will hit the same UI surface, bundle the cleanup.
+**Trigger:** Session 11 — notification dispatch will need per-project deep-links anyway; bundle the cleanup.
 
-**Cross-references:** ARCHITECTURE-saas.md §12.4 (project detail page spec); Session 11 file uploads; Phase F Step 4 setup
+**Cross-references:** ARCHITECTURE-saas.md §12.4; Session 10 commit `bcb24d8` (file portion resolved); Session 11 notifications roadmap; Phase F Step 4 setup
 
 ---
 
@@ -151,9 +232,9 @@
 ---
 
 ## DEBT-026 — App URL templating not refactored to helper
-**Added:** 09 May 2026 (Session 9 / Phase F surfaced — origin Sessions 6-7)
+**Added:** 09 May 2026 (Session 9 / Phase F surfaced — origin Sessions 6-7); priority bumped 10 May 2026 (Session 10 Phase F — bit again)
 **Codebase:** SaaS
-**Severity:** Low
+**Severity:** Medium (was Low — bumped Session 10)
 **Type:** Workaround
 
 **The debt:** `NEXT_PUBLIC_APP_URL` env var is referenced directly in email templates and invitation URLs across multiple call sites. Earlier in the session an incorrectly-set production env var (`localhost:3000`) caused invitation emails to embed broken localhost URLs; user had to manually fix in Vercel UI. No `getAppUrl()` helper exists. Vercel's auto-set `VERCEL_URL` is not used as fallback for preview deploys, and there's no localhost fallback for local dev.
@@ -164,7 +245,7 @@
 
 **Fix sketch:** Create `lib/utils/app-url.ts` with `getAppUrl()` that checks (1) `NEXT_PUBLIC_APP_URL` → (2) `https://${VERCEL_URL}` → (3) `http://localhost:3000` in priority order. Update email templates and any invitation URL construction to use the helper. Adds preview-deploy resilience without env-var duplication. ~45 min.
 
-**Trigger:** Next time we touch email templates or invitation URLs, or as part of Phase 1c S11 polish (notifications work will add more URL-templating call sites).
+**Trigger:** Session 11 — bit Phase F a second time (Session 10) when magic links from preview deploys pointed to production `NEXT_PUBLIC_APP_URL`, forcing manual host swap to test portal-side flows. Cost of leaving it grew with each preview-based QA cycle. Bumped to S11 priority — should land alongside (or before) the notification-dispatch URL templating that S11 will introduce.
 
 **Cross-references:** Vercel auto env vars docs; `lib/email/templates/*`; `actions/users.ts` invitation flow
 
@@ -757,12 +838,18 @@ For quick lookup of what needs to happen at each upcoming milestone:
 - DEBT-019: Drizzle journal/snapshots gap for 0012-0017 (tooling)
 - DEBT-022: Auto-join new org members to existing one-to-one conversations
 - DEBT-023: Test-user fixture helper (auth.admin.createUser convention)
-- DEBT-026: `getAppUrl()` helper (replace direct NEXT_PUBLIC_APP_URL reads)
 - DEBT-027: `sql<Date>` runtime lie — coerce inside query result projection
 - DEBT-028: OrbStack idle-shutdown silent test failure
-- DEBT-029: Realtime subscription not auto-updating message UI (Session 11 candidate)
-- DEBT-030: Project detail UI lacks deep-link to conversations (Session 11 candidate)
-- DEBT-031: Unread badge in nav + per-row indicator (Session 11 candidate)
+- DEBT-032: Thumbnail + PDF preview generation deferred
+- DEBT-033: `messages.attachments` Zod widening deferred
+
+## Session 11 candidates (notifications + activity)
+- DEBT-026: `getAppUrl()` helper (priority bumped — bit Phase F twice)
+- DEBT-029: Realtime subscription not auto-updating message UI
+- DEBT-030: Project detail UI lacks deep-link to conversations (file portion resolved)
+- DEBT-031: Unread badge in nav + per-row indicator
+- DEBT-034: Stakeholder routing UX (clients with both users + clients rows)
+- DEBT-035: File restore UI surface
 
 ## Indefinite (revisit at trigger)
 - DEBT-015: RLS performance at scale (>$10K MRR or visible latency)
