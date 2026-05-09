@@ -264,9 +264,6 @@ export async function checkFeature(
 }
 
 // Friendly byte-count formatter for upgrade prompts and toast copy.
-export function formatBytes(bytes: number): string {
-  if (bytes >= GB) return `${(bytes / GB).toFixed(bytes % GB === 0 ? 0 : 1)} GB`;
-  if (bytes >= MB) return `${(bytes / MB).toFixed(bytes % MB === 0 ? 0 : 1)} MB`;
-  if (bytes >= 1000) return `${(bytes / 1000).toFixed(0)} kB`;
-  return `${bytes} B`;
-}
+// Re-exported from lib/utils so client components can format bytes without
+// importing the server-only features module.
+export { formatBytes } from './utils';

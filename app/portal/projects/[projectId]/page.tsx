@@ -2,6 +2,7 @@ import Link from 'next/link';
 import { notFound, redirect } from 'next/navigation';
 import { AuthError, requireStakeholder } from '@/lib/auth/requireAuth';
 import { getStakeholderProjectView } from '@/db/queries/portal-projects';
+import { listFilesForProject } from '@/db/queries/files';
 import {
   Card,
   CardContent,
@@ -10,6 +11,8 @@ import {
   CardTitle,
 } from '@/components/ui/card';
 import { ProjectStageBadge } from '@/components/projects/ProjectStageBadge';
+import { FileList } from '@/components/files/FileList';
+import { FileUploadZone } from '@/components/files/FileUploadZone';
 
 // Per-project portal view. Sections are gated on the caller's per-stakeholder
 // flag set (Phase 1b §14):
@@ -39,6 +42,12 @@ export default async function PortalProjectDetailPage({
   const { projectId } = await params;
   const view = await getStakeholderProjectView(projectId, ctx.authUserId);
   if (!view) notFound();
+
+  // Files: only fetched when can_view_drawings — RLS would already filter
+  // these to zero rows, but skipping the query saves a round-trip.
+  const files = view.flags.canViewDrawings
+    ? await listFilesForProject(projectId)
+    : [];
 
   return (
     <main className="mx-auto max-w-4xl space-y-6 p-8">
@@ -108,9 +117,20 @@ export default async function PortalProjectDetailPage({
           <CardHeader>
             <CardTitle className="text-base">Drawings &amp; files</CardTitle>
             <CardDescription>
-              Coming in a future update — file sharing lands soon.
+              {view.flags.canUploadFiles
+                ? 'Files shared on this project. Drag &amp; drop to upload.'
+                : 'Files shared on this project.'}
             </CardDescription>
           </CardHeader>
+          <CardContent className="space-y-4">
+            {view.flags.canUploadFiles && (
+              <FileUploadZone projectId={projectId} source="client_upload" />
+            )}
+            <FileList
+              files={files}
+              viewer={{ kind: 'stakeholder', clientId: ctx.clientId }}
+            />
+          </CardContent>
         </Card>
       )}
 
