@@ -1,9 +1,9 @@
 # PCD Portal SaaS — Architecture Reference
 
-**Version:** 0.12 (Phase 1c Session 9 shipped + Phase F closed — conversations + messages core, realtime, shadcn AlertDialog migration; runtime hotfixes for Date coercion ×2 + Resend verified-domain sender; 8 follow-up DEBT entries logged; Phase 1c in progress)
-**Last updated:** 09 May 2026
+**Version:** 0.13 (Phase 1c Session 10 shipped + Phase F closed — file-upload primitive: `project_files` table, `org-files` storage bucket with mirrored RLS, two-step signed-URL upload flow, plan-gated quotas, two-sided UI; thumbnail/PDF preview generation descoped per ADR-032; Phase 1c continues)
+**Last updated:** 10 May 2026
 **Maintainer:** Hasnath
-**Codebase status:** Phase 1c in progress — Session 9 shipped messaging core (`conversations`, `conversation_participants`, `messages` tables; per-command RLS with `auth_user_conversation_ids()` SECURITY DEFINER helper to break recursion; realtime subscription on messages; shadcn AlertDialog supersedes 3 native confirm callsites; auto-create one-to-one + general conversations on stakeholder accept and `client_org_memberships` insert). 4 new ADRs (025-028); DEBT-016 resolved. Phase F manual QA executed pre-merge: 11 PASS / 1 FAIL deferred / 2 N/A / 1 SKIP across the 14-step runbook; three runtime hotfixes shipped (commits `9fc485b`, `3e650b4`, `6bba94b`); 8 follow-up DEBT entries logged (024-031). 2 sessions remaining in Phase 1c (S10 file uploads, S11 notifications + activity).
+**Codebase status:** Phase 1c in progress — Session 10 shipped file uploads (`project_files` table with per-command RLS + 5 server actions per §20 + drag-drop UI on org and portal sides + `lib/features.ts` `checkFeature` helper backing per-file + total-org-storage quotas via single SUM query; `org-files` bucket with 5 storage.objects policies mirroring `project_files`). 2 new ADRs (029-030); 4 new DEBT entries (032-035); DEBT-026 priority bumped; DEBT-030 file portion resolved. Phase F manual QA executed against PR preview: **11 PASS / 1 SKIP / 1 N/A / 0 FAIL** — clean walk, no in-flight hotfixes needed. 1 session remaining in Phase 1c (S11 notifications + activity).
 **Production URL:** https://pcd-saas.vercel.app
 **Repo:** https://github.com/hasnath-code/pcd-saas
 
@@ -1429,6 +1429,7 @@ CREATE TABLE project_files (
   source text NOT NULL CHECK (source IN ('surveyor_upload', 'client_upload', 'document_artifact')),
   visibility text NOT NULL DEFAULT 'org_and_stakeholders'
     CHECK (visibility IN ('org_only', 'org_and_stakeholders')),
+  thumbnail_path text,                              -- nullable; reserved for a future preview-generation pipeline (DEBT-032)
   created_at timestamptz NOT NULL DEFAULT now(),
   deleted_at timestamptz
 );
@@ -2042,22 +2043,24 @@ CREATE POLICY "org-files_select_org_or_stakeholder" ON storage.objects
 
 All client-side file access goes through signed URLs:
 
-- **Download:** server action issues a signed URL with 5-minute TTL
-- **Upload:** server action issues an upload URL with 5-minute TTL, client uploads directly to Supabase
-- **No anonymous access ever.**
+- **Download:** server action issues a signed URL with **1-hour TTL** (`createSignedUrl(path, 3600)`).
+- **Upload:** server action issues an upload URL via `createSignedUploadUrl(path)`. **TTL is fixed at 2 hours** by `@supabase/storage-js` v2.105 — the SDK does not expose an `expiresIn` option for upload URLs. ADR-030 documents the resulting divergence from the original 5-minute placeholder.
+- **No anonymous access ever.** All signed URLs are minted with the service-role client; storage RLS still applies to SELECT/UPDATE/DELETE so direct stakeholder/user JWT access remains gated.
 
 ### Plan-gated quotas
 
-Phase 1c uses placeholder limits:
+Phase 1c quotas (Session 10 / ADR-029 — supersedes the original placeholder by adding per-file caps; tier totals unchanged):
 
-```
-solo_free:    100 MB total per org
-studio:       5 GB
-practice:     50 GB
-enterprise:   unlimited
-```
+| Plan | Per-file cap (`max_upload_size_bytes`) | Total org cap (`max_storage_bytes`) |
+|---|---|---|
+| `solo_free`  | 25 MB  | 100 MB     |
+| `studio`     | 100 MB | 5 GB       |
+| `practice`   | 500 MB | 50 GB      |
+| `enterprise` | 1 GB   | unlimited (`null`) |
 
-Enforced in the upload server action by querying `SUM(size_bytes) FROM project_files WHERE org_id = ?` against the plan's limit. Phase 6 makes these enforceable in real billing.
+Both caps are stored in `plans.feature_flags` JSONB and resolved via `lib/features.ts` `checkFeature(orgId, 'upload_file', { sizeBytes })` — a compound check evaluating per-file cap + a single `SUM(size_bytes)` query across `project_files JOIN projects ON org_id = ?` (filtered to non-deleted rows on both sides). Both must pass for the upload to be permitted. The same compound check is invoked by `confirmUpload` to close the create→confirm race window — if a concurrent upload pushed the org over between createUploadUrl and confirmUpload, the orphan storage object is deleted and a `quota_exceeded` error is returned.
+
+Migration to a cached counter on `organizations` (eliminating the SUM scan) is deferred until EXPLAIN ANALYZE on real data shows the SUM dominating upload latency — pre-launch perf pass at the earliest. Phase 6 will make quotas enforceable against real billing state.
 
 ---
 
@@ -3058,15 +3061,16 @@ Before moving to Phase 1b:
 ### Session 10: File uploads
 
 **Tasks:**
-- [ ] Migration: `project_files`
-- [ ] RLS policies + tests
-- [ ] Supabase Storage bucket: `org-files` with RLS-mirrored policies
-- [ ] `actions/files.ts`: `createUploadUrl`, `confirmUpload`, `getDownloadUrl`, `softDeleteFile`
-- [ ] Upload UI for org users and stakeholders
-- [ ] File list UI per project
-- [ ] Plan-gated quota enforcement (placeholder limits)
+- [x] Migration: `project_files` (0018) — per-command RLS reusing `auth_user_org_project_ids` + `auth_user_stakeholder_project_visibility` + `auth_user_client_ids`; soft-delete + admin-only DELETE; `thumbnail_path` column reserved nullable for future preview pipeline
+- [x] RLS policies + tests — 12 RLS cases on `project_files` (cross-org, soft-delete, anon block, source/identity gating, stakeholder visibility profile matrix, `org_only` invisibility, uploader-self UPDATE)
+- [x] Supabase Storage bucket: `org-files` with RLS-mirrored policies (0019) — 5 storage.objects policies; path-pattern checks via `storage.foldername`; subdir gating (org users → surveyor-uploads/documents; stakeholders → client-uploads only)
+- [x] `actions/files.ts`: `createUploadUrl`, `confirmUpload`, `getDownloadUrl`, `softDeleteFile`, **`restoreFile`** (added per kickoff §C — org-admin-only)
+- [x] Upload UI for org users and stakeholders — `FileUploadZone` (drag-drop + XHR progress) wired into `/dashboard/projects/[id]` and `/portal/projects/[id]` (gated by `can_upload_files`)
+- [x] File list UI per project — `FileList` SSR component + `FileRow` client component with download + soft-delete (uses S9 `ConfirmDialog`); lucide mimetype icons (no thumbnails — DEBT-032)
+- [x] Plan-gated quota enforcement — `lib/features.ts` `checkFeature(orgId, 'upload_file', { sizeBytes })` compound check; per-file + total via single SUM query; tiers per ADR-029
+- [x] **Phase F manual QA executed against PR preview: 11 PASS / 1 SKIP / 1 N/A / 0 FAIL** — clean walk
 
-**Done when:** both sides can upload, files appear in project detail; quota enforcement works.
+**Done when:** ~~both sides can upload, files appear in project detail; quota enforcement works.~~ **✓ shipped 10 May 2026.**
 
 ### Session 11: Notifications + activity
 
@@ -3390,7 +3394,38 @@ Items flagged during Phase 1a Session 1 (kicked off and shipped 04 May 2026, dep
 
 ---
 
-**Last reviewed:** 09 May 2026 (Phase 1c S9 shipped + Phase F closed — v0.12; Phase 1c in progress)
+### §35.10 Session 10 (kickoff → ship: 10 May 2026)
+
+| # | Item | Action | Pull-forward to |
+|---|---|---|---|
+| 1 | **Thumbnail / PDF preview generation descoped at plan time (decision 10.3 revised, DEBT-032).** Original brief called for sync image thumbs <5MB + async PDF first-page preview. Library investigation surfaced three blockers: (a) `pdf-poppler` requires native libpoppler — won't link on Vercel serverless; (b) `pdfjs-dist` is pure-JS but ~5MB function bundle + slow per-page; (c) async pipeline (Cron / Inngest) is net-new infra. Lucide mimetype icons cover the file-list UX gap. `project_files.thumbnail_path` kept nullable so a future session can populate without migration. | Future session if customer feedback demands previews ("can't tell my drawings apart") OR opportunistically when an Inngest worker pipeline is added for notifications. | Open (DEBT-032) |
+| 2 | **PostgREST/RLS interaction on stakeholder soft-delete via direct REST.** Setting `deleted_at` on a row makes it invisible to the SELECT policy's `deleted_at IS NULL` filter; PostgREST returns `42501 RLS violation` even when the UPDATE policy's USING + WITH CHECK both pass. Action layer uses Drizzle's pooler (postgres role, bypasses RLS) so soft-delete works in production. The stakeholder UPDATE policy still earns its keep — covers legitimate non-RLS-impacting metadata UPDATEs (e.g. future renames). Documented inline in 0018 + the RLS test. | Permanent rule: when authoring a stakeholder/uploader-self UPDATE policy whose USING references `deleted_at IS NULL` SELECT visibility, expect REST UPDATE to flip-flop. Always invoke soft-delete via Drizzle pooler (action layer), never a stakeholder REST UPDATE. | Permanent |
+| 3 | **`createSignedUploadUrl` upload-URL TTL is hardcoded to 2 hours by `@supabase/storage-js` v2.105 (ADR-030).** SDK does not expose an `expiresIn` option for upload URLs; the spec §18 placeholder of 5 min was unreachable. Download URLs use the parameterised `createSignedUrl(path, 3600)` for 1-hour TTL. Reality wins; ADR-030 documents the resulting divergence from spec. | Permanent until Supabase exposes the option; revisit on Supabase storage-js major bump. | Open |
+| 4 | **`messages.attachments` Zod widening deferred (DEBT-033, S9 inherited assumption #2).** S10 shipped the file primitive standalone; attaching a fileId into a message body was decoupled to keep S10 scope tight. `sendMessage` Zod still enforces `attachments: z.array(z.unknown()).max(0).default([])`. | Session 11 if notification dispatch needs file metadata in message payloads, OR opportunistic next conversation-UI polish. | Open (DEBT-033) |
+| 5 | **Stakeholder routing UX — DEBT-034 logged from Phase F observation.** Stakeholders with both a `users` row AND a `clients` row (or first-time stakeholders signing in) route to `/dashboard` because `requireOrgUser` resolves first. RLS still gates data; the destination UI is wrong for the stakeholder context. Pre-launch / Session 11 candidate. | Pre-launch (before first commercial onboarding). | Open (DEBT-034) |
+| 6 | **`restoreFile` action shipped without a UI surface (DEBT-035).** Mirror of Phase 1b restore patterns (workflows + projects + stakeholders) keeps the action-layer contract complete. Phase F Step 13 marked N/A. Recycle-bin admin UI deferred. | Pre-launch operational pass OR sooner if any production user reports an accidental soft-delete. | Open (DEBT-035) |
+| 7 | **DEBT-026 (`getAppUrl()` helper) priority bumped to Medium / Session 11 trigger.** Bit Phase F a second time (preview-deploy magic links pointed to production `NEXT_PUBLIC_APP_URL`, forcing manual host swap). Originally Low / opportunistic; cost grew with each preview-based QA cycle. Session 11 will introduce more URL-templating call sites (notification dispatch); the helper should land before or alongside that work. | Session 11. | Open (DEBT-026, bumped) |
+| 8 | **Plans seed switched to upsert by (org_type_id, slug).** Previously additive-only INSERT; new `max_storage_bytes` / `max_upload_size_bytes` flags wouldn't propagate to environments where rows already existed. Upsert preserves existing row ids (FK-safe) while refreshing `name`/`price`/`feature_flags` on every run. Cloud re-seed at Session 10 close: 0 new, 8 refreshed — exactly as designed. | Permanent — future plan-shape changes propagate cleanly to cloud via `npm run db:seed`. | Permanent |
+| 9 | **Storage RLS test surface uses Supabase storage API directly (`supabase.storage.from('org-files').upload(...)`)** — not REST table queries. New test file `tests/rls/storage-objects.test.ts` (8 cases) exercises the bucket auth path end-to-end via stakeholder + org-member JWTs. | Pattern noted; reuse for any future bucket-RLS tests. | Permanent |
+| 10 | **Phase F (10 May 2026) — 11 PASS / 1 SKIP / 1 N/A / 0 FAIL.** Clean walk on PR preview, no in-flight hotfixes (contrast S9: 3 hotfixes during walk). Step 13 (admin restore via UI) marked N/A pending DEBT-035; Step 1 (empty state) marked SKIP because pre-existing test data couldn't be cleared. | Future sessions: continue strict PASS/FAIL/N/A/SKIP per DEBT-017. Phase F is the canonical pre-merge gate. | Permanent |
+
+**Full session handover:** `SESSION-10-HANDOVER.md` in repo root.
+
+**State at Session 10 close (post-merge):**
+- 8 commits on the `session-10-file-uploads` branch (off main at `49993e8`); squash-merged to main.
+- Cloud Supabase: migrations 0018-0019 applied via `supabase db push --linked` mid-session. Plans re-seeded (8 refreshed, 0 new — `max_storage_bytes`/`max_upload_size_bytes` populated). Anon-curl on `project_files` returns 42501; `org-files` bucket private (anon `listBuckets` filtered).
+- RLS tests: **192/192** (was 172; +20: 12 `project_files` + 8 storage)
+- Action tests: **145/145** (was 122; +23 across 5 actions)
+- Cloud-smoke: **14/14** (was 12; +2: `project_files` anon-blocked + bucket private)
+- TypeScript clean: `npx tsc --noEmit` exits clean
+- Build clean: `/dashboard/projects/[id]` 6.13 kB / 323 kB; `/portal/projects/[id]` 4.04 kB / 285 kB
+- Phase F: **11 PASS / 1 SKIP / 1 N/A / 0 FAIL** — clean walk
+- 2 new ADRs (029-030); 4 new DEBT entries (032-035); DEBT-026 bumped; DEBT-030 file portion resolved
+- Phase 1c is **in progress** — Session 11 (notifications + activity) remains
+
+---
+
+**Last reviewed:** 10 May 2026 (Phase 1c S10 shipped + Phase F closed — v0.13; Phase 1c in progress, S11 remains)
 
 ## End of document
 
