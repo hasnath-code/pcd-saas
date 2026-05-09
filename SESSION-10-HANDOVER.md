@@ -165,3 +165,87 @@ The SUM query is a single indexed scan (via `idx_project_files_project`). Cached
 - **Worktree:** clean before each commit (`session-10-kickoff.md.save` is gitignored noise from VS Code save trail; not committed)
 
 ---
+
+## Inherited assumptions Session 11 (notifications + activity) MUST respect
+
+1. **`messages.attachments` JSONB widening (DEBT-033) is still deferred.** S9 inherited assumption #2 was that S10 would widen `sendMessage`'s Zod schema to accept `{ fileId }[]` entries. S10 shipped the file primitive standalone; the attachment integration was decoupled. If S11's notification dispatch needs file metadata in message payloads (e.g. an email "Sarah sent a message and attached survey.pdf"), bundle the Zod widening + composer paperclip UI + bubble file-chip render into S11. ~4-6 hours including tests. Otherwise leave for opportunistic conversation-UI polish.
+
+2. **`thumbnail_path` column (DEBT-032) is reserved.** Never NULL-→-NOT-NULL (hold this commitment) — populating it with a generation pipeline is purely additive work. The simplest first move is a sync `sharp`-based image-thumbnail in `confirmUpload` for `mimeType.startsWith('image/') && sizeBytes < 5_000_000`; PDFs need an out-of-Vercel worker (Inngest / Trigger.dev) which S11 may also want for notification fan-out — bundle if scope allows.
+
+3. **Storage path convention is now contract.** `org/{org_id}/projects/{project_id}/{subdir}/{file_id}{ext}` is enforced by the `storage.objects` path-pattern checks (`(storage.foldername(name))[2]` = org, `[4]` = project, `[5]` = subdir). Any future bucket-RLS authoring (e.g. a separate `org-documents` bucket for Phase 2 generated PDFs) must follow the same shape OR ship its own helper for path destructuring. Don't change the existing convention without coordinating storage RLS updates — would silently break uploads cloud-wide.
+
+4. **DEBT-029 (realtime not auto-updating message UI) still deferred to S11.** Was Session 9's main FAIL on Phase F Step 7. S10 didn't touch realtime — file uploads currently require manual refresh to appear (acceptable per kickoff §K). S11's notification subscription work hits the same Supabase Realtime + RLS interaction; bundle the diagnosis. Suspected causes (in order of likelihood): (a) Realtime publication not configured, (b) RLS policy uses helper functions the subscriber can't call, (c) channel auth context lost on subscription, (d) hook lifecycle / unmount timing.
+
+5. **DEBT-026 (`getAppUrl()` helper) priority bumped to Medium / S11 trigger.** Bit Phase F twice now. S11 will introduce more URL-templating call sites (notification dispatch). The helper should land BEFORE or ALONGSIDE notification work, not after. Sketch: `lib/utils/app-url.ts` checking `NEXT_PUBLIC_APP_URL` → `https://${VERCEL_URL}` → `http://localhost:3000` in priority order. ~45 min.
+
+6. **DEBT-031 (no unread badge in nav + per-row indicator) still deferred to S11.** S9 shipped `last_read_at` + `markConversationRead` data layer; UI consumer never landed. S11's notification work surfaces the same unread state — natural fit.
+
+7. **DEBT-030 conversations deep-link from project detail still open.** S10 resolved the file portion only. S11 should add either an embedded `ConversationsInbox` filtered by `project_id` (~3hr, more cohesive UX) or a button "Open project conversations" linking to `/conversations?project_id=X` (~1hr, faster). Notification dispatch will need per-project deep-links anyway; bundle.
+
+8. **`auth_user_stakeholder_project_visibility(p_project_id)` is the canonical 5-flag visibility lookup.** S10 used it for both `project_files` SELECT (via `can_view_drawings`) and storage RLS INSERT (via `can_upload_files`). S11 will need it too — for `project_activity` SELECT (filter by `visible_to_stakeholders` × any flag, depending on event type) and possibly for notification preferences. Don't subquery `project_stakeholders` inline; reuse the helper.
+
+9. **`auth_user_org_project_ids()` covers the org-side branch of any project-scoped policy.** Same pattern as #8 above. Used by `project_files`, `project_milestones`, `project_stakeholders`, and (S11) will be used by `project_activity`.
+
+10. **The §20 standard action shape held up across 5 new actions.** No deviations needed. S11 actions (`dispatchNotification`, `markNotificationRead`, etc.) should follow the same Zod parse → auth → access check → feature flag → mutation tx → audit log → discriminated return shape.
+
+---
+
+## Decisions logged this session
+
+- **ADR-029** — Plan-gated storage quotas (per-file cap + total cap; SUM-query computation; race re-check on confirmUpload)
+- **ADR-030** — Signed URL TTLs (download 1h via `createSignedUrl`; upload 2h hardcoded by Supabase storage-js v2.105)
+
+## Debt logged this session
+
+**Resolved:**
+- **DEBT-030 partial** — file-sharing placeholder portion resolved by commit `bcb24d8` (both org and portal sides). Conversations deep-link portion remains open.
+
+**New (Phase F):**
+- **DEBT-032** — Thumbnail + PDF preview generation deferred (decision 10.3 revised at plan time; pdf-poppler/pdfjs-dist + Vercel constraints)
+- **DEBT-033** — `messages.attachments` Zod widening deferred (decoupled from S10 file primitive)
+- **DEBT-034** — Stakeholder routing UX (Phase F observation; **superseded by DEBT-037** below — entry retained for traceability)
+- **DEBT-035** — File restore UI surface (`restoreFile` action exists; admin recycle-bin UI deferred)
+
+**New (production smoke test, post-merge):**
+- **DEBT-036** — File download opens in new tab instead of saving (Low; UX paper-cut)
+- **DEBT-037** — Stakeholder accounts silently become org owners on sign-in (**HIGH — HOTFIX BEFORE SESSION 11 STARTS**; supersedes DEBT-034 with corrected severity. Stakeholder sign-in spawns a new org and routes to `/dashboard` instead of `/portal`. Confirmed end-to-end on production. Don't kick S11 off until this is fixed; production also needs cleanup of any auto-spawned orgs from the smoke-test session.)
+- **DEBT-038** — Project-create form doesn't send invitation emails (Medium; two divergent code paths for adding stakeholders)
+- **DEBT-039** — Multi-file selection via file picker fails (Medium; FileUploadZone click handler vs drop handler divergence)
+
+**Bumped:**
+- **DEBT-026** — `getAppUrl()` helper priority bumped to Medium / S11 trigger (bit Phase F twice now)
+
+---
+
+## What's left for Session 11 (notifications + activity)
+
+Per ARCHITECTURE-saas.md §33 Session 11 row + S11 candidates carryover from S9 + S10:
+
+- Migrations: `notification_preferences`, `notifications`, `project_activity`
+- RLS policies + tests (project_activity uses `auth_user_stakeholder_project_visibility` for the stakeholder branch + a `visible_to_stakeholders` boolean per row)
+- Default notification preferences seeded on user/client creation
+- `lib/notifications/dispatch.ts`: `dispatchNotification(eventType, recipients, payload)`
+- Notification preferences UI matrix (per channel × per event)
+- In-app notification inbox (Realtime subscription)
+- Email notifications for `message.new`, `project.stage_changed`, `file.uploaded`, etc.
+- Activity log writes throughout the codebase (every status change, message, file upload, soft-delete, restore)
+- Project activity timeline UI (visible to org users + stakeholders per visibility)
+
+**Bundle into S11 (carryover priority):**
+- DEBT-026 — `getAppUrl()` helper (before email-notification dispatch)
+- DEBT-029 — Realtime subscription not auto-updating UI (same realtime infra)
+- DEBT-030 — Conversations deep-link from project detail (notification deep-links overlap)
+- DEBT-031 — Unread badge in nav + per-row indicator (same unread-state surface)
+- DEBT-022 — Auto-join new org members to existing one_to_one threads (if notification dispatch makes the gap painful)
+
+**Bundle if scope allows:**
+- DEBT-032 — Thumbnail / PDF preview generation (if S11 stands up an Inngest/Trigger.dev worker for notification fan-out, the same worker can host PDF rendering)
+- DEBT-033 — `messages.attachments` Zod widening (if notification payloads need file metadata)
+- DEBT-034 — Stakeholder routing UX (pre-launch trigger; S11 is the natural carve-out)
+- DEBT-035 — File restore UI (admin recycle-bin; could pair with a broader admin panel)
+
+**Done when:** notifications dispatch on events; in-app updates land in realtime (DEBT-029 closed); activity timeline shows per-stakeholder filtered events. Phase 1c exit criteria are met — Hasnath's existing Apps Script projects can be migrated using `MIGRATION-MAP.md`, RLS suite continues to pass, manual exploratory testing finds no critical bugs.
+
+---
+
+— end —
