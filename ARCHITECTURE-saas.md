@@ -1,9 +1,9 @@
 # PCD Portal SaaS — Architecture Reference
 
-**Version:** 0.11 (Phase 1c Session 9 shipped — conversations + messages core, realtime, shadcn AlertDialog migration; Phase 1c in progress)
+**Version:** 0.12 (Phase 1c Session 9 shipped + Phase F closed — conversations + messages core, realtime, shadcn AlertDialog migration; runtime hotfixes for Date coercion ×2 + Resend verified-domain sender; 8 follow-up DEBT entries logged; Phase 1c in progress)
 **Last updated:** 09 May 2026
 **Maintainer:** Hasnath
-**Codebase status:** Phase 1c in progress — Session 9 shipped messaging core (`conversations`, `conversation_participants`, `messages` tables; per-command RLS with `auth_user_conversation_ids()` SECURITY DEFINER helper to break recursion; realtime subscription on messages; shadcn AlertDialog supersedes 3 native confirm callsites; auto-create one-to-one + general conversations on stakeholder accept and `client_org_memberships` insert). 4 new ADRs (025-028); DEBT-016 resolved. 2 sessions remaining in Phase 1c (S10 file uploads, S11 notifications + activity).
+**Codebase status:** Phase 1c in progress — Session 9 shipped messaging core (`conversations`, `conversation_participants`, `messages` tables; per-command RLS with `auth_user_conversation_ids()` SECURITY DEFINER helper to break recursion; realtime subscription on messages; shadcn AlertDialog supersedes 3 native confirm callsites; auto-create one-to-one + general conversations on stakeholder accept and `client_org_memberships` insert). 4 new ADRs (025-028); DEBT-016 resolved. Phase F manual QA executed pre-merge: 11 PASS / 1 FAIL deferred / 2 N/A / 1 SKIP across the 14-step runbook; three runtime hotfixes shipped (commits `9fc485b`, `3e650b4`, `6bba94b`); 8 follow-up DEBT entries logged (024-031). 2 sessions remaining in Phase 1c (S10 file uploads, S11 notifications + activity).
 **Production URL:** https://pcd-saas.vercel.app
 **Repo:** https://github.com/hasnath-code/pcd-saas
 
@@ -3358,6 +3358,9 @@ Items flagged during Phase 1a Session 1 (kicked off and shipped 04 May 2026, dep
 | 10 | **Manual QA + cloud Supabase verification deferred to user.** Local Docker daemon was offline during the session, so migrations 0014-0017 + 14-step Phase F runbook are pending user execution. Tests are written but unrun. Build is clean (`npm run build` succeeded with all conversation routes). | User: start Docker → `npm run db:reset` → `npm run db:seed:local` → `npm run test:rls` (target ~175) + `npm run test:actions` (target ~125) + `npm run test:cloud-smoke` (target ~12). Then walk Phase F per the kickoff brief. Then `supabase db push --linked` to apply 0014-0017 to cloud. | User action before merge |
 | 11 | **New org members not auto-joined to existing one_to_one conversations (DEBT-022).** Decision 9.1A's "all active org members" applies at conversation-creation time. New users joining the org afterward must be added manually. Documented as DEBT-022; deferred. | Phase 4+ team-management polish. | Open |
 | 12 | **Markdown sanitization allowlist** in `components/conversations/MessageBubble.tsx`: `p`, `strong`, `em`, `a`, `code`, `pre`, `blockquote`, `ul`/`ol`/`li`, `br`. Anchor `href` restricted to `^https?:|^mailto:`. NO tables, NO images, NO raw HTML. | Future markdown surfaces (notifications, project descriptions): reuse this `sanitizeSchema` constant rather than duplicating. | Permanent — extract if a 2nd surface needs it |
+| 13 | **Phase F manual QA executed pre-merge — 11 PASS / 1 FAIL deferred / 2 N/A / 1 SKIP across the 14-step runbook.** Three runtime bugs caught and fixed live: commits `9fc485b` (sort comparator coercion in `db/queries/conversations.ts`), `3e650b4` (`formatRelative` widening in `components/conversations/ConversationsInbox.tsx`), `6bba94b` (Resend verified-domain sender `noreply@plancraftdaily.co.uk` replaces `onboarding@resend.dev`). XSS sanitization (Step 12, CRITICAL) confirmed working — rehype-sanitize blocks `<script>` injection. | Future sessions: walk all 14 steps, track strict PASS/FAIL/N/A/SKIP per DEBT-017. Phase F is the canonical pre-merge gate. | Permanent |
+| 14 | **Eight follow-up DEBT entries logged from Phase F (DEBT-024 through DEBT-031).** Pre-launch ops: 024 (Resend paid tier for external recipients), 025 (Sentry user/org scope context). Opportunistic: 026 (`getAppUrl()` helper), 027 (`sql<Date>` runtime lie — point-of-use patched, structural refactor deferred), 028 (OrbStack idle shutdown). Session 11 candidates: 029 (realtime UI not auto-updating — Step 7 FAIL), 030 (project detail page lacks conversation deep-link — Step 4 setup), 031 (no unread badge in nav — Step 11 N/A). | Sessions 10–12: cross-reference these IDs when touching adjacent surfaces. Session 11 inherits 029 + 030 + 031 explicitly. | Open |
+| 15 | **`sql<Date>`-tagged subqueries return ISO string at runtime, not Date (DEBT-027 — Bug class).** Drizzle column-level type coercion only runs for properly-mapped table columns; `sql<Date \| null>` annotations on raw SQL subqueries (e.g. `db/queries/conversations.ts:66`, `:221`) propagate a runtime lie into downstream consumer types. Caught at point-of-use in two places during Phase F. Future `sql<>` raw-expression authors: prefer `sql<string \| null>` + explicit `new Date()` coercion at the consumer boundary, OR coerce inside the query result `.map()`. | Permanent rule for Drizzle raw `sql<>` usage — the `<>` generic does NOT round-trip the runtime type. | Permanent |
 
 **Full session handover:** `SESSION-9-HANDOVER.md` in repo root.
 
@@ -3373,9 +3376,21 @@ Items flagged during Phase 1a Session 1 (kicked off and shipped 04 May 2026, dep
 - 4 new ADRs (025-028); DEBT-016 resolved; 4 new debts logged (019, 020, 021, 022)
 - Phase 1c is **in progress** — Session 10 (file uploads) + Session 11 (notifications + activity) remain
 
+**State at Session 9 close (post-Phase F, ready to merge):**
+- 13 commits on the `session-9-phase-1c-messaging-core` branch (off main at 06c0961). Three Phase F hotfixes added: `9fc485b` (sort comparator coercion), `3e650b4` (`formatRelative` widening), `6bba94b` (Resend verified-domain sender)
+- Cloud Supabase: migrations 0014-0017 applied via `supabase db push --linked`. Anon-curl on the three new tables returns `42501 permission denied` (stricter than RLS — anon has no `GRANT SELECT` at the role layer, matching existing repo convention)
+- RLS tests: **172/172** (was 147; +25)
+- Action tests: **122/122** (was 100; +22)
+- Cloud-smoke: **12/12** (was 9; +3 post-push)
+- TypeScript clean: `npx tsc --noEmit` exits clean
+- Build clean (unchanged from pre-merge state above)
+- Phase F: 11 PASS / 1 FAIL deferred (DEBT-029) / 2 N/A (DEBT-031, group-msg solo-org limitation) / 1 SKIP (Step 1 pre-existing data) — see SESSION-9-HANDOVER.md for full breakdown
+- 4 new ADRs (025-028); DEBT-016 resolved; 13 new debts logged (019-031). Pre-launch ops adds: 024, 025. Opportunistic adds: 022, 023, 026, 027, 028. Session 11 candidates: 029, 030, 031.
+- Phase 1c is **in progress** — Session 10 (file uploads) + Session 11 (notifications + activity) remain
+
 ---
 
-**Last reviewed:** 09 May 2026 (Phase 1c S9 shipped — v0.11; Phase 1c in progress)
+**Last reviewed:** 09 May 2026 (Phase 1c S9 shipped + Phase F closed — v0.12; Phase 1c in progress)
 
 ## End of document
 

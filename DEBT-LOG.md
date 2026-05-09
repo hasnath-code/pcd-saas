@@ -50,6 +50,166 @@
 
 # Open Debt
 
+## DEBT-031 — No unread badge in conversation nav
+**Added:** 09 May 2026 (Session 9 / Phase F Step 11)
+**Codebase:** SaaS
+**Severity:** Low
+**Type:** Deferred decision
+
+**The debt:** Top nav links (PCD / Projects / Conversations / Team / Settings) are plain text with no unread-count indicator next to "Conversations." The conversation list itself sorts by recency but has no visual read/unread distinction.
+
+**Why it exists:** ADR-026 added `last_read_at` on `conversation_participants`, the `markConversationRead` server action is wired up, and `useConversationMessages` is in place — but no UI consumer surfaces unread count in nav OR a per-conversation unread indicator on list rows. Session 9 scope ended at "data layer ready"; the badge surface was deferred.
+
+**Cost of leaving it:** Users won't notice new messages without re-opening `/conversations`. UX gap, not a bug. Becomes painful once project volume grows past a handful.
+
+**Fix sketch:** Add `/api/conversations/unread-count` endpoint returning count where `last_read_at < last_message_at` for the current user/client. Subscribe via SWR or server-component poll. Render a numeric badge on the Conversations nav item. Bold/dot indicator on each list row where unread > 0. ~2 hours.
+
+**Trigger:** Session 11 (notifications + activity) — natural fit since both surface unread state.
+
+**Cross-references:** ADR-026 (last_read_at column); Session 11 notifications roadmap; `markConversationRead` action; Phase F Step 11
+
+---
+
+## DEBT-030 — Project detail UI doesn't link to conversations
+**Added:** 09 May 2026 (Session 9 / Phase F Step 4 setup)
+**Codebase:** SaaS
+**Severity:** Low
+**Type:** Deferred decision
+
+**The debt:** Both `/projects/[id]` (org-side) and `/portal/projects/[id]` (portal-side) project detail pages still show "Coming soon — Messages and files land in the next sessions" placeholder. Real `/conversations` and `/portal/conversations` surfaces exist and work, but a user in project context has no path to project-specific messaging from there.
+
+**Why it exists:** Session 9 shipped messaging as a top-level surface and didn't update the placeholder OR add deep-link buttons. Two design questions deferred: do project detail pages embed a per-project conversation list, or deep-link to the standalone surface filtered by `project_id`?
+
+**Cost of leaving it:** Users navigate to a project, see "Coming soon," don't realize messaging is live elsewhere. Discoverability gap; not a security/data problem.
+
+**Fix sketch:** Two options. (a) Replace placeholder with embedded `ConversationsInbox` component filtered to the project's conversations (~3 hours). (b) Replace with a button "Open project conversations" linking to `/conversations?project_id=X` (~1 hour). Option (a) is more cohesive UX; (b) is faster.
+
+**Trigger:** Session 11 — file uploads will hit the same UI surface, bundle the cleanup.
+
+**Cross-references:** ARCHITECTURE-saas.md §12.4 (project detail page spec); Session 11 file uploads; Phase F Step 4 setup
+
+---
+
+## DEBT-029 — Realtime subscription not auto-updating message UI
+**Added:** 09 May 2026 (Session 9 / Phase F Step 7)
+**Codebase:** SaaS
+**Severity:** Medium
+**Type:** Bug
+
+**The debt:** When a stakeholder sends a message in the portal, the org-side conversation page does NOT auto-update — manual refresh required to see new messages. Confirmed bidirectional (same on portal side when org sends). Phase F Step 7 marked FAIL.
+
+**Why it exists:** Suspected. The `useConversationMessages` hook subscribes to `postgres_changes` on the `messages` table filtered by `conversation_id`. INSERTs aren't triggering re-renders. Possible causes: (1) channel auth context lost on subscription, (2) filter syntax incorrect, (3) hook lifecycle / unmount timing, (4) Realtime publication not configured for the messages table, (5) RLS interaction — Realtime checks RLS on subscribe; if the policy uses helper functions in `auth_user_orgs()` not yet visible to the subscriber, the subscription silently rejects.
+
+**Cost of leaving it:** Messaging feels broken at first impression — users assume their messages aren't being sent. Critical UX paper-cut for a real-time-feel feature. Not a security issue.
+
+**Fix sketch:** (1) Confirm Realtime is enabled for `messages` in Supabase dashboard. (2) Manually trigger a `postgres_changes` event via `supabase` CLI to see if the subscription receives anything. (3) If silent, log `onSubscribe` state to detect channel join failure. (4) Verify RLS allows the subscriber to see the rows. 30–60 min investigation + fix.
+
+**Trigger:** Session 11 (notifications + activity) — same realtime infrastructure; bundle the diagnosis with notification work.
+
+**Cross-references:** ADR-027 (system messages stored in messages); Session 11 notifications roadmap; Supabase Realtime + RLS docs; `hooks/use-conversation-messages.ts`; Phase F Step 7
+
+---
+
+## DEBT-028 — OrbStack idle auto-shutdown breaks test runs
+**Added:** 09 May 2026 (Session 9 / Phase F)
+**Codebase:** SaaS (test infrastructure)
+**Severity:** Low
+**Type:** Operational / Tooling
+
+**The debt:** Mid-session, `npm run test:actions` failed with "no tests found" / 15 test files reporting 0 tests. Cause: OrbStack had idle-shut-down between an earlier verification and the next run, so local Supabase containers weren't running. Recovery required `open -a OrbStack` + waiting for containers + re-running.
+
+**Why it exists:** The test runner doesn't precondition on Docker / Supabase being up. Silent fall-through to "no tests" instead of a clear "infrastructure not ready" error.
+
+**Cost of leaving it:** ~5 min of confusion per occurrence. Hits during long sessions where tests run multiple times across breaks. Wasted time tracking down a non-issue, plus risk of mistaking infra failure for code regression.
+
+**Fix sketch:** (a) Add a `pretest` hook that checks `docker ps` and starts OrbStack if not running (~30 min). (b) Move action tests to a connection-pooled cloud test database (non-prod), removing the local Docker dependency entirely (several hours + DB provisioning). Option (a) is the right starting point; (b) is the correct long-term answer for CI consistency.
+
+**Trigger:** When this bites a third time, or as part of a broader test-infra polish pass.
+
+**Cross-references:** Vitest config; `.github/workflows/rls-gate.yml`; `tests/setup.ts:72`
+
+---
+
+## DEBT-027 — `sql<Date | null>` annotations are runtime liars
+**Added:** 09 May 2026 (Session 9 / Phase F)
+**Codebase:** SaaS
+**Severity:** Medium
+**Type:** Bug / Deferred decision
+
+**The debt:** Phase F caught `TypeError: x.getTime is not a function` thrown when sorting/comparing conversation `lastMessageAt`. Two instances patched at point-of-use (commit `9fc485b` in `db/queries/conversations.ts`, commit `3e650b4` in `components/conversations/ConversationsInbox.tsx`). Underlying type-honesty bug remains: `db/queries/conversations.ts:66` and `:221` use `sql<Date | null>` annotation on raw SQL subqueries. Drizzle's column-level type coercion only runs for properly mapped table columns, NOT for `sql<>`-tagged expressions inside subqueries. Postgres `timestamptz` returned via raw `sql` comes back as ISO string at runtime. TypeScript trusts the annotation, so the lie propagates downstream into `ConversationListItem.lastMessageAt: Date | null`.
+
+**Why it exists:** Convention from Phase 1a — author trusted the `sql<>` generic to round-trip the type. No precedent had exposed the gap because earlier `sql<>` uses returned scalar types that were already strings/numbers. Tests didn't catch it because action/RLS test fixtures construct `Date` objects directly; the bug only manifests against real Postgres connections, where the value is an ISO string. Phase F caught it because the preview deploy hits real cloud Supabase.
+
+**Cost of leaving it:** Any future `.getTime()` / `.toISOString()` / `.toLocaleString()` consumer on these fields will crash again. Same pattern likely lurks in any other `sql<Date>` usage shipped in the future. Class of bug, not a one-off.
+
+**Fix sketch:** Two options. (a) Tighten the `sql<>` annotation to `sql<string | null>`, change `ConversationListItem.lastMessageAt` to `Date | string | null`, coerce at every consumer. (b) Coerce inside the query result `.map()` block — `new Date(r.lastMessageAt)` — so the public type stays honest as `Date | null`. Option (b) is cleaner: confines the lying to one boundary. 1–2 hours.
+
+**Trigger:** Next time a developer adds a `.getTime()` / Date-method consumer, OR opportunistically before Phase 1c S11 starts. Latent foot-gun until then.
+
+**Cross-references:** Commits `9fc485b`, `3e650b4` (point-of-use patches); ARCHITECTURE-saas.md §16.4 (Drizzle ORM conventions); `db/queries/conversations.ts:66`, `:221`
+
+---
+
+## DEBT-026 — App URL templating not refactored to helper
+**Added:** 09 May 2026 (Session 9 / Phase F surfaced — origin Sessions 6-7)
+**Codebase:** SaaS
+**Severity:** Low
+**Type:** Workaround
+
+**The debt:** `NEXT_PUBLIC_APP_URL` env var is referenced directly in email templates and invitation URLs across multiple call sites. Earlier in the session an incorrectly-set production env var (`localhost:3000`) caused invitation emails to embed broken localhost URLs; user had to manually fix in Vercel UI. No `getAppUrl()` helper exists. Vercel's auto-set `VERCEL_URL` is not used as fallback for preview deploys, and there's no localhost fallback for local dev.
+
+**Why it exists:** Session 6/7 era — quick deploy plumbing took the path of least resistance (direct env-var read). No abstraction was needed yet because there was only one live environment.
+
+**Cost of leaving it:** Every preview deploy that should send a real-looking link sends a broken one without manual `NEXT_PUBLIC_APP_URL` override. Friction during preview-based testing; latent foot-gun if the prod var is ever misset again.
+
+**Fix sketch:** Create `lib/utils/app-url.ts` with `getAppUrl()` that checks (1) `NEXT_PUBLIC_APP_URL` → (2) `https://${VERCEL_URL}` → (3) `http://localhost:3000` in priority order. Update email templates and any invitation URL construction to use the helper. Adds preview-deploy resilience without env-var duplication. ~45 min.
+
+**Trigger:** Next time we touch email templates or invitation URLs, or as part of Phase 1c S11 polish (notifications work will add more URL-templating call sites).
+
+**Cross-references:** Vercel auto env vars docs; `lib/email/templates/*`; `actions/users.ts` invitation flow
+
+---
+
+## DEBT-025 — Sentry user/org context not attached to scope
+**Added:** 09 May 2026 (Session 9 / Phase F)
+**Codebase:** SaaS
+**Severity:** Low
+**Type:** Operational / Documentation
+
+**The debt:** Sentry events from Phase F crashes had no `user_id` or `org_id` tags. Sentry's "Users affected" count showed 0 for real crashes that affected the test user. Production triage will be harder without these.
+
+**Why it exists:** Sentry initialization in `instrumentation.ts` and the client config doesn't currently set user/org context on the Sentry scope after auth resolution. The auth helpers (`requireOrgUser`, `requireAuth`) return user data but don't push it into Sentry.
+
+**Cost of leaving it:** Production incidents land with no user/org attribution. Can't filter Sentry events by org for tenant-specific triage. Friction every time we triage a real bug post-launch. Gets more expensive as customer count grows.
+
+**Fix sketch:** In `instrumentation.ts` server hook, after middleware auth resolution, call `Sentry.setUser({ id: authUser.id, email })` and `Sentry.setTag('org_id', activeOrgId)`. Mirror in client-side Sentry config via a `useEffect` in the dashboard layout. ~30 min.
+
+**Trigger:** Pre-launch operational pass (alongside DEBT-006 items).
+
+**Cross-references:** `instrumentation.ts`; `lib/auth/require-org-user.ts`; SKILL.md Hard Rule 18 (cloud-vs-local divergence — related observability concern)
+
+---
+
+## DEBT-024 — Resend free-tier domain restriction
+**Added:** 09 May 2026 (Session 9 / Phase F)
+**Codebase:** SaaS
+**Severity:** Medium
+**Type:** Operational / Deferred decision
+
+**The debt:** Invitations to recipients outside the verified Resend domain (e.g. arbitrary `@gmail.com` addresses) fail with HTTP 403 from Resend. Toast says "email could not be delivered." Partially mitigated by commit `6bba94b` (switched from-address to `noreply@plancraftdaily.co.uk`, the verified domain), which unblocks sends TO non-owner addresses at the verified domain. Sends to gmail/outlook/etc. external addresses still require Resend paid tier OR per-recipient verification allowlist OR account owner address.
+
+**Why it exists:** Resend free tier blocks sends to recipients that aren't (a) the account owner email or (b) at the verified sending domain — regardless of from-address. We were sending from `onboarding@resend.dev` (test sandbox), which compounded the restriction to "account owner only." Phase F surfaced both layers; the from-address half is fixed, the recipient-restriction half remains.
+
+**Cost of leaving it:** Pre-launch — none (no real customers receiving mail). At launch — impossible. Every customer invitation that goes to an external address (clients, stakeholders, contractors with their own domains) silently 403s. Hard blocker for first commercial onboarding.
+
+**Fix sketch:** Upgrade Resend to paid tier ($20/mo) before onboarding the first real customer. Add `RESEND_FROM_ADDRESS` env var override in Vercel for staging/preview environments if a different sender is desired. ~30 min ops + payment setup.
+
+**Trigger:** Pre-launch operational pass (alongside DEBT-006 items).
+
+**Cross-references:** ADR-006 (email transport); commit `6bba94b` (partial mitigation); SESSION-9-HANDOVER.md Phase F findings; DEBT-006
+
+---
+
 ## DEBT-023 — Test fixtures creating users must use service.auth.admin.createUser
 **Added:** 09 May 2026 (Session 9)
 **Codebase:** SaaS
@@ -573,6 +733,8 @@ For quick lookup of what needs to happen at each upcoming milestone:
 - DEBT-004: Retention worker policy (general)
 - DEBT-018: Vercel deployment recommendations
 - DEBT-021: Message rate limiting
+- DEBT-024: Resend paid tier (external-recipient unblock)
+- DEBT-025: Sentry user/org scope context
 
 ## Phase 4 prep (architect lifecycle)
 - DEBT-007: Push notification implementation
@@ -595,6 +757,12 @@ For quick lookup of what needs to happen at each upcoming milestone:
 - DEBT-019: Drizzle journal/snapshots gap for 0012-0017 (tooling)
 - DEBT-022: Auto-join new org members to existing one-to-one conversations
 - DEBT-023: Test-user fixture helper (auth.admin.createUser convention)
+- DEBT-026: `getAppUrl()` helper (replace direct NEXT_PUBLIC_APP_URL reads)
+- DEBT-027: `sql<Date>` runtime lie — coerce inside query result projection
+- DEBT-028: OrbStack idle-shutdown silent test failure
+- DEBT-029: Realtime subscription not auto-updating message UI (Session 11 candidate)
+- DEBT-030: Project detail UI lacks deep-link to conversations (Session 11 candidate)
+- DEBT-031: Unread badge in nav + per-row indicator (Session 11 candidate)
 
 ## Indefinite (revisit at trigger)
 - DEBT-015: RLS performance at scale (>$10K MRR or visible latency)

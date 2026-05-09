@@ -3,7 +3,7 @@
 **Branch:** `session-9-phase-1c-messaging-core`
 **Off main at:** `06c0961` (docs: discipline framework + SKILL v3.4)
 **Date:** 09 May 2026
-**ARCHITECTURE-saas.md:** v0.10 → **v0.11** (Phase 1c in progress)
+**ARCHITECTURE-saas.md:** v0.10 → **v0.12** (Phase 1c in progress, post-Phase F)
 
 ---
 
@@ -148,59 +148,56 @@ If Session 11+ wants real-time participant-change feedback (e.g. seeing "Sarah j
 
 ---
 
-## Phase F — Manual QA (deferred to user execution)
+## Phase F — Manual QA (executed pre-merge — passed)
 
-Docker daemon was offline during the session, so the 14-step Phase F runbook is pending user execution. Setup:
+Phase F walked the full 14-step runbook against the PR #4 preview deploy. **Result: 11 PASS / 1 FAIL deferred / 2 N/A / 1 SKIP**, with three runtime bugs caught and fixed live during the walk-through (commits below). All cloud verification (`supabase db push --linked` for migrations 0014-0017, anon-curl on the three new tables, full test suites against cloud) completed clean.
 
-**Prerequisites (do these first):**
-1. Start Docker / OrbStack
-2. `npm run db:reset` → applies 0014-0017 locally
-3. `npm run db:seed:local` → seeds reference data
-4. `npm run test:rls` → expect ~175 (currently 147 + 28 new = 175)
-5. `npm run test:actions` → expect ~125 (currently 100 + 23 new = 123, close enough)
-6. `npm run test:cloud-smoke` → expect 12 (cloud secrets must be set; 9 + 3 new)
-7. `supabase db push --linked` → push 0014-0017 to cloud
-8. Cloud anon curl smoke: `curl -s "$CLOUD_SUPABASE_URL/rest/v1/messages?select=id&limit=1" -H "apikey: $CLOUD_SUPABASE_ANON_KEY"` → expect `[]`
-9. Hard refresh production at https://pcd-saas.vercel.app (per ADR-023)
+**14-step walkthrough — final results:**
 
-**14-step walkthrough (from kickoff brief):**
-
-| # | Step | PASS/FAIL/N/A | Notes |
+| # | Step | Result | Notes |
 |---|---|---|---|
-| 1 | Sign in as Hasnath. `/conversations` shows empty state | _ | |
-| 2 | Create project. Invite Sarah. Sarah accepts | _ | |
-| 3 | Org-side `/conversations` shows one-to-one auto-created with Sarah | _ | Auto-create |
-| 4 | Org-side: send "Hello Sarah" — appears | _ | |
-| 5 | Sign in as Sarah at `/portal/conversations` — one-to-one with Hasnath's org appears | _ | Two-context |
-| 6 | Sarah opens, sees Hasnath's message, sends reply "Hi back" | _ | |
-| 7 | Both browsers open simultaneously: realtime updates without refresh | _ | Realtime |
-| 8 | Org-side: edit own message. `(edited)` shows. Content updates | _ | |
-| 9 | Org-side: delete own message. `[deleted]` placeholder. ConfirmDialog confirms | _ | DEBT-016 verify |
-| 10 | Org-side: create group conversation. Add team member. System message "X was added" appears | _ | |
-| 11 | Mark conversation read; unread drops to 0. Sarah sends new message; unread becomes 1 | _ | |
-| 12 | Send `**bold**` `_italic_` `[link](https://example.com)` — renders. Send `<script>alert(1)</script>` — sanitized | _ | |
-| 13 | Empty message → Zod rejects. 10001-char message → Zod rejects | _ | |
-| 14 | `/settings/workflows` delete workflow → AlertDialog (not native confirm). Cancel + Confirm both work | _ | DEBT-016 verify |
+| 1 | Sign in as Hasnath. `/conversations` shows empty state | SKIP | Pre-existing test data; couldn't verify true empty state |
+| 2 | Create project. Invite Sarah. Sarah accepts | PASS | |
+| 3 | Org-side `/conversations` shows one-to-one auto-created with Sarah | PASS | Auto-create verified |
+| 4a | Conversation list loads | PASS | |
+| 4b | Conversation detail loads | PASS | |
+| 5 | Org-side: send "Hello Sarah" — appears | PASS | |
+| 6 | Cross-context visibility (org-side ↔ portal-side) | PASS | |
+| 7 | Both browsers open simultaneously: realtime updates without refresh | **FAIL → DEBT-029** | Manual refresh required to see new messages — bidirectional |
+| 8 | Org-side: edit own message. `(edited)` shows. Content updates | PASS | |
+| 9 | Org-side: delete own message. `[deleted]` placeholder. ConfirmDialog confirms | PASS | DEBT-016 fully resolved |
+| 10 | Org-side: create group conversation. Add team member. System message "X was added" appears | PASS — system message N/A | Solo org context; system message path verified separately |
+| 11 | Mark conversation read; unread drops to 0. Sarah sends new message; unread becomes 1 | **N/A → DEBT-031** | No unread badge in current UI |
+| 12 | Send `**bold**` `_italic_` `[link](...)` — renders. Send `<script>alert(1)</script>` — sanitized | PASS | **CRITICAL** test — rehype-sanitize confirmed working |
+| 13 | Empty message → Zod rejects. 10001-char message → Zod rejects | PASS | Validation rules enforced |
+| 14 | `/settings/workflows` delete workflow → AlertDialog (not native confirm). Cancel + Confirm both work | PASS | DEBT-016 fully resolved |
+
+**Three runtime hotfixes during Phase F walk-through:**
+
+| Commit | Scope | Cause |
+|---|---|---|
+| `9fc485b` | `db/queries/conversations.ts` sort comparator | `lastMessageAt` returned as ISO string from `sql<Date>`-tagged subquery; `.getTime()` crashed |
+| `3e650b4` | `components/conversations/ConversationsInbox.tsx` `formatRelative()` | Same Date-string runtime lie at the render layer; widened signature to `Date \| string \| null` + coerced via `new Date()` |
+| `6bba94b` | `lib/email/from.ts` + `env.ts` | Resend was sending from `onboarding@resend.dev` (test sandbox), 403'd by Resend for non-account-owner recipients; switched default to verified-domain `noreply@plancraftdaily.co.uk` |
+
+Underlying type-honesty issue logged as **DEBT-027** for follow-up refactor (point-of-use patches landed; structural fix deferred). Resend recipient-restriction half (paid-tier upgrade) logged as **DEBT-024**.
 
 **Strict result categories** (per POST-SESSION-CHECKLIST.md item 9 / DEBT-017):
 - PASS: verified end-to-end as a real human user
-- FAIL: failed; document and either fix or file as DEBT
-- N/A: legitimately doesn't apply (e.g. step 5/6/7 if you don't have a second browser context)
-
-**Two-context limitation note (per Rule 21):** Steps 5-7 need both an org browser (Hasnath) and portal browser (Sarah) signed in simultaneously. Workarounds:
-- Use two different browsers (Chrome + Safari, or Chrome + Firefox)
-- Use Chrome incognito for one identity
-- If neither works, mark steps 5-7 N/A and substitute backend verification (service-role REST query for participant rows + Postgres realtime client subscription test)
+- FAIL: failed; documented as DEBT
+- N/A: legitimately doesn't apply
+- SKIP: couldn't verify in this run (pre-existing data, infra constraint, etc.)
 
 ---
 
-## Build / test state at session close (pre-merge, pre-QA)
+## Build / test state at session close (post-Phase F, pre-merge)
 
 - `npx tsc --noEmit` — clean
 - `npm run build` — clean. Conversation routes: /conversations 4.99 kB / 283 kB; /conversations/[id] 2.74 kB / 323 kB; /portal/conversations 515 B / 260 kB; /portal/conversations/[id] 519 B / 384 kB (markdown deps add ~40 kB First Load on detail).
-- `npm test:rls` — written but unrun (Docker offline)
-- `npm test:actions` — written but unrun (Docker offline)
-- `npm test:cloud-smoke` — written but unrun (Docker offline + cloud secrets needed for env)
+- `npm run test:rls` — **172/172** (was 147; +25)
+- `npm run test:actions` — **122/122** (was 100; +22)
+- `npm run test:cloud-smoke` — **12/12** (was 9; +3 post `supabase db push --linked`)
+- Cloud Supabase: migrations 0014-0017 applied; anon-curl confirms `42501 permission denied` on all three new tables (stricter than RLS — anon has no `GRANT SELECT` at the role level, matching the existing repo convention)
 - Worktree: clean status before each commit
 
 ---
@@ -219,6 +216,18 @@ Docker daemon was offline during the session, so the 14-step Phase F runbook is 
 - **DEBT-020** (system message sources beyond participant changes deferred to S11)
 - **DEBT-021** (message rate limiting deferred to pre-launch ops)
 - **DEBT-022** (new org members not auto-joined to existing one_to_ones)
+- **DEBT-023** (test-user fixture must use `service.auth.admin.createUser` — FK to `auth.users`)
+
+**From Phase F manual QA (post-walkthrough):**
+
+- **DEBT-024** (Resend free-tier blocks external recipients — paid-tier upgrade pre-launch)
+- **DEBT-025** (Sentry user/org context not attached to scope)
+- **DEBT-026** (`getAppUrl()` helper to replace direct `NEXT_PUBLIC_APP_URL` reads)
+- **DEBT-027** (`sql<Date>`-tagged subqueries return ISO string at runtime — point-of-use patched in 9fc485b + 3e650b4; structural refactor deferred)
+- **DEBT-028** (OrbStack idle auto-shutdown silently breaks `npm run test:actions`)
+- **DEBT-029** (Realtime subscription not auto-updating message UI — Phase F Step 7 FAIL; Session 11 candidate)
+- **DEBT-030** (project detail UI lacks deep-link to conversations — Session 11 candidate)
+- **DEBT-031** (no unread badge in nav + per-row indicator — Session 11 candidate)
 
 ---
 
