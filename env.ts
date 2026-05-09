@@ -9,9 +9,9 @@ const schema = z.object({
   RESEND_API_KEY: z.string().min(1),
   RESEND_WEBHOOK_SECRET: z.string().min(1),
   // Optional: if set, used as the from-address for all outbound mail.
-  // Falls back to Resend's onboarding sender (works for dev + small sends
-  // without domain verification). Pre-launch task: verify pcdportal.com
-  // in Resend, set SPF/DKIM/DMARC, swap this var to the verified address.
+  // Falls back to "PCD Portal <noreply@plancraftdaily.co.uk>" (verified
+  // domain, SPF/DKIM/DMARC configured in Resend). Override per-environment
+  // if you want staging/preview to send from a different address.
   RESEND_FROM_ADDRESS: z.string().min(1).optional(),
   UPSTASH_REDIS_REST_URL: z.string().url(),
   UPSTASH_REDIS_REST_TOKEN: z.string().min(1),
