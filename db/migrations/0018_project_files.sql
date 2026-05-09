@@ -153,6 +153,17 @@ CREATE POLICY "project_files_update_stakeholder_uploader" ON public.project_file
     AND uploaded_by_id IN (SELECT auth_user_client_ids())
   );
 
+-- NOTE on stakeholder soft-delete via REST (Session 10):
+-- PostgREST raises 42501 when an UPDATE makes the new row invisible to the
+-- SELECT policy — even when the UPDATE policy's USING + WITH CHECK both
+-- pass. Setting `deleted_at` to a non-null value triggers this because the
+-- SELECT policy filters `deleted_at IS NULL`. As a result, a stakeholder
+-- cannot soft-delete their own file via a direct REST UPDATE. This is fine:
+-- the action-layer softDeleteFile in actions/files.ts uses Drizzle's
+-- pooler client (postgres role, bypasses RLS) and writes deleted_at
+-- successfully. The stakeholder UPDATE policy is here for defense-in-depth
+-- on legitimate non-deleted_at metadata updates (e.g. future renames).
+
 CREATE POLICY "project_files_delete_org_admins" ON public.project_files
   FOR DELETE TO authenticated
   USING (
