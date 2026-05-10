@@ -58,6 +58,7 @@ describe('createOrganization (Drizzle transaction)', () => {
     vi.mocked(auth.requireAuth).mockResolvedValue(authUser);
 
     const result = await createOrganization({
+      intent: 'wizard_signup',
       orgTypeSlug: 'surveyor',
       name: `Atomic Test Org ${uuidv7()}`,
       ownerName: 'Atomic Tester',
@@ -123,6 +124,7 @@ describe('createOrganization (Drizzle transaction)', () => {
     } as unknown as Awaited<ReturnType<typeof auth.requireAuth>>);
 
     const result = await createOrganization({
+      intent: 'wizard_signup',
       orgTypeSlug: 'surveyor',
       name: 'Should not be created',
       ownerName: 'Tester',

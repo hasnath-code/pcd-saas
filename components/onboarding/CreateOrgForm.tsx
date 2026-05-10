@@ -57,6 +57,7 @@ export function CreateOrgForm({
     setError(null);
     startTransition(async () => {
       const result = await createOrganization({
+        intent: 'wizard_signup',
         orgTypeSlug,
         ownerName: values.ownerName,
         name: values.name,

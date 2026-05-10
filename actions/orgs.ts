@@ -2,7 +2,7 @@
 
 import { z } from 'zod';
 import { v7 as uuidv7 } from 'uuid';
-import { and, eq, isNull } from 'drizzle-orm';
+import { and, eq, isNull, sql } from 'drizzle-orm';
 import { cookies } from 'next/headers';
 import { revalidatePath } from 'next/cache';
 import {
@@ -12,6 +12,7 @@ import {
 } from '@/lib/auth/requireAuth';
 import { db } from '@/db';
 import {
+  clients,
   organizations,
   orgTypes,
   plans,
@@ -26,7 +27,12 @@ export type ServerActionResult =
   | { success: true }
   | { error: ServerActionErrorCode; reason?: string };
 
+// DEBT-037: `intent` is a runtime guard that documents and enforces
+// "createOrganization may be called from exactly one place — the explicit
+// signup wizard." Any future caller missing the literal fails Zod validation
+// rather than silently inserting an org. (Post-merge ADR enshrines this.)
 const CreateOrgInput = z.object({
+  intent: z.literal('wizard_signup'),
   orgTypeSlug: z.enum(['surveyor', 'architect']),
   name: z.string().trim().min(1, 'Firm name is required').max(120),
   ownerName: z.string().trim().min(1, 'Your name is required').max(120),
@@ -125,6 +131,25 @@ export async function createOrganization(
     return { error: 'internal_error', reason: `signup_transaction:${reason}` };
   }
 
+  // DEBT-037: dual-context probe — if this auth user already has a clients
+  // row, this is a Sarah Step 2 signup (legitimate stakeholder creating their
+  // own firm). We do NOT block — the wizard intent is explicit (Zod literal
+  // above + UI form). The metadata flag surfaces the dual-context for
+  // observability and future UX (Session 11 may add a confirmation step).
+  const stakeholderRows = ownerEmail
+    ? await db
+        .select({ id: clients.id })
+        .from(clients)
+        .where(
+          and(
+            sql`lower(${clients.email}) = lower(${ownerEmail})`,
+            isNull(clients.deletedAt),
+          ),
+        )
+        .limit(1)
+    : [];
+  const dualContext = stakeholderRows.length > 0;
+
   // Audit on success only — three rows: organization, user, workflow.
   await logAudit({
     orgId,
@@ -132,7 +157,14 @@ export async function createOrganization(
     action: 'create',
     resourceType: 'organization',
     resourceId: orgId,
-    metadata: { plan: chosenPlanSlug, type: chosenOrgTypeSlug },
+    metadata: {
+      plan: chosenPlanSlug,
+      type: chosenOrgTypeSlug,
+      ...(dualContext && {
+        dual_context_signup: true,
+        client_id: stakeholderRows[0].id,
+      }),
+    },
   });
   await logAudit({
     orgId,
