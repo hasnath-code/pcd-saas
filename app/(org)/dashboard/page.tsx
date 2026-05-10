@@ -2,6 +2,7 @@ import Link from 'next/link';
 import { redirect } from 'next/navigation';
 import { requireAuthOrRedirect } from '@/lib/auth/requireAuth';
 import { getMyOrg } from '@/db/queries/orgs';
+import { authEmailHasClient } from '@/db/queries/clients';
 import { signOut } from '@/actions/auth';
 import {
   Card,
@@ -15,7 +16,13 @@ import { Button } from '@/components/ui/button';
 export default async function DashboardPage() {
   const authUser = await requireAuthOrRedirect();
   const myOrg = await getMyOrg(authUser.id);
-  if (!myOrg) redirect('/onboarding');
+  if (!myOrg) {
+    // DEBT-037: a stakeholder who manually URL-types /dashboard (or follows a
+    // stale link) gets routed to /portal/projects instead of being pushed
+    // into the org-creation wizard.
+    if (await authEmailHasClient(authUser.email ?? '')) redirect('/portal/projects');
+    redirect('/onboarding');
+  }
 
   return (
     <main className="mx-auto max-w-3xl space-y-6 p-8">

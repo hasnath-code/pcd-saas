@@ -6,6 +6,7 @@ import { redirect } from 'next/navigation';
 import { createClient } from '@/lib/supabase/server';
 import { rateLimit } from '@/lib/ratelimit';
 import { env } from '@/env';
+import { pickDestination, resolvePostAuthIdentity } from '@/lib/auth/postAuthResolve';
 
 // Shared schemas. Mirror these on the client side via zodResolver in form components.
 const emailPasswordSchema = z.object({
@@ -61,7 +62,11 @@ export async function signUp(input: { email: string; password: string; next?: st
   if (limited) return { error: 'rate_limited', reason: `retry_after_${retryAfterSec}s` };
 
   const supabase = await createClient();
-  const next = safeNext(parsed.data.next);
+  // Default `next` to `/onboarding` so signup confirms naturally route to the
+  // wizard. pickDestination then honors `next=/onboarding` only when the user
+  // has zero `users` rows (orphan or stakeholder — Sarah Step 2). Anyone with
+  // an existing membership is bounced to /dashboard. (DEBT-037)
+  const next = safeNext(parsed.data.next, '/onboarding');
   const { error } = await supabase.auth.signUp({
     email: parsed.data.email,
     password: parsed.data.password,
@@ -80,13 +85,18 @@ export async function signIn(input: { email: string; password: string; next?: st
   if (limited) return { error: 'rate_limited', reason: `retry_after_${retryAfterSec}s` };
 
   const supabase = await createClient();
-  const { error } = await supabase.auth.signInWithPassword({
+  const { data, error } = await supabase.auth.signInWithPassword({
     email: parsed.data.email,
     password: parsed.data.password,
   });
 
   if (error) return { error: error.message };
-  redirect(safeNext(parsed.data.next));
+  // DEBT-037: route through pickDestination so password sign-in shares the
+  // same §8 identity-aware routing as the magic-link callback. The post-merge
+  // ADR enshrines "all post-auth routing goes through pickDestination."
+  if (!data.user) redirect('/login?error=no_session');
+  const identity = await resolvePostAuthIdentity(data.user.id, data.user.email ?? '');
+  redirect(pickDestination(identity, parsed.data.next ?? null));
 }
 
 export async function sendMagicLink(input: { email: string; next?: string }): Promise<AuthActionResult> {
