@@ -18,6 +18,7 @@
     "screenshot": "tsx --env-file=.env.local scripts/screenshot.ts",
     "db:smoke": "node --env-file=.env.local scripts/smoke-pool.mjs",
     "db:cleanup-stubs": "tsx --env-file=.env.local scripts/cleanup-stub-webhook-events.ts",
+    "db:cleanup-debt-037": "tsx --conditions=react-server --env-file=.env.local scripts/cleanup-debt-037-orphan-orgs.ts",
     "db:seed-pcd-surveyor": "tsx --env-file=.env.local scripts/seed-hasnath-pcd-surveyor.ts",
     "test:rls": "vitest run --config vitest.config.mts tests/rls",
     "test:actions": "vitest run --config vitest.config.mts tests/actions",
