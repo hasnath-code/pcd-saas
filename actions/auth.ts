@@ -5,7 +5,7 @@ import { headers } from 'next/headers';
 import { redirect } from 'next/navigation';
 import { createClient } from '@/lib/supabase/server';
 import { rateLimit } from '@/lib/ratelimit';
-import { env } from '@/env';
+import { getAppUrl } from '@/lib/get-app-url';
 import { pickDestination, resolvePostAuthIdentity } from '@/lib/auth/postAuthResolve';
 
 // Shared schemas. Mirror these on the client side via zodResolver in form components.
@@ -43,7 +43,7 @@ export type AuthActionResult =
   | { error: string; reason?: string };
 
 const callbackUrl = (next: string = '/dashboard') =>
-  `${env.NEXT_PUBLIC_APP_URL}/auth/callback?next=${encodeURIComponent(next)}`;
+  `${getAppUrl()}/auth/callback?next=${encodeURIComponent(next)}`;
 
 // IP+email is the right grain for auth limiting: defeats both single-IP
 // spraying and single-email distributed attempts. x-forwarded-for is the
