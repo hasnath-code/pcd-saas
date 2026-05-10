@@ -33,6 +33,36 @@
 
 ---
 
+## ADR-031 — Auth callback never creates organizations; `createOrganization` requires `intent='wizard_signup'`; all post-auth routing flows through `pickDestination`
+**Date:** 10 May 2026 (DEBT-037 hotfix, between Sessions 10 and 11)
+**Codebase:** SaaS
+**Status:** Accepted
+
+**Context:** 10 May 2026 production smoke confirmed DEBT-037: external stakeholders signing in via the generic magic-link / password path were silently being made owners of brand-new organizations. The §8 (Auth Model) contract — three identity primitives (`auth.users`, `users`, `clients`) with the documented routing tree — was violated by a `clients`-row-only auth user being routed Auth callback → `/dashboard` (no `users` row) → `/onboarding` → wizard → `createOrganization`. The wizard's sole guard was `authUserHasMembership` (users-row presence), blind to stakeholder identity. The §8-correct link helper existed inside `acceptStakeholderInvitation` but was reachable only through the literal invitation acceptance URL — generic auth flows bypassed it entirely.
+
+Fixing the bug correctly required not just patching the entry point but enshrining a contract that prevents recurrence. The bug shipped because routing was scattered across `app/auth/callback/route.ts`, `actions/auth.ts:signIn`, `app/page.tsx`, and `app/(org)/dashboard/page.tsx` — each making its own routing decision. Centralization is the post-merge invariant.
+
+**Decision:** Three locked invariants, enforced by code:
+
+1. **`createOrganization` is callable from exactly one place — the explicit signup wizard.** The Zod input requires `intent: z.literal('wizard_signup')`. Any caller missing the literal fails Zod validation and receives `{error: 'validation_error'}`. The literal is a runtime contract, not a comment.
+
+2. **All post-auth routing flows through one helper: `pickDestination` in `lib/auth/postAuthResolve.ts`.** No auth action emits `redirect(safeNext(...))` directly. The auth callback, `signIn` (password), and any future entry points all resolve identity via `resolvePostAuthIdentity` and route via `pickDestination`. The helper implements the §8 decision tree as the single source of truth.
+
+3. **The auth callback never inserts into `organizations` or `users`.** It only links `clients.auth_user_id` (Sarah Step 7 — idempotent via `WHERE auth_user_id IS NULL`, with anti-hijack guard against overwriting a different auth_user_id), then calls `pickDestination`. Org creation happens exclusively at the explicit signup wizard's submit.
+
+**Alternatives rejected:**
+- Block stakeholders from `createOrganization` entirely — breaks Sarah Step 2 (legitimate dual-context). The dual-context probe instead writes a soft-warning audit metadata flag (`dual_context_signup: true`) and proceeds.
+- Patch only the auth callback without centralizing routing — leaves bypass surfaces in `signIn`, root page, and dashboard guard. Each would need to be patched separately for any future identity rule change.
+- Add a route-level guard at `/onboarding/*` that bounces stakeholders — over-engineering. Auth-callback routing keeps stakeholders away from the wizard naturally; a stakeholder who manually URL-types `/onboarding` for Sarah Step 2 is a legitimate path. The dashboard guard handles the URL-typing edge case.
+
+**Reconsider if:**
+- A future entry point needs to create orgs from a non-wizard context (admin bulk-create, etc.). At that point either (a) the caller passes `intent='wizard_signup'` (semantic stretch — probably wrong) or (b) the Zod input grows a discriminated union of intent types each with its own validation profile.
+- `pickDestination`'s rule set grows past ~10 cases, indicating the §8 decision tree itself needs refactoring.
+
+**Cross-references:** ARCHITECTURE-saas.md §8; `lib/auth/postAuthResolve.ts`; `app/auth/callback/route.ts`; `actions/auth.ts` (signIn + signUp); `actions/orgs.ts` (createOrganization); `tests/actions/auth-callback.test.ts`; commit `0565777` (PR #7); pre-fix tag `pre-debt-037-hotfix` at `8ac9c0c`; DEBT-037 (closed by this hotfix), DEBT-034 (superseded by DEBT-037); ADR-010, ADR-011 (identity model)
+
+---
+
 ## ADR-030 — Signed URL TTLs for file uploads + downloads
 **Date:** 10 May 2026 (Session 10)
 **Codebase:** SaaS

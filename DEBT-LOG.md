@@ -50,6 +50,66 @@
 
 # Open Debt
 
+## DEBT-042 — Functional index `lower(clients.email)` if seq-scan dominates auth-callback latency
+**Added:** 10 May 2026 (DEBT-037 hotfix follow-up)
+**Codebase:** SaaS
+**Severity:** Low
+**Type:** Performance
+
+**The debt:** `resolvePostAuthIdentity` in `lib/auth/postAuthResolve.ts` looks up `clients` by `lower(email) = lower($1)` for case-insensitive match (defends against legacy mixed-case `clients.email` rows). The `idx_clients_email` index is on `email` (not `lower(email)`), so this lookup uses a sequential scan. Acceptable at current scale (~10s of clients rows) but linear-cost as `clients` grows.
+
+**Why it exists:** Adding a functional index would have been a schema change, out of DEBT-037 hotfix scope (Hard Rule: no schema changes in the hotfix). Auth-callback latency at current scale is ~10ms total — seq-scan cost is negligible.
+
+**Cost of leaving it:** Auth callback latency grows linearly with `clients` row count. At 10K clients, scan likely dominates the callback's 50ms budget. Once it does, this becomes user-visible login lag.
+
+**Fix sketch:** Add migration creating `CREATE INDEX idx_clients_email_lower ON clients (lower(email)) WHERE deleted_at IS NULL`. Update `lib/auth/postAuthResolve.ts` to ensure the lower() expression uses the index. RLS test addition not needed (no policy change). ~30 min including the migration + smoke verification via EXPLAIN ANALYZE.
+
+**Trigger:** Either (a) `clients` row count exceeds 5K (track via periodic check), or (b) Sentry traces show auth-callback p95 latency >100ms.
+
+**Cross-references:** ADR-031, `lib/auth/postAuthResolve.ts`, `db/schema/clients.ts:36-42` (current index)
+
+---
+
+## DEBT-041 — `/select-context` page for dual-context users (Phase 1c)
+**Added:** 10 May 2026 (DEBT-037 hotfix follow-up)
+**Codebase:** SaaS
+**Severity:** Low
+**Type:** UX / Deferred decision
+
+**The debt:** ARCHITECTURE-saas.md §8's documented login decision tree includes a `/select-context` route for users with both `users` and `clients` rows ("dual_context"). This route does not yet exist. The DEBT-037 hotfix's `pickDestination` helper currently defaults dual-context users to `/dashboard` (team-context bias), with the user able to navigate to `/portal/projects` via direct URL.
+
+**Why it exists:** Dual-context UX is Phase 1c work; the §8 spec written in Phase 1a anticipated it but the implementation was deferred. DEBT-037 hotfix's locked scope explicitly excluded this.
+
+**Cost of leaving it:** Dual-context users (architect with own firm + stakeholder on partner firm's project) don't get a clean "switch context" UI. They have to URL-type. Likely rare cohort pre-launch; commercially relevant once architect customers refer each other.
+
+**Fix sketch:** New route `/select-context` rendering both contexts (firm name + role + recent activity preview). Sets cookie remembering last-chosen context. Update `pickDestination` to route `dual_context` to `/select-context`. Update `app/(org)/layout.tsx` and `app/portal/layout.tsx` to surface a context-switcher chip in the header. ~half day including tests.
+
+**Trigger:** Session 11 (notifications + activity) — natural bundle with DEBT-040.
+
+**Cross-references:** ADR-031, ARCHITECTURE-saas.md §8 (decision tree), `lib/auth/postAuthResolve.ts:pickDestination`
+
+---
+
+## DEBT-040 — "Create your own firm" link on /portal/projects for dual-context discoverability
+**Added:** 10 May 2026 (DEBT-037 hotfix follow-up)
+**Codebase:** SaaS
+**Severity:** Low
+**Type:** UX / Deferred decision
+
+**The debt:** Per ADR-031, the auth-callback routing now correctly sends a stakeholder (Sarah at T+1) to `/portal/projects`. For Sarah Step 2 (T+6 months) when she chooses to create her own firm via the wizard, she must currently know to manually URL-type `/onboarding`. No UI affordance points stakeholders at this path.
+
+**Why it exists:** The DEBT-037 hotfix scope was locked to routing + guard, no UX additions. The path is functionally open (`createOrganization` accepts dual-context callers, audits the `dual_context_signup` metadata) but not discoverable.
+
+**Cost of leaving it:** Stakeholders who legitimately want to create their own firm don't realise it's possible from `/portal/projects`. They'd need an external nudge (email, support, docs) to find `/onboarding`. Friction for a small but important Sarah-Step-2 cohort.
+
+**Fix sketch:** Add a button/link on `/portal/projects` ("Create your own firm" → `/onboarding`). ~30 min. Should also apply some lightweight confirmation state on the wizard when called from this path (the audit metadata already flags it; UX should match).
+
+**Trigger:** Session 11 (notifications + activity) — bundle with /select-context work in DEBT-041 since both are dual-context UX.
+
+**Cross-references:** ADR-031, ARCHITECTURE-saas.md §8, `app/portal/projects/page.tsx`
+
+---
+
 ## DEBT-039 — Multi-file selection via file picker fails
 **Added:** 10 May 2026 (Session 10 / production smoke test)
 **Codebase:** SaaS
@@ -93,8 +153,9 @@
 ## DEBT-037 — Stakeholder accounts silently become org owners on sign-in
 **Added:** 10 May 2026 (Session 10 / production smoke test)
 **Codebase:** SaaS
-**Severity:** **HIGH — HOTFIX BEFORE SESSION 11 STARTS**
+**Severity:** HIGH (was HOTFIX-flagged before resolution)
 **Type:** Bug — security / product
+**Status:** Resolved 10 May 2026 (commit 0565777, PR #7) — see ADR-031
 
 **The debt:** Signing in fresh as a user who has only a `clients` row (stakeholder, not an org member) auto-creates an organization and makes them the owner. Confirmed end-to-end via production smoke test 10 May 2026: stakeholder `sarhads@plancraftdaily.co.uk` signed in incognito, was routed to `/dashboard` with a freshly-spawned org, created a project, invited `saliqueh@plancraftdaily.co.uk` as stakeholder. Saliqueh's portal then showed the new project from the auto-spawned org. **Three things happened that should not have:** (a) a stakeholder became an autonomous tenant, (b) an org was created without an explicit signup intent, (c) the new "owner" gained the ability to invite other users into a tenancy they shouldn't control.
 
@@ -115,7 +176,9 @@ Likely also need to audit `actions/orgs.ts createOrganization` for any callers t
 
 **Trigger:** **HOTFIX before Session 11 starts.** Don't kick Session 11 off until this is resolved. Production currently has at least one auto-spawned org from the smoke-test session — that row + any others should be identified and cleaned up via service-role SQL once the routing fix lands (audit step in the hotfix session).
 
-**Cross-references:** DEBT-034 (this supersedes — milder UX framing was an undercount of severity); production smoke test 10 May 2026 (sarhads@/saliqueh@ pair); `middleware.ts`; `actions/auth/*`; `actions/orgs.ts createOrganization`; ADR-009 (single-clients-row guarantee — the basis for stakeholder identity resolution)
+**Resolution (10 May 2026):** Hotfix PR #7 (commit `0565777`, pre-fix tag `pre-debt-037-hotfix` at `8ac9c0c`) restored the §8 contract. Three invariants enshrined in ADR-031: `createOrganization` requires `intent='wizard_signup'` Zod literal; all post-auth routing flows through new `lib/auth/postAuthResolve.ts:pickDestination` helper; auth callback only links `clients.auth_user_id` (idempotent + anti-hijack), never inserts into orgs/users. Phase F walk on Vercel preview confirmed all three §8 identities route correctly (stakeholder-only → /portal/projects, net-new owner → /onboarding → /dashboard, dual-context Sarah Step 2 → /portal/projects then /onboarding → /dashboard with `dual_context_signup=true` audit metadata). Production cleanup script `scripts/cleanup-debt-037-orphan-orgs.ts` shipped — dry-run identified 2 candidate orgs (PCD/sarhads@ + Plan Daily/saliqueh@), both have activity → both protected by per-row pre-flight, manual product judgment required for each (not auto-cleanup). New SKILL.md Hard Rule 25 added (`pickDestination` centralization); v3.4 → v3.5.
+
+**Cross-references:** DEBT-034 (this supersedes — milder UX framing was an undercount of severity); production smoke test 10 May 2026 (sarhads@/saliqueh@ pair); `middleware.ts`; `actions/auth/*`; `actions/orgs.ts createOrganization`; ADR-009 (single-clients-row guarantee — the basis for stakeholder identity resolution); ADR-031 (closure ADR — three invariants enshrined); commit `0565777` (PR #7); `lib/auth/postAuthResolve.ts`; `tests/actions/auth-callback.test.ts`; `docs/debt-037-investigation.md`; `scripts/cleanup-debt-037-orphan-orgs.ts`
 
 ---
 
@@ -164,7 +227,7 @@ Likely also need to audit `actions/orgs.ts createOrganization` for any callers t
 **Codebase:** SaaS
 **Severity:** Medium
 **Type:** Deferred decision
-**Status:** **SUPERSEDED BY DEBT-037** (10 May 2026 — production smoke test surfaced the actual root cause: silent org creation, not just routing UX. Severity was undercounted at Phase F; corrected to HIGH under DEBT-037. Entry retained for traceability — the framing here was an early observation of the same bug under a benign interpretation.)
+**Status:** Resolved 10 May 2026 — superseded by DEBT-037, which was closed by hotfix PR #7 commit `0565777` (ADR-031). The routing fix addresses both the original UX framing (this entry) and the actual security/product bug (DEBT-037). Original SUPERSEDED context: production smoke test surfaced the actual root cause as silent org creation, not just routing UX; severity was undercounted at Phase F and corrected to HIGH under DEBT-037.
 
 **The debt:** Stakeholders who have both a `users` row (e.g. they joined an org as a team member) AND a `clients` row (they were also invited as a stakeholder on someone else's project), or first-time stakeholders, route to `/dashboard` after sign-in instead of `/portal`. RLS still blocks data exposure across contexts, but the destination UI is wrong for the stakeholder context. Phase F observed this on Sarah's account and noted "data pollution from test fixtures" — but the underlying routing logic is the actual bug.
 
@@ -934,18 +997,20 @@ For quick lookup of what needs to happen at each upcoming milestone:
 - DEBT-033: `messages.attachments` Zod widening deferred
 
 ## HOTFIX before Session 11 (must land before S11 kickoff)
-- **DEBT-037**: Stakeholder accounts silently become org owners on sign-in (HIGH — security/product) — supersedes DEBT-034
+- _(empty — DEBT-037 resolved 10 May 2026 by PR #7 commit `0565777`, ADR-031)_
 
 ## Session 11 candidates (notifications + activity)
-- DEBT-026: `getAppUrl()` helper (priority bumped — bit Phase F twice)
+- DEBT-026: `getAppUrl()` helper (priority bumped — bit Phase F twice + blocked DEBT-037 hotfix natural-walk)
 - DEBT-029: Realtime subscription not auto-updating message UI
 - DEBT-030: Project detail UI lacks deep-link to conversations (file portion resolved)
 - DEBT-031: Unread badge in nav + per-row indicator
-- DEBT-034: Stakeholder routing UX — SUPERSEDED BY DEBT-037
 - DEBT-035: File restore UI surface
 - DEBT-036: File download opens in new tab instead of saving
 - DEBT-038: Project-create form doesn't send invitation emails
 - DEBT-039: Multi-file selection via file picker fails
+- DEBT-040: "Create your own firm" link on /portal/projects (dual-context discoverability)
+- DEBT-041: `/select-context` page for dual-context users
 
 ## Indefinite (revisit at trigger)
 - DEBT-015: RLS performance at scale (>$10K MRR or visible latency)
+- DEBT-042: Functional index `lower(clients.email)` (>5K clients OR auth-callback p95 >100ms)

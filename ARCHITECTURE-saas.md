@@ -1,6 +1,6 @@
 # PCD Portal SaaS — Architecture Reference
 
-**Version:** 0.13 (Phase 1c Session 10 shipped + Phase F closed — file-upload primitive: `project_files` table, `org-files` storage bucket with mirrored RLS, two-step signed-URL upload flow, plan-gated quotas, two-sided UI; thumbnail/PDF preview generation descoped per ADR-032; Phase 1c continues)
+**Version:** 0.14 (Phase 1c Session 10 shipped + Phase F closed — file-upload primitive: `project_files` table, `org-files` storage bucket with mirrored RLS, two-step signed-URL upload flow, plan-gated quotas, two-sided UI; thumbnail/PDF preview generation descoped per ADR-032; Phase 1c continues. DEBT-037 hotfix shipped 10 May 2026 between S10 and S11 — see ADR-031 + §35.HOTFIX-DEBT-037)
 **Last updated:** 10 May 2026
 **Maintainer:** Hasnath
 **Codebase status:** Phase 1c in progress — Session 10 shipped file uploads (`project_files` table with per-command RLS + 5 server actions per §20 + drag-drop UI on org and portal sides + `lib/features.ts` `checkFeature` helper backing per-file + total-org-storage quotas via single SUM query; `org-files` bucket with 5 storage.objects policies mirroring `project_files`). 2 new ADRs (029-030); 4 new DEBT entries (032-035); DEBT-026 priority bumped; DEBT-030 file portion resolved. Phase F manual QA executed against PR preview: **11 PASS / 1 SKIP / 1 N/A / 0 FAIL** — clean walk, no in-flight hotfixes needed. 1 session remaining in Phase 1c (S11 notifications + activity).
@@ -430,14 +430,16 @@ User authenticates via Supabase Auth → has session with auth.uid()
                 │
                 ├── Has users row(s)? ──── No ─── Has clients row?
                 │                                     │
-                │                                     ├── Yes → /client (stakeholder portal)
+                │                                     ├── Yes → /portal/projects (stakeholder portal)
                 │                                     │
-                │                                     └── No → /signup (orphan auth — allow new org creation)
+                │                                     └── No → /onboarding (orphan auth — allow new org creation)
                 │
                 ├── Yes, one row → set active_org, redirect to /dashboard
                 │
-                └── Yes, multiple rows OR has clients row too → /select-context
+                └── Yes, multiple rows OR has clients row too → /select-context (Phase 1c — DEBT-041; pre-Phase-1c default is /dashboard)
 ```
+
+**Implementation contract (post-DEBT-037, ADR-031):** This decision tree is implemented exclusively in `lib/auth/postAuthResolve.ts:pickDestination` (or its successor — there must be exactly one routing helper, per SKILL.md Hard Rule 25). The auth callback (`app/auth/callback/route.ts`), password sign-in (`actions/auth.ts:signIn`), root page (`app/page.tsx`), and dashboard guard (`app/(org)/dashboard/page.tsx`) all resolve identity via `resolvePostAuthIdentity` and route via `pickDestination` — no auth action emits `redirect(safeNext(...))` directly. `createOrganization` requires `intent: z.literal('wizard_signup')` to be invokable; this guards against silent invocation by anything other than the wizard form. Sarah Step 2 (a stakeholder choosing to create her own firm via the wizard) is a legitimate path; the action's dual-context probe writes `metadata.dual_context_signup=true` for observability without blocking. The auth callback is responsible for backfilling `clients.auth_user_id` on first sign-in (Sarah Step 7) — idempotent via `WHERE auth_user_id IS NULL`, with anti-hijack guard against overwriting a different auth_user_id. The §8 link helper is shared between this callback path and `acceptStakeholderInvitation` (which still owns the literal-invitation-URL flow).
 
 ### Context resolution in server actions
 
@@ -3426,7 +3428,24 @@ Items flagged during Phase 1a Session 1 (kicked off and shipped 04 May 2026, dep
 
 ---
 
-**Last reviewed:** 10 May 2026 (Phase 1c S10 shipped + Phase F closed — v0.13; Phase 1c in progress, S11 remains)
+**Last reviewed:** 10 May 2026 (Phase 1c S10 shipped + Phase F closed — v0.13; DEBT-037 hotfix shipped between S10 and S11 — v0.14; Phase 1c in progress, S11 remains)
+
+---
+
+## 35.HOTFIX-DEBT-037 — Post-S10 hotfix carryover
+
+Between Sessions 10 and 11, a HIGH-severity production bug (DEBT-037) was hotfixed. External stakeholders signing in via the generic magic-link / password path were silently being made owners of brand-new organizations.
+
+- **Pre-fix tag:** `pre-debt-037-hotfix` at `8ac9c0c`
+- **Fix shipped:** PR #7, commit `0565777`, 10 May 2026
+- **ADR:** ADR-031 (three locked invariants)
+- **New code:** `lib/auth/postAuthResolve.ts` (`resolvePostAuthIdentity` + `pickDestination`); `db/queries/clients.ts` (`authEmailHasClient`); `tests/actions/auth-callback.test.ts` (9 regression tests across 3 §8 scenarios + intent guard + decision-tree unit tests); `scripts/cleanup-debt-037-orphan-orgs.ts` (reversible, dry-run default)
+- **Modified code:** `app/auth/callback/route.ts` (post-PKCE identity resolve + route via pickDestination); `actions/auth.ts` (signIn through pickDestination; signUp default `next='/onboarding'`); `app/page.tsx` + `app/(org)/dashboard/page.tsx` (clients-row probe before /onboarding redirect); `actions/orgs.ts` (Zod `intent='wizard_signup'` literal + dual-context probe + audit metadata flag); `components/onboarding/CreateOrgForm.tsx` (passes intent)
+- **Test counts:** RLS 192/192 unchanged; Actions 145 → 154 (+9); Cloud-smoke 14/14 unchanged
+- **Phase F:** all 3 §8 identities verified via password sign-in walk on Vercel preview (DEBT-026 prevented natural magic-link path; substitution documented). DB assertions: stakeholder-only → /portal/projects + clients.auth_user_id backfilled + 0 orgs/users created + link audit row present; net-new owner → /onboarding → /dashboard + org/user/workflow + 5 stages + audit metadata correct + no dual_context flag; dual-context (Sarah Step 2) → /portal/projects then manual /onboarding then /dashboard + dual_context_signup=true audit + clients row preserved
+- **Production cleanup:** dry-run identified 2 candidate orgs (PCD/sarhads@, Plan Daily/saliqueh@); both have activity → both protected by per-row pre-flight, manual product judgment required for each (no auto-cleanup possible). Audit trail: `docs/debt-037-investigation.md` + `scripts/debt-037-cleanup-candidates.json` (committed) + dry-run snapshot CSV (operational artifact, gitignored)
+- **Follow-up DEBT:** DEBT-040 (link UX), DEBT-041 (`/select-context` page), DEBT-042 (functional index trigger)
+- **SKILL impact:** Hard Rule 25 added (`pickDestination` centralization with "or its successor" hedge to protect intent against drift); changelog v3.4 → v3.5
 
 ## End of document
 
