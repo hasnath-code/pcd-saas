@@ -33,6 +33,55 @@
 
 ---
 
+## ADR-030 — Signed URL TTLs for file uploads + downloads
+**Date:** 10 May 2026 (Session 10)
+**Codebase:** SaaS
+**Status:** Accepted
+
+**Context:** ARCHITECTURE-saas.md §18 originally specified 5-minute TTLs for both upload and download signed URLs. During Session 10 implementation, `@supabase/storage-js` v2.105 turned out not to expose an `expiresIn` option on `createSignedUploadUrl(path, options?)` — the SDK signature is `(path, options?: { upsert: boolean })` with no TTL knob; Supabase hardcodes upload URLs to 2 hours. Downloads via `createSignedUrl(path, expiresIn)` accept TTL freely.
+
+**Decision:** Download signed URLs use a **1-hour TTL** (`createSignedUrl(path, 3600)`); upload signed URLs use the **2-hour Supabase default** (no SDK option to set otherwise). Spec §18 updated to reflect both. Don't fight the SDK.
+
+**Alternatives rejected:**
+- Implement custom upload-URL signing (HMAC against the storage bucket secret) to enforce a tighter 5-minute TTL — duplicates Supabase's auth path, breaks if Supabase changes its signing scheme, ~half-day to build. Not worth it for a defense-in-depth gain on top of action-layer validation.
+- Pin to an older `@supabase/storage-js` that exposed `expiresIn` — none of the v1.x or v2.x releases I could find expose this option for upload URLs (only downloads). It's never been a knob.
+- Bump expectation to 5 hours for downloads to match upload TTL — over-broad. 1 hour covers a user clicking → downloading → optional redirect; longer encourages link-sharing leakage outside the auth boundary.
+
+**Reconsider if:** Supabase exposes `expiresIn` on `createSignedUploadUrl` (watch storage-js major bumps), OR a customer security review requires <2h upload TTL — at which point we either custom-sign or push back on the requirement.
+
+**Cross-references:** ARCHITECTURE-saas.md §18 (Storage System); `actions/files.ts` (`createUploadUrl`, `getDownloadUrl`); `node_modules/@supabase/storage-js/dist/index.d.cts` (SDK signature)
+
+---
+
+## ADR-029 — Plan-gated storage quotas: per-file cap + total cap, single SUM query
+**Date:** 10 May 2026 (Session 10)
+**Codebase:** SaaS
+**Status:** Accepted
+
+**Context:** ARCHITECTURE-saas.md §18 specified plan-tier total-storage caps (100 MB / 5 GB / 50 GB / unlimited) but didn't address per-file size caps — needed because a Solo Free user uploading a single 2 GB file would blow past the total in one request before any check could see it. The Session 10 kickoff brief introduced per-file caps (25 MB / 100 MB / 500 MB) without specifying enforcement strategy. Total quota enforcement also has a race window: between `createUploadUrl` and `confirmUpload`, a concurrent upload could push the org over.
+
+**Decision:** Both caps live in `plans.feature_flags` JSONB as `max_upload_size_bytes` and `max_storage_bytes` (`null` means unlimited). `lib/features.ts` `checkFeature(orgId, 'upload_file', { sizeBytes })` is a compound flag evaluating both: per-file cap is a direct comparison against `sizeBytes`; total cap is a single `SELECT COALESCE(SUM(size_bytes), 0)::bigint FROM project_files JOIN projects ON project_id = projects.id WHERE org_id = ? AND project_files.deleted_at IS NULL AND projects.deleted_at IS NULL` against the cap. Both must pass. The same compound check runs again inside `confirmUpload` to close the create→confirm race; on failure the just-uploaded storage object is removed via `supabase.storage.from('org-files').remove([storagePath])` and `quota_exceeded` returned.
+
+Tier values:
+- `solo_free`: 25 MB per-file / 100 MB total
+- `studio`: 100 MB / 5 GB
+- `practice`: 500 MB / 50 GB
+- `enterprise`: 1 GB / unlimited (`null`)
+
+The `db/seed/plans.ts` upsert (this session) ensures plan-shape changes propagate without re-running migrations. Existing row id is preserved by re-using the matched id when present, so FKs from `organizations.plan_id` stay intact.
+
+**Alternatives rejected:**
+- Cached counter on `organizations` (`storage_used_bytes` updated by trigger) — eliminates the SUM scan but adds a second source of truth that can drift if a migration touches `project_files` directly. YAGNI until EXPLAIN ANALYZE shows the SUM dominating upload latency.
+- Per-file cap at the bucket level (storage RLS path-pattern check on a size attribute) — `storage.objects` doesn't expose `size_bytes` to the policy expression in the form needed; size is known only post-upload. Action-layer enforcement is the only path.
+- Hard quota at the auth.users level — wrong granularity. An org's plan is the billing boundary; user-level caps would punish team members for each other's uploads.
+- Skip the race re-check (trust the create→confirm window is short) — at 100 ms create + 500 ms upload + 50 ms confirm a parallel uploader can absolutely sneak in. Re-check is cheap (one indexed scan) and orphan cleanup is bounded.
+
+**Reconsider if:** (a) Real customer data shows the SUM scan dominating upload latency at >50K rows per org → migrate to a cached counter. (b) Per-file cap turns out to be too restrictive for Practice/Enterprise tier customers (e.g. 4K video survey files >500 MB) → bump caps + revisit `solo_free`'s 25 MB cap separately. (c) The free tier's 100 MB total starts to predict churn ("not enough room to evaluate the product") → revisit with usage data.
+
+**Cross-references:** ARCHITECTURE-saas.md §18 (Storage System / Plan-gated quotas); ARCHITECTURE-saas.md §21 (Feature Flags); `lib/features.ts` (`checkFeature`, `sumStorageBytesForOrg`); `actions/files.ts` (`createUploadUrl`, `confirmUpload`); `db/seed/plans.ts` (upsert pattern + tier values)
+
+---
+
 ## ADR-028 — `conversation_participants.left_at` for soft-leave (vs hard-delete)
 **Date:** 09 May 2026 (Session 9)
 **Codebase:** SaaS

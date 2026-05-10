@@ -50,6 +50,95 @@
 
 # Open Debt
 
+## DEBT-039 — Multi-file selection via file picker fails
+**Added:** 10 May 2026 (Session 10 / production smoke test)
+**Codebase:** SaaS
+**Severity:** Medium
+**Type:** Bug
+
+**The debt:** Selecting 2-3+ files via the "Choose files" button in `FileUploadZone` silently fails — only one or zero files appear in the upload queue. Drag-and-drop with the same set of files works correctly. Single-file selection via the picker also works. Two divergent code paths in the same component.
+
+**Why it exists:** Suspected. Likely the file-input component is missing the `multiple` attribute on `<input type="file">`, OR the click handler reads `e.target.files[0]` (first file only) while the drop handler iterates `e.dataTransfer.files`. Phase F's multi-file test was implicitly drag-drop only — the picker path wasn't separately exercised.
+
+**Cost of leaving it:** Users who default to clicking instead of dragging hit a frustrating UX bug. Anyone uploading >1 file expects the picker to be equivalent to drag-drop. Bulk-upload workflows are blocked via the click path.
+
+**Fix sketch:** Verify `<input type="file" multiple>` is set in `FileUploadZone`. Consolidate the click and drop handlers to iterate over the files collection consistently (both should call the same internal `handleFiles(fileList)` helper). Add a Phase F runbook step that explicitly tests multi-file selection via the picker as separate from drag-drop. ~30-60 min including the runbook update + a fresh Phase F multi-upload check.
+
+**Trigger:** Session 11 — bundle with other file-upload UX polish if scope allows; otherwise opportunistic (any session that touches the file UI).
+
+**Cross-references:** `components/files/FileUploadZone.tsx` (Session 10, squash commit on main); production smoke test 10 May 2026
+
+---
+
+## DEBT-038 — Project-create form doesn't send invitation emails
+**Added:** 10 May 2026 (Session 10 / production smoke test)
+**Codebase:** SaaS
+**Severity:** Medium
+**Type:** Bug
+
+**The debt:** Creating a new project with stakeholders/clients attached in the create form: the `project_stakeholders` row is created but no invitation email fires via Resend. Workaround: open the created project, delete the stakeholder, re-invite from the project detail page — that path sends the email correctly.
+
+**Why it exists:** Suspected two code paths for adding stakeholders. The project-create action calls a different (or older) helper that skips the Resend send call. The project-detail "invite" action calls the correct helper. This kind of duplication is exactly what Hard Rule 19 (atomic multi-table writes via Drizzle transactions) was meant to prevent — somewhere along the way the create-with-stakeholders path stopped going through the canonical `inviteStakeholder` action.
+
+**Cost of leaving it:** Stakeholders attached at project-create time silently never get told they have access. Org users assume the email went out and never follow up. Discoverability gap that compounds with quiet org-creation issues like DEBT-037.
+
+**Fix sketch:** Audit `actions/projects.ts` create flow vs `actions/stakeholders.ts inviteStakeholder`. Consolidate to a single `addStakeholder` helper that always fires email + audit log + Resend send, used by both code paths. ~1-2 hours including a regression test in `tests/actions/projects.test.ts` asserting that creating a project WITH a stakeholder also creates an `outbound_emails` row.
+
+**Trigger:** Session 11 — alongside notification dispatch work (notifications + invitations are adjacent surfaces; the email-send path will get a wider audit anyway).
+
+**Cross-references:** `actions/projects.ts` (project-create with stakeholders); `actions/stakeholders.ts inviteStakeholder` (canonical path); production smoke test 10 May 2026
+
+---
+
+## DEBT-037 — Stakeholder accounts silently become org owners on sign-in
+**Added:** 10 May 2026 (Session 10 / production smoke test)
+**Codebase:** SaaS
+**Severity:** **HIGH — HOTFIX BEFORE SESSION 11 STARTS**
+**Type:** Bug — security / product
+
+**The debt:** Signing in fresh as a user who has only a `clients` row (stakeholder, not an org member) auto-creates an organization and makes them the owner. Confirmed end-to-end via production smoke test 10 May 2026: stakeholder `sarhads@plancraftdaily.co.uk` signed in incognito, was routed to `/dashboard` with a freshly-spawned org, created a project, invited `saliqueh@plancraftdaily.co.uk` as stakeholder. Saliqueh's portal then showed the new project from the auto-spawned org. **Three things happened that should not have:** (a) a stakeholder became an autonomous tenant, (b) an org was created without an explicit signup intent, (c) the new "owner" gained the ability to invite other users into a tenancy they shouldn't control.
+
+**Why it exists:** Suspected. Auth callback or middleware checks `org_memberships` only when deciding routing. If empty → spawns a new org + routes to `/dashboard`. The check doesn't first look at `clients` table to detect "this auth user is a stakeholder, route them to `/portal`." This is the same root cause as the milder DEBT-034 ("stakeholder routing UX"), but the actual impact is silent org creation, not just a wrong landing page — DEBT-037 supersedes DEBT-034 with the corrected severity.
+
+**Cost of leaving it:**
+- **Security/product:** silent org creation as a side effect of sign-in. Stakeholders accidentally gain owner-level powers in tenancies that shouldn't exist.
+- **Billable usage potential:** every stakeholder signing in spawns a new "Solo Free" org row. If billing ever ties to org count (Phase 6 Stripe), this is a leak.
+- **Data integrity:** the auto-spawned orgs have no real billing intent, no settings, no business identity — they're orphan tenancies that pollute `organizations` and any analytics/admin reports.
+- **User confusion:** the user thinks "I just signed in to view my portal" but ends up in a dashboard for an org they didn't create. UX at minimum, trust-violating at worst.
+
+**Fix sketch:** In the routing/onboarding middleware (likely `middleware.ts` or `actions/auth/*`), after auth resolution, check identities in priority:
+1. Has rows in `users` (org member) → `/dashboard`
+2. Has rows in `clients` but no `users` rows → `/portal`
+3. Has rows in NEITHER → onboarding flow that asks the user explicitly which they are (org-create vs. accept-invitation). **Do not silently spawn an org.**
+
+Likely also need to audit `actions/orgs.ts createOrganization` for any callers that fire on auth callback rather than explicit user intent. ~2-4 hours investigation + fix + targeted Phase F walk to confirm fixed (incognito sign-in as a stakeholder → /portal, no new org row).
+
+**Trigger:** **HOTFIX before Session 11 starts.** Don't kick Session 11 off until this is resolved. Production currently has at least one auto-spawned org from the smoke-test session — that row + any others should be identified and cleaned up via service-role SQL once the routing fix lands (audit step in the hotfix session).
+
+**Cross-references:** DEBT-034 (this supersedes — milder UX framing was an undercount of severity); production smoke test 10 May 2026 (sarhads@/saliqueh@ pair); `middleware.ts`; `actions/auth/*`; `actions/orgs.ts createOrganization`; ADR-009 (single-clients-row guarantee — the basis for stakeholder identity resolution)
+
+---
+
+## DEBT-036 — File download opens in new tab instead of saving
+**Added:** 10 May 2026 (Session 10 / production smoke test)
+**Codebase:** SaaS
+**Severity:** Low
+**Type:** Bug — UX
+
+**The debt:** Clicking the download affordance in `FileRow` (either `/dashboard/projects/[id]` or `/portal/projects/[id]`) opens the Supabase signed URL in a new tab. PDFs and images render inline in the browser; binary files prompt save. User expected a save dialog regardless of MIME type.
+
+**Why it exists:** `getDownloadUrl` returns a Supabase signed URL without a `Content-Disposition: attachment` header. The browser default behavior takes over — in-browser-renderable types display, others save. `FileRow.handleDownload` opens the URL via `window.open(url, '_blank')` rather than using a synthetic `<a download>` element.
+
+**Cost of leaving it:** Users who want to save (vs. preview) a PDF have to right-click → Save As, which is non-obvious. Mild UX paper-cut. Not a security or data issue.
+
+**Fix sketch:** Two options. (a) Pass `download=<filename>` as a query param when minting the signed URL — Supabase respects this and adds the Content-Disposition header server-side. (b) Use Supabase's `createSignedUrl(path, expiresIn, { download: filename })` option in `getDownloadUrl`. (c) On the client, swap `window.open(url, '_blank')` for `<a href={url} download={filename}>` triggered programmatically. Option (b) is cleanest — central + server-side. ~30 min including a unit test asserting the returned URL contains the disposition param.
+
+**Trigger:** Session 11 — bundle with other file-upload UX polish (DEBT-039 is in the same component).
+
+**Cross-references:** `actions/files.ts:getDownloadUrl`; `components/files/FileRow.tsx:handleDownload`; production smoke test 10 May 2026
+
+---
+
 ## DEBT-035 — File restore UI surface
 **Added:** 10 May 2026 (Session 10 / Phase F Step 13 marked N/A)
 **Codebase:** SaaS
@@ -75,6 +164,7 @@
 **Codebase:** SaaS
 **Severity:** Medium
 **Type:** Deferred decision
+**Status:** **SUPERSEDED BY DEBT-037** (10 May 2026 — production smoke test surfaced the actual root cause: silent org creation, not just routing UX. Severity was undercounted at Phase F; corrected to HIGH under DEBT-037. Entry retained for traceability — the framing here was an early observation of the same bug under a benign interpretation.)
 
 **The debt:** Stakeholders who have both a `users` row (e.g. they joined an org as a team member) AND a `clients` row (they were also invited as a stakeholder on someone else's project), or first-time stakeholders, route to `/dashboard` after sign-in instead of `/portal`. RLS still blocks data exposure across contexts, but the destination UI is wrong for the stakeholder context. Phase F observed this on Sarah's account and noted "data pollution from test fixtures" — but the underlying routing logic is the actual bug.
 
@@ -843,13 +933,19 @@ For quick lookup of what needs to happen at each upcoming milestone:
 - DEBT-032: Thumbnail + PDF preview generation deferred
 - DEBT-033: `messages.attachments` Zod widening deferred
 
+## HOTFIX before Session 11 (must land before S11 kickoff)
+- **DEBT-037**: Stakeholder accounts silently become org owners on sign-in (HIGH — security/product) — supersedes DEBT-034
+
 ## Session 11 candidates (notifications + activity)
 - DEBT-026: `getAppUrl()` helper (priority bumped — bit Phase F twice)
 - DEBT-029: Realtime subscription not auto-updating message UI
 - DEBT-030: Project detail UI lacks deep-link to conversations (file portion resolved)
 - DEBT-031: Unread badge in nav + per-row indicator
-- DEBT-034: Stakeholder routing UX (clients with both users + clients rows)
+- DEBT-034: Stakeholder routing UX — SUPERSEDED BY DEBT-037
 - DEBT-035: File restore UI surface
+- DEBT-036: File download opens in new tab instead of saving
+- DEBT-038: Project-create form doesn't send invitation emails
+- DEBT-039: Multi-file selection via file picker fails
 
 ## Indefinite (revisit at trigger)
 - DEBT-015: RLS performance at scale (>$10K MRR or visible latency)
