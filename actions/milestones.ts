@@ -18,6 +18,7 @@ import {
 } from '@/db/schema';
 import { logAudit } from '@/lib/audit/log';
 import { dispatchNotification } from '@/lib/notifications/dispatch';
+import { logActivityTx } from '@/lib/activity/log';
 
 export type MilestoneActionResult<T = void> =
   | (T extends void ? { success: true } : { success: true; data: T })
@@ -91,6 +92,18 @@ export async function createMilestone(
         scheduledAt: scheduledAt.toISOString(),
         visibleToStakeholders,
       };
+
+      // Activity row — visibility inherits from the milestone itself.
+      // Hidden milestones (visibleToStakeholders=false) produce hidden
+      // activity rows; stakeholders never see them.
+      await logActivityTx(tx, {
+        projectId,
+        actorType: 'user',
+        actorId: ctx.userId,
+        eventType: 'milestone.scheduled',
+        payload,
+        visibleToStakeholders,
+      });
 
       const orgMembers = await tx
         .select({ id: users.id })

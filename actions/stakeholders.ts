@@ -6,6 +6,7 @@ import { and, eq, gt, isNull } from 'drizzle-orm';
 import { revalidatePath } from 'next/cache';
 import * as Sentry from '@sentry/nextjs';
 import { dispatchNotification } from '@/lib/notifications/dispatch';
+import { logActivityTx } from '@/lib/activity/log';
 import {
   AuthError,
   requireAuth,
@@ -285,6 +286,18 @@ export async function inviteStakeholder(
         invitationId,
         reinvited: alreadyExistedDeleted,
       };
+
+      // Activity row — org-internal. Stakeholders don't surface "X joined"
+      // events in their own timeline view (visibleToStakeholders=false).
+      await logActivityTx(tx, {
+        projectId,
+        actorType: 'user',
+        actorId: ctx.userId,
+        eventType: 'stakeholder.added_to_project',
+        payload: dispatchPayload,
+        visibleToStakeholders: false,
+      });
+
       for (const u of orgMembers) {
         await dispatchNotification({
           tx,

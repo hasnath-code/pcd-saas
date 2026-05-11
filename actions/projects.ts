@@ -22,6 +22,7 @@ import {
 import { logAudit } from '@/lib/audit/log';
 import { VISIBILITY_PROFILES } from '@/lib/visibility-profiles';
 import { dispatchNotification } from '@/lib/notifications/dispatch';
+import { logActivityTx } from '@/lib/activity/log';
 
 export type ProjectActionResult<T = void> =
   | (T extends void ? { success: true } : { success: true; data: T })
@@ -443,6 +444,23 @@ export async function moveProjectToStage(
         .update(projects)
         .set({ currentStageId: toStageId })
         .where(eq(projects.id, projectId));
+
+      // 1a. Activity row — stakeholders always see stage transitions per
+      //     the kickoff default (project.stage_changed → visible=true).
+      await logActivityTx(tx, {
+        projectId,
+        actorType: 'user',
+        actorId: ctx.userId,
+        eventType: 'project.stage_changed',
+        payload: {
+          projectId,
+          projectNumber,
+          ...stageChangeMetadata,
+          fromStageName: fromStage.name,
+          toStageName: toStage.name,
+        },
+        visibleToStakeholders: true,
+      });
 
       // 2. Fan out project.stage_changed to all org members + all accepted,
       //    non-deleted stakeholders on this project. Visibility profile

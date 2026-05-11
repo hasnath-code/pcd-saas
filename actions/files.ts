@@ -21,6 +21,7 @@ import { logAudit } from '@/lib/audit/log';
 import { checkFeature } from '@/lib/features';
 import { createServiceClient } from '@/lib/supabase/service';
 import { dispatchNotification } from '@/lib/notifications/dispatch';
+import { logActivityTx } from '@/lib/activity/log';
 
 // ARCHITECTURE-saas.md §20 standard shape per action: Zod parse → auth →
 // access check → quota check → mutation → audit log → discriminated return.
@@ -465,6 +466,19 @@ export async function confirmUpload(
         uploaderName,
         uploaderType: uploadedByType,
       };
+
+      // 2a. Activity row — visibility mirrors the file row's visibility flag.
+      //     org_only files are invisible to stakeholders via project_files
+      //     RLS; the activity row matches so the timeline doesn't surface a
+      //     row that links to a file they can't open.
+      await logActivityTx(tx, {
+        projectId,
+        actorType: identity.kind === 'user' ? 'user' : 'client',
+        actorId: identity.kind === 'user' ? identity.userId : identity.clientId,
+        eventType: 'file.uploaded',
+        payload,
+        visibleToStakeholders: fileVisibility === 'org_and_stakeholders',
+      });
 
       // Recipients: org members of the project's org + accepted, non-deleted
       // stakeholders with can_view_drawings=true. Stakeholders without
