@@ -1,9 +1,9 @@
 # PCD Portal SaaS — Architecture Reference
 
-**Version:** 0.14 (Phase 1c Session 10 shipped + Phase F closed — file-upload primitive: `project_files` table, `org-files` storage bucket with mirrored RLS, two-step signed-URL upload flow, plan-gated quotas, two-sided UI; thumbnail/PDF preview generation descoped per ADR-032; Phase 1c continues. DEBT-037 hotfix shipped 10 May 2026 between S10 and S11 — see ADR-031 + §35.HOTFIX-DEBT-037)
-**Last updated:** 10 May 2026
+**Version:** 0.15 (Phase 1c Session 10 shipped + Phase F closed — file-upload primitive: `project_files` table, `org-files` storage bucket with mirrored RLS, two-step signed-URL upload flow, plan-gated quotas, two-sided UI; thumbnail/PDF preview generation descoped per DEBT-032; Phase 1c continues. Two interim items shipped between S10 and S11: DEBT-037 hotfix (10 May 2026 — see ADR-031 + §35.HOTFIX-DEBT-037) and DEBT-026 mini-session (11 May 2026 — `getAppUrl()` helper per ADR-032 + §35.MINI-DEBT-026))
+**Last updated:** 11 May 2026
 **Maintainer:** Hasnath
-**Codebase status:** Phase 1c in progress — Session 10 shipped file uploads (`project_files` table with per-command RLS + 5 server actions per §20 + drag-drop UI on org and portal sides + `lib/features.ts` `checkFeature` helper backing per-file + total-org-storage quotas via single SUM query; `org-files` bucket with 5 storage.objects policies mirroring `project_files`). 2 new ADRs (029-030); 4 new DEBT entries (032-035); DEBT-026 priority bumped; DEBT-030 file portion resolved. Phase F manual QA executed against PR preview: **11 PASS / 1 SKIP / 1 N/A / 0 FAIL** — clean walk, no in-flight hotfixes needed. 1 session remaining in Phase 1c (S11 notifications + activity).
+**Codebase status:** Phase 1c in progress — Session 10 shipped file uploads (`project_files` table with per-command RLS + 5 server actions per §20 + drag-drop UI on org and portal sides + `lib/features.ts` `checkFeature` helper backing per-file + total-org-storage quotas via single SUM query; `org-files` bucket with 5 storage.objects policies mirroring `project_files`). 2 new ADRs from S10 (029-030); 4 new DEBT entries from S10 (032-035); DEBT-030 file portion resolved. DEBT-037 hotfix shipped 10 May 2026 (ADR-031, Hard Rule 25). DEBT-026 mini-session shipped 11 May 2026 (ADR-032, Hard Rule 26 — `lib/get-app-url.ts`; closes DEBT-026 as DEBT-R004; surfaces DEBT-043 PKCE cookie mismatch as S11 follow-up). Phase F manual QA executed against PR preview: **11 PASS / 1 SKIP / 1 N/A / 0 FAIL** — clean walk, no in-flight hotfixes needed. 1 session remaining in Phase 1c (S11 notifications + activity).
 **Production URL:** https://pcd-saas.vercel.app
 **Repo:** https://github.com/hasnath-code/pcd-saas
 
@@ -324,7 +324,7 @@ All env vars live in `env.ts`, validated with Zod at startup. Missing or malform
 | `UPSTASH_REDIS_REST_TOKEN` | Upstash | |
 | `SENTRY_DSN` | Sentry | Error tracking |
 | `SENTRY_AUTH_TOKEN` | Sentry | Source map uploads (Vercel build only) |
-| `NEXT_PUBLIC_APP_URL` | self | e.g. `https://app.pcdportal.com` — used in email links |
+| `NEXT_PUBLIC_APP_URL` | self | e.g. `https://app.pcdportal.com` — production custom-domain override consumed by `lib/get-app-url.ts:getAppUrl()` (never read directly outside the helper — see ADR-032) |
 | `INTERNAL_CRON_SECRET` | self-generated | Bearer token for internal cron jobs (Vercel cron) |
 
 ### Reserved for later phases
@@ -364,6 +364,16 @@ const schema = z.object({
 
 export const env = schema.parse(process.env);
 ```
+
+### App-public URL construction
+
+All app-public URLs (magic-link `emailRedirectTo`, signup/reset redirect targets, invitation accept URLs, notification email bodies — anything that needs to point a browser back at the running deployment) are built via `lib/get-app-url.ts:getAppUrl()`. The helper resolves origin per environment using a VERCEL_ENV-aware priority:
+
+- Production on Vercel: `NEXT_PUBLIC_APP_URL` (custom domain override) → `https://${VERCEL_URL}` (project production alias).
+- Preview/dev on Vercel: `https://${VERCEL_URL}` always (defeats the localhost-leak class of bugs where a stale `NEXT_PUBLIC_APP_URL` in preview env produces broken magic links).
+- Local: `NEXT_PUBLIC_APP_URL` → `http://localhost:3000`.
+
+`getAppUrl()` reads `process.env` directly (not via `env`) — a deliberate exception so `VERCEL_URL` / `VERCEL_ENV` don't bloat the Zod startup schema and tests can stub via `vi.stubEnv`. Direct `process.env.NEXT_PUBLIC_APP_URL` reads for URL construction are forbidden outside the helper. See ADR-032 + SKILL.md Hard Rule 26.
 
 ---
 
@@ -3446,6 +3456,21 @@ Between Sessions 10 and 11, a HIGH-severity production bug (DEBT-037) was hotfix
 - **Production cleanup:** dry-run identified 2 candidate orgs (PCD/sarhads@, Plan Daily/saliqueh@); both have activity → both protected by per-row pre-flight, manual product judgment required for each (no auto-cleanup possible). Audit trail: `docs/debt-037-investigation.md` + `scripts/debt-037-cleanup-candidates.json` (committed) + dry-run snapshot CSV (operational artifact, gitignored)
 - **Follow-up DEBT:** DEBT-040 (link UX), DEBT-041 (`/select-context` page), DEBT-042 (functional index trigger)
 - **SKILL impact:** Hard Rule 25 added (`pickDestination` centralization with "or its successor" hedge to protect intent against drift); changelog v3.4 → v3.5
+
+## 35.MINI-DEBT-026 — Post-S10 mini-session carryover
+
+Between the DEBT-037 hotfix and Session 11, a Medium-severity carry-over (DEBT-026) was closed: app-public URL construction was scattered across 5 server-side call sites, each reading `env.NEXT_PUBLIC_APP_URL` directly, which produced broken magic links on every Vercel preview deploy. The bug bit Phase F twice (Sessions 9 and 10) and forced a magic-link → password sign-in pivot during the DEBT-037 hotfix walk. Closed before Session 11 so notification emails ship onto a known-good URL plumbing layer.
+
+- **Pre-fix tag:** `pre-debt-026-mini-session` at `d221142`
+- **Fix shipped:** PR #9, commit `aa6899d`, 11 May 2026
+- **ADR:** ADR-032 (three locked invariants: single helper, VERCEL_ENV-aware priority, `process.env` direct read for testability)
+- **New code:** `lib/get-app-url.ts` (~30 LOC incl. JSDoc); `tests/actions/get-app-url.test.ts` (5 tests via `vi.stubEnv`)
+- **Modified code:** `actions/auth.ts` (`callbackUrl` powering `signUp`/`sendMagicLink`/`sendPasswordReset`); `actions/users.ts:113` (team-invitation acceptUrl); `actions/stakeholders.ts:278` (stakeholder-invitation acceptUrl)
+- **Test counts:** RLS 192/192 unchanged; Actions 154 → 159 (+5); Cloud-smoke 14/14 unchanged
+- **Phase F:** magic-link walk on PR preview confirmed `redirect_to` query param points to preview domain (not localhost); user reported "the fix lands where it needs to"
+- **Surprise surfaced (Phase F):** with `redirect_to` now correctly pointing at the preview, the magic-link click landed on the Vercel **per-deploy** URL (`pcd-saas-<hash>-…vercel.app`) — a different hostname from the branch alias (`pcd-saas-git-<branch>-…vercel.app`) where the user submitted the form. The PKCE `code_verifier` cookie is scoped to the form-submission hostname, so the callback opened with no cookie and PKCE verification failed. The DEBT-026 fix is correct; this is a latent Vercel per-deploy vs branch-alias cookie split that DEBT-026 exposed but did not cause. Registered as DEBT-043 for Session 11.
+- **Follow-up DEBT:** DEBT-043 (PKCE cookie mismatch on preview magic-link walks — recommend folding into S11 kickoff alongside notification-email URL templating that will exercise the same path)
+- **SKILL impact:** Hard Rule 26 added (all app-public URLs through `getAppUrl()`; direct `process.env.NEXT_PUBLIC_APP_URL` reads for URL construction forbidden outside the helper); changelog v3.5 → v3.6
 
 ## End of document
 
