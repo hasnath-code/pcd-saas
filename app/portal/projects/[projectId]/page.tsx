@@ -13,6 +13,7 @@ import {
 import { ProjectStageBadge } from '@/components/projects/ProjectStageBadge';
 import { FileList } from '@/components/files/FileList';
 import { FileUploadZone } from '@/components/files/FileUploadZone';
+import { ActivityTimeline } from '@/components/activity/ActivityTimeline';
 
 // Per-project portal view. Sections are gated on the caller's per-stakeholder
 // flag set (Phase 1b §14):
@@ -156,6 +157,8 @@ export default async function PortalProjectDetailPage({
           </CardHeader>
         </Card>
       )}
+
+      <ActivityTimeline projectId={projectId} viewer="stakeholder" />
     </main>
   );
 }
