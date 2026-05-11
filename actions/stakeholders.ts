@@ -34,7 +34,7 @@ import {
   type VisibilityFlags,
   type VisibilityProfile,
 } from '@/lib/visibility-profiles';
-import { env } from '@/env';
+import { getAppUrl } from '@/lib/get-app-url';
 
 export type StakeholderActionResult<T = void> =
   | (T extends void
@@ -275,7 +275,7 @@ export async function inviteStakeholder(
   }
 
   // Send email. Wrap in try/catch (Session 5 hotfix pattern).
-  const acceptUrl = `${env.NEXT_PUBLIC_APP_URL}/invitations/${token}`;
+  const acceptUrl = `${getAppUrl()}/invitations/${token}`;
   const { subject, html } = stakeholderInvitationEmail({
     inviterName,
     orgName,

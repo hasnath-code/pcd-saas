@@ -16,7 +16,7 @@ import { logAudit } from '@/lib/audit/log';
 import { sendEmail } from '@/lib/email/send';
 import { teamInvitationEmail } from '@/lib/email/templates/team-invitation';
 import { rateLimit } from '@/lib/ratelimit';
-import { env } from '@/env';
+import { getAppUrl } from '@/lib/get-app-url';
 
 export type ServerActionResult =
   | { success: true; deliveryWarning?: 'email_send_failed' }
@@ -110,7 +110,7 @@ export async function inviteTeamMember(input: unknown): Promise<ServerActionResu
     invitedBy: ctx.userId,
   });
 
-  const acceptUrl = `${env.NEXT_PUBLIC_APP_URL}/invitations/${token}`;
+  const acceptUrl = `${getAppUrl()}/invitations/${token}`;
   const { subject, html } = teamInvitationEmail({
     inviterName,
     orgName,
