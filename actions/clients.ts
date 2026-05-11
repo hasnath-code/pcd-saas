@@ -12,6 +12,7 @@ import { db, type DbOrTx } from '@/db';
 import { clients, clientOrgMemberships } from '@/db/schema';
 import { logAudit } from '@/lib/audit/log';
 import { autoCreateGeneralConversationTx } from '@/actions/conversations';
+import { seedNotificationDefaultsTx } from '@/lib/notifications/seed-defaults';
 
 export type ClientActionResult<T = void> =
   | (T extends void ? { success: true } : { success: true; data: T })
@@ -101,6 +102,12 @@ export async function findOrCreateClientTx(
     clientId,
     orgId,
   });
+
+  // Session 11 §17: seed default notification preferences for the client.
+  // Always idempotent (ON CONFLICT DO NOTHING), so safe to call on both the
+  // new-client path AND the reuse-global-row path — a client invited to two
+  // orgs only seeds once, the second pass is a no-op.
+  await seedNotificationDefaultsTx(tx, { clientId });
 
   return { clientId, created };
 }

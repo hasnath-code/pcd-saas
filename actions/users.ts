@@ -17,6 +17,7 @@ import { sendEmail } from '@/lib/email/send';
 import { teamInvitationEmail } from '@/lib/email/templates/team-invitation';
 import { rateLimit } from '@/lib/ratelimit';
 import { getAppUrl } from '@/lib/get-app-url';
+import { seedNotificationDefaultsTx } from '@/lib/notifications/seed-defaults';
 
 export type ServerActionResult =
   | { success: true; deliveryWarning?: 'email_send_failed' }
@@ -236,6 +237,13 @@ export async function acceptInvitation(input: unknown): Promise<ServerActionResu
     name: inviteeName,
     role: invitation.role,
   });
+
+  // Session 11 §17: seed default notification preferences for the new
+  // team member. Idempotent and best-effort — failure here doesn't roll
+  // back the user creation (no surrounding transaction in this action),
+  // but it would be surprising in practice; Sentry will capture if it
+  // ever fires.
+  await seedNotificationDefaultsTx(db, { userId: newUserId });
 
   await db
     .update(invitations)

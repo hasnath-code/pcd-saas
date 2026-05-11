@@ -35,6 +35,7 @@ import {
   type VisibilityProfile,
 } from '@/lib/visibility-profiles';
 import { getAppUrl } from '@/lib/get-app-url';
+import { seedNotificationDefaultsTx } from '@/lib/notifications/seed-defaults';
 
 export type StakeholderActionResult<T = void> =
   | (T extends void
@@ -440,6 +441,13 @@ export async function acceptStakeholderInvitation(
         orgId: invitation.orgId,
         createdByUserId: invitation.invitedBy,
       });
+
+      // Session 11 §17: defensive seed of notification preferences. The
+      // stakeholder's clients row was created at invite-time via
+      // findOrCreateClientTx which already seeds. This call is idempotent —
+      // it covers the edge case where a clients row predates Session 11
+      // (no prefs seeded yet) and the stakeholder accepts a fresh invitation.
+      await seedNotificationDefaultsTx(tx, { clientId: client.id });
     });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
