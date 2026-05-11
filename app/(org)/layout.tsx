@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { requireAuthOrRedirect } from '@/lib/auth/requireAuth';
 import { listMyMemberships } from '@/db/queries/orgs';
 import { totalUnreadForOrgUser } from '@/db/queries/conversations';
+import { unreadInAppCount } from '@/db/queries/notifications';
 import { db } from '@/db';
 import { users } from '@/db/schema';
 import { and, eq, isNull } from 'drizzle-orm';
@@ -41,6 +42,7 @@ export default async function OrgLayout({ children }: { children: ReactNode }) {
   // Resolve the active user's users.id for the unread badge query. Cheap
   // single-row lookup; safe to skip if no active org (mid-onboarding).
   let unreadCount = 0;
+  let unreadNotifCount = 0;
   if (active) {
     const userRows = await db
       .select({ id: users.id })
@@ -57,6 +59,10 @@ export default async function OrgLayout({ children }: { children: ReactNode }) {
       unreadCount = await totalUnreadForOrgUser({
         orgId: active.orgId,
         userId: userRows[0].id,
+      });
+      unreadNotifCount = await unreadInAppCount({
+        recipientType: 'user',
+        recipientId: userRows[0].id,
       });
     }
   }
@@ -85,6 +91,19 @@ export default async function OrgLayout({ children }: { children: ReactNode }) {
                   {unreadCount > 0 ? (
                     <Badge className="rounded-full bg-primary px-1.5 text-primary-foreground">
                       {unreadCount > 99 ? '99+' : unreadCount}
+                    </Badge>
+                  ) : null}
+                </Link>
+                <Link
+                  href="/notifications"
+                  aria-label="Notifications"
+                  className="inline-flex items-center gap-1.5 text-muted-foreground hover:text-foreground"
+                >
+                  <span aria-hidden>🔔</span>
+                  <span className="sr-only">Notifications</span>
+                  {unreadNotifCount > 0 ? (
+                    <Badge className="rounded-full bg-primary px-1.5 text-primary-foreground">
+                      {unreadNotifCount > 99 ? '99+' : unreadNotifCount}
                     </Badge>
                   ) : null}
                 </Link>

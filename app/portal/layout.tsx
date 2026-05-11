@@ -3,6 +3,7 @@ import Link from 'next/link';
 import { redirect } from 'next/navigation';
 import { AuthError, requireStakeholder } from '@/lib/auth/requireAuth';
 import { totalUnreadForStakeholder } from '@/db/queries/conversations';
+import { unreadInAppCount } from '@/db/queries/notifications';
 import { Badge } from '@/components/ui/badge';
 
 // Stakeholder portal shell. All /portal/* routes require an auth user with a
@@ -32,6 +33,10 @@ export default async function PortalLayout({ children }: { children: ReactNode }
   const unreadCount = await totalUnreadForStakeholder({
     clientId: stakeholderCtx.clientId,
   });
+  const unreadNotifCount = await unreadInAppCount({
+    recipientType: 'client',
+    recipientId: stakeholderCtx.clientId,
+  });
 
   return (
     <>
@@ -56,6 +61,19 @@ export default async function PortalLayout({ children }: { children: ReactNode }
                 {unreadCount > 0 ? (
                   <Badge className="rounded-full bg-primary px-1.5 text-primary-foreground">
                     {unreadCount > 99 ? '99+' : unreadCount}
+                  </Badge>
+                ) : null}
+              </Link>
+              <Link
+                href="/portal/notifications"
+                aria-label="Notifications"
+                className="inline-flex items-center gap-1.5 text-muted-foreground hover:text-foreground"
+              >
+                <span aria-hidden>🔔</span>
+                <span className="sr-only">Notifications</span>
+                {unreadNotifCount > 0 ? (
+                  <Badge className="rounded-full bg-primary px-1.5 text-primary-foreground">
+                    {unreadNotifCount > 99 ? '99+' : unreadNotifCount}
                   </Badge>
                 ) : null}
               </Link>

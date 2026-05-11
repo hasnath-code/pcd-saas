@@ -2,7 +2,7 @@
 
 import { z } from 'zod';
 import { v7 as uuidv7 } from 'uuid';
-import { and, eq, isNull } from 'drizzle-orm';
+import { and, eq, isNull, or } from 'drizzle-orm';
 import { revalidatePath } from 'next/cache';
 import {
   AuthError,
@@ -10,7 +10,12 @@ import {
   type ServerActionErrorCode,
 } from '@/lib/auth/requireAuth';
 import { db } from '@/db';
-import { clients, notificationPreferences, users } from '@/db/schema';
+import {
+  clients,
+  notificationPreferences,
+  notifications,
+  users,
+} from '@/db/schema';
 import { logAudit } from '@/lib/audit/log';
 import {
   NOTIFICATION_CHANNELS,
@@ -211,3 +216,149 @@ export async function getMyNotificationPreferences(
     data: { identityType, prefs: rows },
   };
 }
+
+// ─── markNotificationRead ────────────────────────────────────────────────────
+
+const MarkReadInput = z.object({
+  notificationId: z.string().uuid(),
+});
+
+// Mark a single in-app notification as read. Caller must own the row
+// (recipient_type + recipient_id match an identity attached to auth.uid()).
+// Returns success even if the row was already read — idempotent UPDATE.
+export async function markNotificationRead(
+  input: unknown,
+): Promise<NotificationActionResult> {
+  let authUser;
+  try {
+    authUser = await requireAuth();
+  } catch (e) {
+    if (e instanceof AuthError) return { error: e.code, reason: e.message };
+    throw e;
+  }
+
+  const parsed = MarkReadInput.safeParse(input);
+  if (!parsed.success) {
+    return {
+      error: 'validation_error',
+      reason: parsed.error.issues[0]?.message ?? 'Invalid input',
+    };
+  }
+  const { notificationId } = parsed.data;
+
+  const ownership = await resolveOwnedIdentities(authUser.id);
+  if (ownership.userIds.length === 0 && ownership.clientIds.length === 0) {
+    return { error: 'not_authorized', reason: 'no_identity' };
+  }
+
+  const updated = await db
+    .update(notifications)
+    .set({ readAt: new Date() })
+    .where(
+      and(
+        eq(notifications.id, notificationId),
+        recipientBelongsTo(ownership),
+      ),
+    )
+    .returning({ id: notifications.id });
+
+  if (updated.length === 0) {
+    return { error: 'not_found', reason: 'notification' };
+  }
+
+  revalidatePath('/notifications');
+  revalidatePath('/portal/notifications');
+  return { success: true };
+}
+
+// ─── markAllNotificationsRead ────────────────────────────────────────────────
+
+// Mark every unread notification owned by the caller as read. Includes both
+// identity branches when the auth user is dual-context (has both a users
+// row AND a clients row) — the inbox UI shows whichever side the route is
+// scoped to, but bulk-read isn't asymmetric.
+export async function markAllNotificationsRead(): Promise<NotificationActionResult> {
+  let authUser;
+  try {
+    authUser = await requireAuth();
+  } catch (e) {
+    if (e instanceof AuthError) return { error: e.code, reason: e.message };
+    throw e;
+  }
+
+  const ownership = await resolveOwnedIdentities(authUser.id);
+  if (ownership.userIds.length === 0 && ownership.clientIds.length === 0) {
+    return { error: 'not_authorized', reason: 'no_identity' };
+  }
+
+  await db
+    .update(notifications)
+    .set({ readAt: new Date() })
+    .where(
+      and(recipientBelongsTo(ownership), isNull(notifications.readAt)),
+    );
+
+  revalidatePath('/notifications');
+  revalidatePath('/portal/notifications');
+  return { success: true };
+}
+
+// Internal helper: resolve every identity (users + clients) attached to the
+// auth user. Used for ownership checks on mark-read actions. Returns empty
+// arrays for either side if the caller has no matching identity.
+async function resolveOwnedIdentities(authUserId: string): Promise<{
+  userIds: string[];
+  clientIds: string[];
+}> {
+  const userRows = await db
+    .select({ id: users.id })
+    .from(users)
+    .where(and(eq(users.authUserId, authUserId), isNull(users.deletedAt)));
+  const clientRows = await db
+    .select({ id: clients.id })
+    .from(clients)
+    .where(and(eq(clients.authUserId, authUserId), isNull(clients.deletedAt)));
+  return {
+    userIds: userRows.map((u) => u.id),
+    clientIds: clientRows.map((c) => c.id),
+  };
+}
+
+// SQL builder: matches notifications rows that belong to any identity the
+// caller owns. (recipient_type='user' AND recipient_id IN userIds) OR
+// (recipient_type='client' AND recipient_id IN clientIds). Uses Drizzle's
+// `inArray` via a manual or() since `inArray` over an empty list produces
+// invalid SQL.
+function recipientBelongsTo(ownership: {
+  userIds: string[];
+  clientIds: string[];
+}) {
+  const branches = [] as ReturnType<typeof and>[];
+  if (ownership.userIds.length > 0) {
+    branches.push(
+      and(
+        eq(notifications.recipientType, 'user'),
+        // Drizzle accepts a SQL expression for IN; build via raw `sql` if
+        // the array gets big. For tests we expect ≤2 ids so the OR-chain
+        // is fine.
+        ownership.userIds.length === 1
+          ? eq(notifications.recipientId, ownership.userIds[0])
+          : or(...ownership.userIds.map((id) => eq(notifications.recipientId, id)))!,
+      )!,
+    );
+  }
+  if (ownership.clientIds.length > 0) {
+    branches.push(
+      and(
+        eq(notifications.recipientType, 'client'),
+        ownership.clientIds.length === 1
+          ? eq(notifications.recipientId, ownership.clientIds[0])
+          : or(
+              ...ownership.clientIds.map((id) => eq(notifications.recipientId, id)),
+            )!,
+      )!,
+    );
+  }
+  return branches.length === 1 ? branches[0] : or(...branches);
+}
+
