@@ -10,6 +10,7 @@ describe('getAppUrl', () => {
     vi.unstubAllEnvs();
     vi.stubEnv('VERCEL_ENV', '');
     vi.stubEnv('VERCEL_URL', '');
+    vi.stubEnv('VERCEL_BRANCH_URL', '');
     vi.stubEnv('NEXT_PUBLIC_APP_URL', '');
   });
 
@@ -44,5 +45,16 @@ describe('getAppUrl', () => {
 
   test('defensive default: nothing set → returns http://localhost:3000', () => {
     expect(getAppUrl()).toBe('http://localhost:3000');
+  });
+
+  // DEBT-043: VERCEL_URL is the per-deploy hostname (cookie domain mismatch on
+  // magic-link round-trips); VERCEL_BRANCH_URL is the stable branch alias the
+  // PKCE cookie is actually set on. Prefer the branch URL on preview/dev so
+  // the magic-link callback lands on the same hostname as the form submit.
+  test('preview: VERCEL_BRANCH_URL + VERCEL_URL both set → branch URL wins', () => {
+    vi.stubEnv('VERCEL_ENV', 'preview');
+    vi.stubEnv('VERCEL_BRANCH_URL', 'pcd-saas-git-foo-bar.vercel.app');
+    vi.stubEnv('VERCEL_URL', 'pcd-saas-abc123-bar.vercel.app');
+    expect(getAppUrl()).toBe('https://pcd-saas-git-foo-bar.vercel.app');
   });
 });
