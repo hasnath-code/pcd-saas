@@ -3,7 +3,7 @@
 import { z } from 'zod';
 import { v7 as uuidv7 } from 'uuid';
 import { revalidatePath } from 'next/cache';
-import { and, eq, isNull } from 'drizzle-orm';
+import { and, eq, isNotNull, isNull } from 'drizzle-orm';
 import {
   AuthError,
   requireAuth,
@@ -20,6 +20,7 @@ import {
 import { logAudit } from '@/lib/audit/log';
 import { checkFeature } from '@/lib/features';
 import { createServiceClient } from '@/lib/supabase/service';
+import { dispatchNotification } from '@/lib/notifications/dispatch';
 
 // ARCHITECTURE-saas.md §20 standard shape per action: Zod parse → auth →
 // access check → quota check → mutation → audit log → discriminated return.
@@ -410,19 +411,107 @@ export async function confirmUpload(
   const uploadedByType = identity.kind === 'user' ? 'user' : 'client';
   const uploadedById =
     identity.kind === 'user' ? identity.userId : identity.clientId;
+  const fileVisibility = visibility ?? 'org_and_stakeholders';
 
-  await db.insert(projectFiles).values({
-    id: fileId,
-    projectId,
-    uploadedByType,
-    uploadedById,
-    storagePath,
-    originalFilename,
-    mimeType,
-    sizeBytes,
-    source,
-    visibility: visibility ?? 'org_and_stakeholders',
-  });
+  try {
+    await db.transaction(async (tx) => {
+      // 1. Insert the project_files row.
+      await tx.insert(projectFiles).values({
+        id: fileId,
+        projectId,
+        uploadedByType,
+        uploadedById,
+        storagePath,
+        originalFilename,
+        mimeType,
+        sizeBytes,
+        source,
+        visibility: fileVisibility,
+      });
+
+      // 2. Resolve project_number + uploader name for the payload, plus
+      //    the recipient sets. Hard Rule 6: notification fan-out is atomic
+      //    with the file insert so a row that's visible to the timeline
+      //    has been notified.
+      const [proj] = await tx
+        .select({ projectNumber: projects.projectNumber })
+        .from(projects)
+        .where(eq(projects.id, projectId))
+        .limit(1);
+      const projectNumber = proj?.projectNumber ?? '';
+      const uploaderNameRow =
+        identity.kind === 'user'
+          ? await tx
+              .select({ name: users.name })
+              .from(users)
+              .where(eq(users.id, identity.userId))
+              .limit(1)
+          : await tx
+              .select({ name: clients.name })
+              .from(clients)
+              .where(eq(clients.id, identity.clientId))
+              .limit(1);
+      const uploaderName = uploaderNameRow[0]?.name ?? 'Someone';
+
+      const payload = {
+        projectId,
+        projectNumber,
+        fileId,
+        filename: originalFilename,
+        mimeType,
+        sizeBytes,
+        source,
+        visibility: fileVisibility,
+        uploaderName,
+        uploaderType: uploadedByType,
+      };
+
+      // Recipients: org members of the project's org + accepted, non-deleted
+      // stakeholders with can_view_drawings=true. Stakeholders without
+      // can_view_drawings never see the file (RLS) so notifying them would
+      // produce a click-through to nothing — skip them at dispatch time.
+      const orgMembers = await tx
+        .select({ id: users.id })
+        .from(users)
+        .where(and(eq(users.orgId, orgId), isNull(users.deletedAt)));
+      const stakeholders =
+        fileVisibility === 'org_and_stakeholders'
+          ? await tx
+              .select({ clientId: projectStakeholders.clientId })
+              .from(projectStakeholders)
+              .where(
+                and(
+                  eq(projectStakeholders.projectId, projectId),
+                  eq(projectStakeholders.canViewDrawings, true),
+                  isNotNull(projectStakeholders.acceptedAt),
+                  isNull(projectStakeholders.deletedAt),
+                ),
+              )
+          : [];
+
+      for (const u of orgMembers) {
+        await dispatchNotification({
+          tx,
+          recipientType: 'user',
+          recipientId: u.id,
+          eventType: 'file.uploaded',
+          payload,
+        });
+      }
+      for (const s of stakeholders) {
+        await dispatchNotification({
+          tx,
+          recipientType: 'client',
+          recipientId: s.clientId,
+          eventType: 'file.uploaded',
+          payload,
+        });
+      }
+    });
+  } catch (e) {
+    const reason = e instanceof Error ? e.message : String(e);
+    return { error: 'internal_error', reason: `confirm_upload:${reason}` };
+  }
 
   await logAudit({
     orgId,

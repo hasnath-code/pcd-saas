@@ -2,7 +2,7 @@
 
 import { z } from 'zod';
 import { v7 as uuidv7 } from 'uuid';
-import { and, eq, isNull } from 'drizzle-orm';
+import { and, eq, isNotNull, isNull } from 'drizzle-orm';
 import { revalidatePath } from 'next/cache';
 import {
   AuthError,
@@ -10,8 +10,14 @@ import {
   type ServerActionErrorCode,
 } from '@/lib/auth/requireAuth';
 import { db } from '@/db';
-import { projectMilestones, projects } from '@/db/schema';
+import {
+  projectMilestones,
+  projectStakeholders,
+  projects,
+  users,
+} from '@/db/schema';
 import { logAudit } from '@/lib/audit/log';
+import { dispatchNotification } from '@/lib/notifications/dispatch';
 
 export type MilestoneActionResult<T = void> =
   | (T extends void ? { success: true } : { success: true; data: T })
@@ -46,22 +52,90 @@ export async function createMilestone(
   const { projectId, label, scheduledAt, visibleToStakeholders } = parsed.data;
 
   const projectRows = await db
-    .select({ id: projects.id, orgId: projects.orgId })
+    .select({
+      id: projects.id,
+      orgId: projects.orgId,
+      projectNumber: projects.projectNumber,
+    })
     .from(projects)
     .where(and(eq(projects.id, projectId), isNull(projects.deletedAt)))
     .limit(1);
   if (projectRows.length === 0 || projectRows[0].orgId !== ctx.orgId) {
     return { error: 'not_found', reason: 'project' };
   }
+  const projectNumber = projectRows[0].projectNumber;
 
   const milestoneId = uuidv7();
-  await db.insert(projectMilestones).values({
-    id: milestoneId,
-    projectId,
-    label,
-    scheduledAt,
-    visibleToStakeholders,
-  });
+  try {
+    await db.transaction(async (tx) => {
+      // 1. Insert the milestone.
+      await tx.insert(projectMilestones).values({
+        id: milestoneId,
+        projectId,
+        label,
+        scheduledAt,
+        visibleToStakeholders,
+      });
+
+      // 2. Fan out milestone.scheduled — ONLY when scheduledAt is set.
+      //    A milestone created without a date is a placeholder; the
+      //    notification fires later when updateMilestone sets scheduledAt
+      //    (updateMilestone is NOT wired in Phase 5 — log as follow-up DEBT).
+      if (!scheduledAt) return;
+
+      const payload = {
+        projectId,
+        projectNumber,
+        milestoneId,
+        label,
+        scheduledAt: scheduledAt.toISOString(),
+        visibleToStakeholders,
+      };
+
+      const orgMembers = await tx
+        .select({ id: users.id })
+        .from(users)
+        .where(and(eq(users.orgId, ctx.orgId), isNull(users.deletedAt)));
+      // Stakeholders: must have can_view_schedule AND the milestone itself
+      // must be marked visible_to_stakeholders. Hidden milestones are
+      // org-internal — skip stakeholders entirely.
+      const stakeholders = visibleToStakeholders
+        ? await tx
+            .select({ clientId: projectStakeholders.clientId })
+            .from(projectStakeholders)
+            .where(
+              and(
+                eq(projectStakeholders.projectId, projectId),
+                eq(projectStakeholders.canViewSchedule, true),
+                isNotNull(projectStakeholders.acceptedAt),
+                isNull(projectStakeholders.deletedAt),
+              ),
+            )
+        : [];
+
+      for (const u of orgMembers) {
+        await dispatchNotification({
+          tx,
+          recipientType: 'user',
+          recipientId: u.id,
+          eventType: 'milestone.scheduled',
+          payload,
+        });
+      }
+      for (const s of stakeholders) {
+        await dispatchNotification({
+          tx,
+          recipientType: 'client',
+          recipientId: s.clientId,
+          eventType: 'milestone.scheduled',
+          payload,
+        });
+      }
+    });
+  } catch (e) {
+    const reason = e instanceof Error ? e.message : String(e);
+    return { error: 'internal_error', reason: `create_milestone:${reason}` };
+  }
 
   await logAudit({
     orgId: ctx.orgId,

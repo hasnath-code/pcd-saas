@@ -2,7 +2,7 @@
 
 import { z } from 'zod';
 import { v7 as uuidv7 } from 'uuid';
-import { and, asc, eq, isNull } from 'drizzle-orm';
+import { and, asc, eq, isNotNull, isNull } from 'drizzle-orm';
 import { revalidatePath } from 'next/cache';
 import {
   AuthError,
@@ -15,11 +15,13 @@ import {
   clientOrgMemberships,
   projectStakeholders,
   projects,
+  users,
   workflows,
   workflowStages,
 } from '@/db/schema';
 import { logAudit } from '@/lib/audit/log';
 import { VISIBILITY_PROFILES } from '@/lib/visibility-profiles';
+import { dispatchNotification } from '@/lib/notifications/dispatch';
 
 export type ProjectActionResult<T = void> =
   | (T extends void ? { success: true } : { success: true; data: T })
@@ -410,10 +412,89 @@ export async function moveProjectToStage(
   const isBackwardTransition = toStage.position < fromStage.position;
   const isTerminalDestination = toStage.isTerminal === true;
 
-  await db
-    .update(projects)
-    .set({ currentStageId: toStageId })
-    .where(eq(projects.id, projectId));
+  // ADR-019 9-field locked metadata. Reused as the dispatcher payload below
+  // so the notification email + activity log + audit row all see the same
+  // shape — no extra DB lookups inside the dispatcher.
+  const stageChangeMetadata = {
+    from_stage_id: fromStage.id,
+    from_stage_name: fromStage.name,
+    from_stage_position: fromStage.position,
+    to_stage_id: toStage.id,
+    to_stage_name: toStage.name,
+    to_stage_position: toStage.position,
+    workflow_id: project.workflowId,
+    is_backward_transition: isBackwardTransition,
+    is_terminal_destination: isTerminalDestination,
+  };
+
+  // Look up project_number for the payload (subjects.ts uses it as the
+  // human-friendly label). Cheap — single-row read.
+  const [projectMeta] = await db
+    .select({ projectNumber: projects.projectNumber })
+    .from(projects)
+    .where(eq(projects.id, projectId))
+    .limit(1);
+  const projectNumber = projectMeta?.projectNumber ?? '';
+
+  try {
+    await db.transaction(async (tx) => {
+      // 1. Domain write: advance current_stage_id.
+      await tx
+        .update(projects)
+        .set({ currentStageId: toStageId })
+        .where(eq(projects.id, projectId));
+
+      // 2. Fan out project.stage_changed to all org members + all accepted,
+      //    non-deleted stakeholders on this project. Visibility profile
+      //    flags don't gate dispatch (per §14: visibility gates SELECT;
+      //    prefs gate channel). The 9-field metadata becomes the payload.
+      const orgMembers = await tx
+        .select({ id: users.id })
+        .from(users)
+        .where(and(eq(users.orgId, ctx.orgId), isNull(users.deletedAt)));
+      const stakeholders = await tx
+        .select({ clientId: projectStakeholders.clientId })
+        .from(projectStakeholders)
+        .where(
+          and(
+            eq(projectStakeholders.projectId, projectId),
+            isNotNull(projectStakeholders.acceptedAt),
+            isNull(projectStakeholders.deletedAt),
+          ),
+        );
+
+      const payload = {
+        projectId,
+        projectNumber,
+        ...stageChangeMetadata,
+        // Friendlier aliases used by subjects.ts content builder.
+        fromStageName: fromStage.name,
+        toStageName: toStage.name,
+      };
+
+      for (const u of orgMembers) {
+        await dispatchNotification({
+          tx,
+          recipientType: 'user',
+          recipientId: u.id,
+          eventType: 'project.stage_changed',
+          payload,
+        });
+      }
+      for (const s of stakeholders) {
+        await dispatchNotification({
+          tx,
+          recipientType: 'client',
+          recipientId: s.clientId,
+          eventType: 'project.stage_changed',
+          payload,
+        });
+      }
+    });
+  } catch (e) {
+    const reason = e instanceof Error ? e.message : String(e);
+    return { error: 'internal_error', reason: `move_project_to_stage:${reason}` };
+  }
 
   await logAudit({
     orgId: ctx.orgId,
@@ -421,17 +502,7 @@ export async function moveProjectToStage(
     action: 'stage_changed',
     resourceType: 'project',
     resourceId: projectId,
-    metadata: {
-      from_stage_id: fromStage.id,
-      from_stage_name: fromStage.name,
-      from_stage_position: fromStage.position,
-      to_stage_id: toStage.id,
-      to_stage_name: toStage.name,
-      to_stage_position: toStage.position,
-      workflow_id: project.workflowId,
-      is_backward_transition: isBackwardTransition,
-      is_terminal_destination: isTerminalDestination,
-    },
+    metadata: stageChangeMetadata,
   });
 
   revalidatePath(`/dashboard/projects/${projectId}`, 'layout');

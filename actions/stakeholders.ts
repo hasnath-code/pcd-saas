@@ -5,6 +5,7 @@ import { v7 as uuidv7 } from 'uuid';
 import { and, eq, gt, isNull } from 'drizzle-orm';
 import { revalidatePath } from 'next/cache';
 import * as Sentry from '@sentry/nextjs';
+import { dispatchNotification } from '@/lib/notifications/dispatch';
 import {
   AuthError,
   requireAuth,
@@ -263,6 +264,36 @@ export async function inviteStakeholder(
         clientId: co.clientId,
         createdByUserId: ctx.userId,
       });
+
+      // Session 11 §17: notify org members (informational — they don't need
+      // an email walking them through accepting; the stakeholder gets their
+      // own invitation email via sendEmail below). Recipients: org members
+      // of caller's org. The stakeholder themselves is NOT a notification
+      // recipient — the invitation email IS the notification for them.
+      const orgMembers = await tx
+        .select({ id: users.id })
+        .from(users)
+        .where(and(eq(users.orgId, ctx.orgId), isNull(users.deletedAt)));
+      const dispatchPayload = {
+        projectId,
+        projectNumber: project.projectNumber,
+        stakeholderName: name,
+        stakeholderEmail: email,
+        role,
+        visibilityProfile,
+        inviterName,
+        invitationId,
+        reinvited: alreadyExistedDeleted,
+      };
+      for (const u of orgMembers) {
+        await dispatchNotification({
+          tx,
+          recipientType: 'user',
+          recipientId: u.id,
+          eventType: 'stakeholder.added_to_project',
+          payload: dispatchPayload,
+        });
+      }
 
       return { clientId: co.clientId };
     });
