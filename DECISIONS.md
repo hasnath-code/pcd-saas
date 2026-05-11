@@ -33,6 +33,40 @@
 
 ---
 
+## ADR-032 — All app-public URLs constructed via `getAppUrl()`; direct env-var reads forbidden outside the helper
+**Date:** 11 May 2026 (DEBT-026 mini-session, between Sessions 10 and 11)
+**Codebase:** SaaS
+**Status:** Accepted
+
+**Context:** Before this mini-session, every call site that needed the app's public origin (magic-link `emailRedirectTo`, signup `emailRedirectTo`, password-reset `redirectTo`, team-invitation `acceptUrl`, stakeholder-invitation `acceptUrl` — 5 sites total, 3 routed through `actions/auth.ts:callbackUrl`) read `env.NEXT_PUBLIC_APP_URL` directly. Vercel preview deploys produced broken magic links: `NEXT_PUBLIC_APP_URL` either inherited `http://localhost:3000` from `.env.local` or pointed at a stale production URL. The bug surfaced twice in Phase F walks (Sessions 9 and 10) and forced a magic-link → password sign-in pivot during the DEBT-037 hotfix verification.
+
+Session 11 ships notification emails (`new_message`, `stage_changed`, `file_uploaded`, `milestone_scheduled`). Every notification body contains a link back to the app. Without centralizing origin resolution, every notification path would re-introduce the same footgun.
+
+**Decision:** Three locked invariants, enforced by `lib/get-app-url.ts`:
+
+1. **All app-public URLs go through `getAppUrl()`.** No call site that constructs a URL for an outgoing email, share link, magic-link `redirect_to`, signup/reset `emailRedirectTo`, invitation accept URL, or any other server-side outgoing-link context may read `process.env.NEXT_PUBLIC_APP_URL` (or `VERCEL_URL`, `VERCEL_ENV`, etc.) directly. The helper is the single authority for *constructing* origins.
+
+2. **Resolution priority is VERCEL_ENV-aware.**
+   - Production on Vercel: `NEXT_PUBLIC_APP_URL` (custom domain) wins; falls back to `https://${VERCEL_URL}` (the production alias). Custom production domains are configured by setting `NEXT_PUBLIC_APP_URL` in the production env.
+   - Preview/development on Vercel: `https://${VERCEL_URL}` always wins. `NEXT_PUBLIC_APP_URL` is *intentionally ignored* on preview so a misset or stale value (localhost leaking from `.env.local`, etc.) cannot poison preview-deploy magic links.
+   - Local (no Vercel env): `NEXT_PUBLIC_APP_URL` wins; falls back to `http://localhost:3000`.
+
+3. **`getAppUrl()` reads `process.env` directly, not via `@/env`.** A deliberate exception to ARCHITECTURE-saas.md §6 ("env.ts is the only place env vars are read"). Rationale: `VERCEL_URL` and `VERCEL_ENV` are Vercel-runtime-injected and not appropriate for the Zod-validated startup schema; reading `process.env` also lets tests stub via `vi.stubEnv` per-test without bypassing the global validator. `NEXT_PUBLIC_APP_URL` remains required by `env.ts` for app boot — the helper's `process.env` access is for the helper's own resolution logic, not for config validation.
+
+**Alternatives rejected:**
+- Simple priority `NEXT_PUBLIC_APP_URL` > `VERCEL_URL` (the original DEBT-026 fix sketch) — rejected because the preview-leak failure mode is exactly the bug we're fixing: a stale or misset `NEXT_PUBLIC_APP_URL` silently winning on previews. The override case (production custom domain) is real and the VERCEL_ENV-aware logic resolves both correctly.
+- Add `VERCEL_URL` / `VERCEL_ENV` to `env.ts` as optional schema entries — adds noise to startup validation for vars the runtime guarantees. The helper's deliberate `process.env` access is clearer and testable.
+- Resolve origin per-request from `headers().get('host')` — works for request-scoped contexts but not for background jobs, queue workers, or any code path without a current request (which is most of the email/notification dispatch surface). Sessions 11+ rely on context-free dispatch.
+
+**Reconsider if:**
+- A custom domain on a preview environment (e.g. `preview-staging.pcdportal.com` aliased to a Vercel preview deploy) becomes desirable. At that point either (a) extend the helper with a `PREVIEW_DOMAIN_OVERRIDE` env var, or (b) move to `VERCEL_BRANCH_URL` (the per-branch stable alias — see DEBT-043, where preview PKCE cookie mismatch may force this anyway).
+- Notification dispatch grows a per-tenant custom-domain feature (Phase 5+ when `organizations.custom_email_domain` is finally verified at scale). At that point the helper grows an `orgId` parameter and resolves per-org.
+- The `pickDestination` / `resolvePostAuthIdentity` routing helpers (ADR-031) ever need to construct URLs — they currently don't, and ADR-031's centralization is for the *routing decision*, not URL construction. Keep these concerns separate.
+
+**Cross-references:** ARCHITECTURE-saas.md §7 (Environment Configuration); `lib/get-app-url.ts`; `tests/actions/get-app-url.test.ts`; commit `aa6899d` (PR #9); pre-fix tag `pre-debt-026-mini-session` at `d221142`; DEBT-026 (closed by this ADR — see DEBT-R004); DEBT-043 (PKCE cookie mismatch follow-up, surfaced during DEBT-026 Phase F walk); ADR-031 (auth-routing centralization — companion principle, distinct concern)
+
+---
+
 ## ADR-031 — Auth callback never creates organizations; `createOrganization` requires `intent='wizard_signup'`; all post-auth routing flows through `pickDestination`
 **Date:** 10 May 2026 (DEBT-037 hotfix, between Sessions 10 and 11)
 **Codebase:** SaaS

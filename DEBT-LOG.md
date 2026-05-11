@@ -50,6 +50,26 @@
 
 # Open Debt
 
+## DEBT-043 — PKCE code_verifier cookie mismatch between Vercel per-deploy and branch alias URLs
+**Added:** 11 May 2026 (DEBT-026 mini-session Phase F surfaced)
+**Codebase:** SaaS
+**Severity:** Medium
+**Type:** Bug
+
+**The debt:** Magic-link Phase F walk on a preview PR: the form submitted at the stable branch alias (`pcd-saas-git-<branch>-…vercel.app`) writes the Supabase Auth PKCE `code_verifier` cookie scoped to that hostname, but `getAppUrl()` returns `https://${VERCEL_URL}` which is the per-deploy URL (`pcd-saas-<hash>-…vercel.app`). The magic-link email's `redirect_to` points to the per-deploy URL; the callback opens there with no `code_verifier` cookie and PKCE verification fails. The DEBT-026 fix is correct (email no longer points to localhost) but exposes this latent cookie-domain split.
+
+**Why it exists:** Vercel sets `VERCEL_URL` per deployment (the deploy-specific URL), not to the stable branch alias. `VERCEL_BRANCH_URL` (introduced by Vercel specifically for this class of bug) is the per-branch alias. The helper picked `VERCEL_URL` as the simplest preview-correct option; the cookie-domain consequence wasn't surfaced until a real magic-link walk on the preview.
+
+**Cost of leaving it:** Magic-link Phase F walks on preview PRs always fail at the PKCE verification step. Doesn't affect production (where `VERCEL_URL` resolves to the production alias and the user signs in on the same hostname). Doesn't affect local dev (single hostname). Hurts only the QA loop — but it hurts every session that wants to verify magic-link flows from preview, which is every session from Session 11 onwards (notification emails will trigger the same path).
+
+**Fix sketch:** In `lib/get-app-url.ts`, prefer `VERCEL_BRANCH_URL` over `VERCEL_URL` on preview deploys (Vercel sets it to the stable branch alias). Production: keep the existing `NEXT_PUBLIC_APP_URL` override → `VERCEL_URL` fallback chain. Add a 6th regression test in `tests/actions/get-app-url.test.ts` for "VERCEL_BRANCH_URL set + VERCEL_URL set on preview → branch URL wins." ~30 min.
+
+**Trigger:** Session 11 — notification emails will surface this on every Phase F walk. Recommend folding into Session 11 kickoff alongside the notification dispatch URL templating that will use `getAppUrl()` heavily.
+
+**Cross-references:** DEBT-026 (resolved by PR #9 / DEBT-R004); `lib/get-app-url.ts`; ADR-032; Vercel system env var docs (`VERCEL_BRANCH_URL` vs `VERCEL_URL`)
+
+---
+
 ## DEBT-042 — Functional index `lower(clients.email)` if seq-scan dominates auth-callback latency
 **Added:** 10 May 2026 (DEBT-037 hotfix follow-up)
 **Codebase:** SaaS
@@ -381,26 +401,6 @@ Likely also need to audit `actions/orgs.ts createOrganization` for any callers t
 **Trigger:** Next time a developer adds a `.getTime()` / Date-method consumer, OR opportunistically before Phase 1c S11 starts. Latent foot-gun until then.
 
 **Cross-references:** Commits `9fc485b`, `3e650b4` (point-of-use patches); ARCHITECTURE-saas.md §16.4 (Drizzle ORM conventions); `db/queries/conversations.ts:66`, `:221`
-
----
-
-## DEBT-026 — App URL templating not refactored to helper
-**Added:** 09 May 2026 (Session 9 / Phase F surfaced — origin Sessions 6-7); priority bumped 10 May 2026 (Session 10 Phase F — bit again)
-**Codebase:** SaaS
-**Severity:** Medium (was Low — bumped Session 10)
-**Type:** Workaround
-
-**The debt:** `NEXT_PUBLIC_APP_URL` env var is referenced directly in email templates and invitation URLs across multiple call sites. Earlier in the session an incorrectly-set production env var (`localhost:3000`) caused invitation emails to embed broken localhost URLs; user had to manually fix in Vercel UI. No `getAppUrl()` helper exists. Vercel's auto-set `VERCEL_URL` is not used as fallback for preview deploys, and there's no localhost fallback for local dev.
-
-**Why it exists:** Session 6/7 era — quick deploy plumbing took the path of least resistance (direct env-var read). No abstraction was needed yet because there was only one live environment.
-
-**Cost of leaving it:** Every preview deploy that should send a real-looking link sends a broken one without manual `NEXT_PUBLIC_APP_URL` override. Friction during preview-based testing; latent foot-gun if the prod var is ever misset again.
-
-**Fix sketch:** Create `lib/utils/app-url.ts` with `getAppUrl()` that checks (1) `NEXT_PUBLIC_APP_URL` → (2) `https://${VERCEL_URL}` → (3) `http://localhost:3000` in priority order. Update email templates and any invitation URL construction to use the helper. Adds preview-deploy resilience without env-var duplication. ~45 min.
-
-**Trigger:** Session 11 — bit Phase F a second time (Session 10) when magic links from preview deploys pointed to production `NEXT_PUBLIC_APP_URL`, forcing manual host swap to test portal-side flows. Cost of leaving it grew with each preview-based QA cycle. Bumped to S11 priority — should land alongside (or before) the notification-dispatch URL templating that S11 will introduce.
-
-**Cross-references:** Vercel auto env vars docs; `lib/email/templates/*`; `actions/users.ts` invitation flow
 
 ---
 
@@ -907,6 +907,20 @@ Likely also need to audit `actions/orgs.ts createOrganization` for any callers t
 
 # Resolved Debt
 
+## DEBT-R004 — `getAppUrl()` helper for app-public URL construction
+**Resolved:** 11 May 2026 in PR #9 commit `aa6899d`
+**Codebase:** SaaS
+**Severity:** Medium → Resolved
+**Type:** Workaround (was DEBT-026)
+
+**The debt was:** `env.NEXT_PUBLIC_APP_URL` was referenced directly at 5 server-side call sites (3 inside `actions/auth.ts:callbackUrl` powering `signUp`/`sendMagicLink`/`sendPasswordReset`, plus `actions/users.ts:113` and `actions/stakeholders.ts:278` for invitation accept URLs). Vercel preview deploys sent magic links pointing at `http://localhost:3000` or stale URLs. Bit Phase F twice (Sessions 9 and 10) and forced a magic-link → password sign-in pivot during the DEBT-037 hotfix walk.
+
+**Resolution:** `lib/get-app-url.ts` centralizes origin resolution with a VERCEL_ENV-aware priority: production lets `NEXT_PUBLIC_APP_URL` override (custom domain) or falls back to `https://${VERCEL_URL}`; preview/dev always use `https://${VERCEL_URL}` (defeats the localhost-leak class of bugs); local falls back to `NEXT_PUBLIC_APP_URL` or `http://localhost:3000`. All 5 call sites routed through the helper. 5-test regression suite in `tests/actions/get-app-url.test.ts` covers local / preview / production default / production override / defensive default. Phase F walk on PR preview confirmed the magic-link email's `redirect_to` points to the preview domain (not localhost). See ADR-032.
+
+**Cross-references:** ADR-032, PR #9, commit `aa6899d`, pre-fix tag `pre-debt-026-mini-session` at `d221142`, `lib/get-app-url.ts`, follow-up DEBT-043 (PKCE cookie mismatch on preview, surfaced by this fix)
+
+---
+
 ## DEBT-R003 — shadcn AlertDialog migration
 **Resolved:** 09 May 2026 in Session 9 commit `003f3a7`
 **Codebase:** SaaS
@@ -1000,7 +1014,7 @@ For quick lookup of what needs to happen at each upcoming milestone:
 - _(empty — DEBT-037 resolved 10 May 2026 by PR #7 commit `0565777`, ADR-031)_
 
 ## Session 11 candidates (notifications + activity)
-- DEBT-026: `getAppUrl()` helper (priority bumped — bit Phase F twice + blocked DEBT-037 hotfix natural-walk)
+- DEBT-043: PKCE cookie mismatch on Vercel preview magic-link walks (surfaced by DEBT-026 fix; recommend folding into S11 kickoff so notification-email Phase F can use magic-link path)
 - DEBT-029: Realtime subscription not auto-updating message UI
 - DEBT-030: Project detail UI lacks deep-link to conversations (file portion resolved)
 - DEBT-031: Unread badge in nav + per-row indicator
