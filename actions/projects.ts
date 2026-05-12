@@ -19,6 +19,7 @@ import {
   workflows,
   workflowStages,
 } from '@/db/schema';
+import * as Sentry from '@sentry/nextjs';
 import { logAudit } from '@/lib/audit/log';
 import { VISIBILITY_PROFILES } from '@/lib/visibility-profiles';
 import { dispatchNotification } from '@/lib/notifications/dispatch';
@@ -437,6 +438,15 @@ export async function moveProjectToStage(
     .limit(1);
   const projectNumber = projectMeta?.projectNumber ?? '';
 
+  const payload = {
+    projectId,
+    projectNumber,
+    ...stageChangeMetadata,
+    // Friendlier aliases used by subjects.ts content builder.
+    fromStageName: fromStage.name,
+    toStageName: toStage.name,
+  };
+
   try {
     await db.transaction(async (tx) => {
       // 1. Domain write: advance current_stage_id.
@@ -447,71 +457,79 @@ export async function moveProjectToStage(
 
       // 1a. Activity row — stakeholders always see stage transitions per
       //     the kickoff default (project.stage_changed → visible=true).
+      //     Stays in tx per ADR-033 (DB-only writes are atomic with the
+      //     domain mutation; notification dispatch moves out).
       await logActivityTx(tx, {
         projectId,
         actorType: 'user',
         actorId: ctx.userId,
         eventType: 'project.stage_changed',
-        payload: {
-          projectId,
-          projectNumber,
-          ...stageChangeMetadata,
-          fromStageName: fromStage.name,
-          toStageName: toStage.name,
-        },
+        payload,
         visibleToStakeholders: true,
       });
-
-      // 2. Fan out project.stage_changed to all org members + all accepted,
-      //    non-deleted stakeholders on this project. Visibility profile
-      //    flags don't gate dispatch (per §14: visibility gates SELECT;
-      //    prefs gate channel). The 9-field metadata becomes the payload.
-      const orgMembers = await tx
-        .select({ id: users.id })
-        .from(users)
-        .where(and(eq(users.orgId, ctx.orgId), isNull(users.deletedAt)));
-      const stakeholders = await tx
-        .select({ clientId: projectStakeholders.clientId })
-        .from(projectStakeholders)
-        .where(
-          and(
-            eq(projectStakeholders.projectId, projectId),
-            isNotNull(projectStakeholders.acceptedAt),
-            isNull(projectStakeholders.deletedAt),
-          ),
-        );
-
-      const payload = {
-        projectId,
-        projectNumber,
-        ...stageChangeMetadata,
-        // Friendlier aliases used by subjects.ts content builder.
-        fromStageName: fromStage.name,
-        toStageName: toStage.name,
-      };
-
-      for (const u of orgMembers) {
-        await dispatchNotification({
-          tx,
-          recipientType: 'user',
-          recipientId: u.id,
-          eventType: 'project.stage_changed',
-          payload,
-        });
-      }
-      for (const s of stakeholders) {
-        await dispatchNotification({
-          tx,
-          recipientType: 'client',
-          recipientId: s.clientId,
-          eventType: 'project.stage_changed',
-          payload,
-        });
-      }
     });
   } catch (e) {
     const reason = e instanceof Error ? e.message : String(e);
     return { error: 'internal_error', reason: `move_project_to_stage:${reason}` };
+  }
+
+  // Post-commit dispatch fan-out per ADR-033. Failures isolated per recipient
+  // and captured in Sentry; the stage transition itself is durable even if
+  // notification delivery has a hiccup.
+  const orgMembers = await db
+    .select({ id: users.id })
+    .from(users)
+    .where(and(eq(users.orgId, ctx.orgId), isNull(users.deletedAt)));
+  const stakeholders = await db
+    .select({ clientId: projectStakeholders.clientId })
+    .from(projectStakeholders)
+    .where(
+      and(
+        eq(projectStakeholders.projectId, projectId),
+        isNotNull(projectStakeholders.acceptedAt),
+        isNull(projectStakeholders.deletedAt),
+      ),
+    );
+
+  for (const u of orgMembers) {
+    try {
+      await dispatchNotification({
+        recipientType: 'user',
+        recipientId: u.id,
+        eventType: 'project.stage_changed',
+        payload,
+      });
+    } catch (err) {
+      Sentry.captureException(err, {
+        tags: {
+          scope: 'notification_dispatch',
+          action: 'moveProjectToStage',
+          event_type: 'project.stage_changed',
+          org_id: ctx.orgId,
+        },
+        extra: { recipientUserId: u.id, projectId },
+      });
+    }
+  }
+  for (const s of stakeholders) {
+    try {
+      await dispatchNotification({
+        recipientType: 'client',
+        recipientId: s.clientId,
+        eventType: 'project.stage_changed',
+        payload,
+      });
+    } catch (err) {
+      Sentry.captureException(err, {
+        tags: {
+          scope: 'notification_dispatch',
+          action: 'moveProjectToStage',
+          event_type: 'project.stage_changed',
+          org_id: ctx.orgId,
+        },
+        extra: { recipientClientId: s.clientId, projectId },
+      });
+    }
   }
 
   await logAudit({

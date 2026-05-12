@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { v7 as uuidv7 } from 'uuid';
 import { revalidatePath } from 'next/cache';
 import { and, eq, isNull, not } from 'drizzle-orm';
+import * as Sentry from '@sentry/nextjs';
 import {
   AuthError,
   requireAuth,
@@ -141,91 +142,88 @@ export async function sendMessage(
 
   const messageId = uuidv7();
   try {
-    await db.transaction(async (tx) => {
-      // 1. Insert the message.
-      await tx.insert(messages).values({
-        id: messageId,
-        conversationId,
-        senderType: sender.participantType,
-        senderId: sender.participantId,
-        body,
-      });
-
-      // 2. Fan out message.new notifications to other active participants
-      //    (excluding sender). Per Hard Rule 6 dispatch lives inside the tx;
-      //    if it throws the message insert rolls back so we don't notify
-      //    about a message that doesn't exist.
-      const recipients = await tx
-        .select({
-          participantType: conversationParticipants.participantType,
-          participantId: conversationParticipants.participantId,
-        })
-        .from(conversationParticipants)
-        .where(
-          and(
-            eq(conversationParticipants.conversationId, conversationId),
-            isNull(conversationParticipants.leftAt),
-            not(
-              and(
-                eq(
-                  conversationParticipants.participantType,
-                  sender.participantType,
-                ),
-                eq(
-                  conversationParticipants.participantId,
-                  sender.participantId,
-                )!,
-              )!,
-            ),
-          ),
-        );
-
-      if (recipients.length > 0) {
-        // Resolve names for the payload (sender + conversation). Cheap lookups —
-        // single-row each; cached in the tx connection. Conversation name
-        // may be null for one_to_one threads — subjects.ts has a default.
-        const senderNameRow =
-          sender.participantType === 'user'
-            ? await tx
-                .select({ name: users.name })
-                .from(users)
-                .where(eq(users.id, sender.participantId))
-                .limit(1)
-            : await tx
-                .select({ name: clients.name })
-                .from(clients)
-                .where(eq(clients.id, sender.participantId))
-                .limit(1);
-        const senderName = senderNameRow[0]?.name ?? 'Someone';
-        const convNameRow = await tx
-          .select({ name: conversations.name })
-          .from(conversations)
-          .where(eq(conversations.id, conversationId))
-          .limit(1);
-        const conversationName =
-          convNameRow[0]?.name ?? 'a conversation';
-        const snippet = body.length > 120 ? `${body.slice(0, 120)}…` : body;
-
-        for (const r of recipients) {
-          await dispatchNotification({
-            tx,
-            recipientType: r.participantType as 'user' | 'client',
-            recipientId: r.participantId,
-            eventType: 'message.new',
-            payload: {
-              conversationId,
-              conversationName,
-              senderName,
-              senderType: sender.participantType,
-              snippet,
-            },
-          });
-        }
-      }
+    await db.insert(messages).values({
+      id: messageId,
+      conversationId,
+      senderType: sender.participantType,
+      senderId: sender.participantId,
+      body,
     });
   } catch (e) {
     const reason = e instanceof Error ? e.message : String(e);
     return { error: 'internal_error', reason: `send_message:${reason}` };
+  }
+
+  // Post-commit notification fan-out per ADR-033. Each recipient gets an
+  // isolated try/catch — one Resend hiccup doesn't kill the rest of the
+  // fan-out. Failures captured to Sentry but the message itself stays
+  // visible in the conversation.
+  const recipients = await db
+    .select({
+      participantType: conversationParticipants.participantType,
+      participantId: conversationParticipants.participantId,
+    })
+    .from(conversationParticipants)
+    .where(
+      and(
+        eq(conversationParticipants.conversationId, conversationId),
+        isNull(conversationParticipants.leftAt),
+        not(
+          and(
+            eq(conversationParticipants.participantType, sender.participantType),
+            eq(conversationParticipants.participantId, sender.participantId)!,
+          )!,
+        ),
+      ),
+    );
+
+  if (recipients.length > 0) {
+    const senderNameRow =
+      sender.participantType === 'user'
+        ? await db
+            .select({ name: users.name })
+            .from(users)
+            .where(eq(users.id, sender.participantId))
+            .limit(1)
+        : await db
+            .select({ name: clients.name })
+            .from(clients)
+            .where(eq(clients.id, sender.participantId))
+            .limit(1);
+    const senderName = senderNameRow[0]?.name ?? 'Someone';
+    const convNameRow = await db
+      .select({ name: conversations.name })
+      .from(conversations)
+      .where(eq(conversations.id, conversationId))
+      .limit(1);
+    const conversationName = convNameRow[0]?.name ?? 'a conversation';
+    const snippet = body.length > 120 ? `${body.slice(0, 120)}…` : body;
+
+    for (const r of recipients) {
+      try {
+        await dispatchNotification({
+          recipientType: r.participantType as 'user' | 'client',
+          recipientId: r.participantId,
+          eventType: 'message.new',
+          payload: {
+            conversationId,
+            conversationName,
+            senderName,
+            senderType: sender.participantType,
+            snippet,
+          },
+        });
+      } catch (err) {
+        Sentry.captureException(err, {
+          tags: {
+            scope: 'notification_dispatch',
+            action: 'sendMessage',
+            event_type: 'message.new',
+          },
+          extra: { recipientId: r.participantId, conversationId, messageId },
+        });
+      }
+    }
   }
 
   await logAudit({

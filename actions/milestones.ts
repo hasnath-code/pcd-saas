@@ -16,6 +16,7 @@ import {
   projects,
   users,
 } from '@/db/schema';
+import * as Sentry from '@sentry/nextjs';
 import { logAudit } from '@/lib/audit/log';
 import { dispatchNotification } from '@/lib/notifications/dispatch';
 import { logActivityTx } from '@/lib/activity/log';
@@ -78,76 +79,106 @@ export async function createMilestone(
         visibleToStakeholders,
       });
 
-      // 2. Fan out milestone.scheduled — ONLY when scheduledAt is set.
-      //    A milestone created without a date is a placeholder; the
-      //    notification fires later when updateMilestone sets scheduledAt
-      //    (updateMilestone is NOT wired in Phase 5 — log as follow-up DEBT).
-      if (!scheduledAt) return;
-
-      const payload = {
-        projectId,
-        projectNumber,
-        milestoneId,
-        label,
-        scheduledAt: scheduledAt.toISOString(),
-        visibleToStakeholders,
-      };
-
-      // Activity row — visibility inherits from the milestone itself.
-      // Hidden milestones (visibleToStakeholders=false) produce hidden
-      // activity rows; stakeholders never see them.
-      await logActivityTx(tx, {
-        projectId,
-        actorType: 'user',
-        actorId: ctx.userId,
-        eventType: 'milestone.scheduled',
-        payload,
-        visibleToStakeholders,
-      });
-
-      const orgMembers = await tx
-        .select({ id: users.id })
-        .from(users)
-        .where(and(eq(users.orgId, ctx.orgId), isNull(users.deletedAt)));
-      // Stakeholders: must have can_view_schedule AND the milestone itself
-      // must be marked visible_to_stakeholders. Hidden milestones are
-      // org-internal — skip stakeholders entirely.
-      const stakeholders = visibleToStakeholders
-        ? await tx
-            .select({ clientId: projectStakeholders.clientId })
-            .from(projectStakeholders)
-            .where(
-              and(
-                eq(projectStakeholders.projectId, projectId),
-                eq(projectStakeholders.canViewSchedule, true),
-                isNotNull(projectStakeholders.acceptedAt),
-                isNull(projectStakeholders.deletedAt),
-              ),
-            )
-        : [];
-
-      for (const u of orgMembers) {
-        await dispatchNotification({
-          tx,
-          recipientType: 'user',
-          recipientId: u.id,
+      // 1a. Activity row — only when scheduledAt is set (placeholder
+      //     milestones don't produce timeline entries until they're
+      //     scheduled). Visibility inherits from the milestone itself.
+      //     Stays in tx per ADR-033 (cheap DB write atomic with insert;
+      //     notification dispatch moves out).
+      if (scheduledAt) {
+        await logActivityTx(tx, {
+          projectId,
+          actorType: 'user',
+          actorId: ctx.userId,
           eventType: 'milestone.scheduled',
-          payload,
-        });
-      }
-      for (const s of stakeholders) {
-        await dispatchNotification({
-          tx,
-          recipientType: 'client',
-          recipientId: s.clientId,
-          eventType: 'milestone.scheduled',
-          payload,
+          payload: {
+            projectId,
+            projectNumber,
+            milestoneId,
+            label,
+            scheduledAt: scheduledAt.toISOString(),
+            visibleToStakeholders,
+          },
+          visibleToStakeholders,
         });
       }
     });
   } catch (e) {
     const reason = e instanceof Error ? e.message : String(e);
     return { error: 'internal_error', reason: `create_milestone:${reason}` };
+  }
+
+  // Post-commit notification fan-out per ADR-033. Only fires when scheduledAt
+  // is set — placeholder milestones don't dispatch (the kickoff scope).
+  if (scheduledAt) {
+    const payload = {
+      projectId,
+      projectNumber,
+      milestoneId,
+      label,
+      scheduledAt: scheduledAt.toISOString(),
+      visibleToStakeholders,
+    };
+    const orgMembers = await db
+      .select({ id: users.id })
+      .from(users)
+      .where(and(eq(users.orgId, ctx.orgId), isNull(users.deletedAt)));
+    // Stakeholders: must have can_view_schedule AND the milestone itself
+    // must be marked visible_to_stakeholders. Hidden milestones are
+    // org-internal — skip stakeholders entirely.
+    const stakeholders = visibleToStakeholders
+      ? await db
+          .select({ clientId: projectStakeholders.clientId })
+          .from(projectStakeholders)
+          .where(
+            and(
+              eq(projectStakeholders.projectId, projectId),
+              eq(projectStakeholders.canViewSchedule, true),
+              isNotNull(projectStakeholders.acceptedAt),
+              isNull(projectStakeholders.deletedAt),
+            ),
+          )
+      : [];
+
+    for (const u of orgMembers) {
+      try {
+        await dispatchNotification({
+          recipientType: 'user',
+          recipientId: u.id,
+          eventType: 'milestone.scheduled',
+          payload,
+        });
+      } catch (err) {
+        Sentry.captureException(err, {
+          tags: {
+            scope: 'notification_dispatch',
+            action: 'createMilestone',
+            event_type: 'milestone.scheduled',
+            org_id: ctx.orgId,
+          },
+          extra: { recipientUserId: u.id, projectId, milestoneId },
+        });
+      }
+    }
+    for (const s of stakeholders) {
+      try {
+        await dispatchNotification({
+          recipientType: 'client',
+          recipientId: s.clientId,
+          eventType: 'milestone.scheduled',
+          payload,
+        });
+      } catch (err) {
+        Sentry.captureException(err, {
+          tags: {
+            scope: 'notification_dispatch',
+            action: 'createMilestone',
+            event_type: 'milestone.scheduled',
+            org_id: ctx.orgId,
+          },
+          extra: { recipientClientId: s.clientId, projectId, milestoneId },
+        });
+      }
+    }
   }
 
   await logAudit({
