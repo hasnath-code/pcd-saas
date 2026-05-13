@@ -22,6 +22,7 @@ import {
 } from '@/db/schema';
 import { logAudit } from '@/lib/audit/log';
 import { authUserHasMembership } from '@/db/queries/users';
+import { seedNotificationDefaultsTx } from '@/lib/notifications/seed-defaults';
 
 export type ServerActionResult =
   | { success: true }
@@ -119,6 +120,12 @@ export async function createOrganization(
         name: ownerName,
         role: 'owner',
       });
+
+      // Session 11 §17: seed default notification preferences for the new owner.
+      // 12 events × 4 channels = 48 rows; in_app + email default on, push +
+      // sms default off. Idempotent via ON CONFLICT DO NOTHING on the
+      // (user_id, channel, event_type) UNIQUE.
+      await seedNotificationDefaultsTx(tx, { userId });
 
       await cloneSimpleWorkflowForOrg(tx, orgId);
 

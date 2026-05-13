@@ -3,7 +3,7 @@
 import { z } from 'zod';
 import { v7 as uuidv7 } from 'uuid';
 import { revalidatePath } from 'next/cache';
-import { and, eq, isNull } from 'drizzle-orm';
+import { and, eq, isNotNull, isNull } from 'drizzle-orm';
 import {
   AuthError,
   requireAuth,
@@ -18,8 +18,11 @@ import {
   users,
 } from '@/db/schema';
 import { logAudit } from '@/lib/audit/log';
+import * as Sentry from '@sentry/nextjs';
 import { checkFeature } from '@/lib/features';
 import { createServiceClient } from '@/lib/supabase/service';
+import { dispatchNotification } from '@/lib/notifications/dispatch';
+import { logActivityTx } from '@/lib/activity/log';
 
 // ARCHITECTURE-saas.md §20 standard shape per action: Zod parse → auth →
 // access check → quota check → mutation → audit log → discriminated return.
@@ -410,19 +413,139 @@ export async function confirmUpload(
   const uploadedByType = identity.kind === 'user' ? 'user' : 'client';
   const uploadedById =
     identity.kind === 'user' ? identity.userId : identity.clientId;
+  const fileVisibility = visibility ?? 'org_and_stakeholders';
 
-  await db.insert(projectFiles).values({
-    id: fileId,
+  // Resolve payload fields outside the tx — read-only lookups don't need
+  // to hold the connection.
+  const [proj] = await db
+    .select({ projectNumber: projects.projectNumber })
+    .from(projects)
+    .where(eq(projects.id, projectId))
+    .limit(1);
+  const projectNumber = proj?.projectNumber ?? '';
+  const uploaderNameRow =
+    identity.kind === 'user'
+      ? await db
+          .select({ name: users.name })
+          .from(users)
+          .where(eq(users.id, identity.userId))
+          .limit(1)
+      : await db
+          .select({ name: clients.name })
+          .from(clients)
+          .where(eq(clients.id, identity.clientId))
+          .limit(1);
+  const uploaderName = uploaderNameRow[0]?.name ?? 'Someone';
+
+  const payload = {
     projectId,
-    uploadedByType,
-    uploadedById,
-    storagePath,
-    originalFilename,
+    projectNumber,
+    fileId,
+    filename: originalFilename,
     mimeType,
     sizeBytes,
     source,
-    visibility: visibility ?? 'org_and_stakeholders',
-  });
+    visibility: fileVisibility,
+    uploaderName,
+    uploaderType: uploadedByType,
+  };
+
+  try {
+    await db.transaction(async (tx) => {
+      // 1. Insert the project_files row.
+      await tx.insert(projectFiles).values({
+        id: fileId,
+        projectId,
+        uploadedByType,
+        uploadedById,
+        storagePath,
+        originalFilename,
+        mimeType,
+        sizeBytes,
+        source,
+        visibility: fileVisibility,
+      });
+
+      // 1a. Activity row — visibility mirrors the file row's visibility flag.
+      //     Stays in tx per ADR-033 (cheap DB-only write, atomic with the
+      //     file insert; notification dispatch moves out).
+      await logActivityTx(tx, {
+        projectId,
+        actorType: identity.kind === 'user' ? 'user' : 'client',
+        actorId: identity.kind === 'user' ? identity.userId : identity.clientId,
+        eventType: 'file.uploaded',
+        payload,
+        visibleToStakeholders: fileVisibility === 'org_and_stakeholders',
+      });
+    });
+  } catch (e) {
+    const reason = e instanceof Error ? e.message : String(e);
+    return { error: 'internal_error', reason: `confirm_upload:${reason}` };
+  }
+
+  // Post-commit notification fan-out per ADR-033. Stakeholders without
+  // can_view_drawings are skipped — RLS would already hide the file row
+  // from them, so notifying would produce a click-through to nothing.
+  // org_only files skip stakeholder dispatch entirely.
+  const orgMembers = await db
+    .select({ id: users.id })
+    .from(users)
+    .where(and(eq(users.orgId, orgId), isNull(users.deletedAt)));
+  const stakeholderRecipients =
+    fileVisibility === 'org_and_stakeholders'
+      ? await db
+          .select({ clientId: projectStakeholders.clientId })
+          .from(projectStakeholders)
+          .where(
+            and(
+              eq(projectStakeholders.projectId, projectId),
+              eq(projectStakeholders.canViewDrawings, true),
+              isNotNull(projectStakeholders.acceptedAt),
+              isNull(projectStakeholders.deletedAt),
+            ),
+          )
+      : [];
+
+  for (const u of orgMembers) {
+    try {
+      await dispatchNotification({
+        recipientType: 'user',
+        recipientId: u.id,
+        eventType: 'file.uploaded',
+        payload,
+      });
+    } catch (err) {
+      Sentry.captureException(err, {
+        tags: {
+          scope: 'notification_dispatch',
+          action: 'confirmUpload',
+          event_type: 'file.uploaded',
+          org_id: orgId,
+        },
+        extra: { recipientUserId: u.id, projectId, fileId },
+      });
+    }
+  }
+  for (const s of stakeholderRecipients) {
+    try {
+      await dispatchNotification({
+        recipientType: 'client',
+        recipientId: s.clientId,
+        eventType: 'file.uploaded',
+        payload,
+      });
+    } catch (err) {
+      Sentry.captureException(err, {
+        tags: {
+          scope: 'notification_dispatch',
+          action: 'confirmUpload',
+          event_type: 'file.uploaded',
+          org_id: orgId,
+        },
+        extra: { recipientClientId: s.clientId, projectId, fileId },
+      });
+    }
+  }
 
   await logAudit({
     orgId,

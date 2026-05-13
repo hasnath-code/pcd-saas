@@ -2,7 +2,7 @@
 
 import { z } from 'zod';
 import { v7 as uuidv7 } from 'uuid';
-import { and, asc, eq, isNull } from 'drizzle-orm';
+import { and, asc, eq, isNotNull, isNull } from 'drizzle-orm';
 import { revalidatePath } from 'next/cache';
 import {
   AuthError,
@@ -15,11 +15,15 @@ import {
   clientOrgMemberships,
   projectStakeholders,
   projects,
+  users,
   workflows,
   workflowStages,
 } from '@/db/schema';
+import * as Sentry from '@sentry/nextjs';
 import { logAudit } from '@/lib/audit/log';
 import { VISIBILITY_PROFILES } from '@/lib/visibility-profiles';
+import { dispatchNotification } from '@/lib/notifications/dispatch';
+import { logActivityTx } from '@/lib/activity/log';
 
 export type ProjectActionResult<T = void> =
   | (T extends void ? { success: true } : { success: true; data: T })
@@ -410,10 +414,123 @@ export async function moveProjectToStage(
   const isBackwardTransition = toStage.position < fromStage.position;
   const isTerminalDestination = toStage.isTerminal === true;
 
-  await db
-    .update(projects)
-    .set({ currentStageId: toStageId })
-    .where(eq(projects.id, projectId));
+  // ADR-019 9-field locked metadata. Reused as the dispatcher payload below
+  // so the notification email + activity log + audit row all see the same
+  // shape — no extra DB lookups inside the dispatcher.
+  const stageChangeMetadata = {
+    from_stage_id: fromStage.id,
+    from_stage_name: fromStage.name,
+    from_stage_position: fromStage.position,
+    to_stage_id: toStage.id,
+    to_stage_name: toStage.name,
+    to_stage_position: toStage.position,
+    workflow_id: project.workflowId,
+    is_backward_transition: isBackwardTransition,
+    is_terminal_destination: isTerminalDestination,
+  };
+
+  // Look up project_number for the payload (subjects.ts uses it as the
+  // human-friendly label). Cheap — single-row read.
+  const [projectMeta] = await db
+    .select({ projectNumber: projects.projectNumber })
+    .from(projects)
+    .where(eq(projects.id, projectId))
+    .limit(1);
+  const projectNumber = projectMeta?.projectNumber ?? '';
+
+  const payload = {
+    projectId,
+    projectNumber,
+    ...stageChangeMetadata,
+    // Friendlier aliases used by subjects.ts content builder.
+    fromStageName: fromStage.name,
+    toStageName: toStage.name,
+  };
+
+  try {
+    await db.transaction(async (tx) => {
+      // 1. Domain write: advance current_stage_id.
+      await tx
+        .update(projects)
+        .set({ currentStageId: toStageId })
+        .where(eq(projects.id, projectId));
+
+      // 1a. Activity row — stakeholders always see stage transitions per
+      //     the kickoff default (project.stage_changed → visible=true).
+      //     Stays in tx per ADR-033 (DB-only writes are atomic with the
+      //     domain mutation; notification dispatch moves out).
+      await logActivityTx(tx, {
+        projectId,
+        actorType: 'user',
+        actorId: ctx.userId,
+        eventType: 'project.stage_changed',
+        payload,
+        visibleToStakeholders: true,
+      });
+    });
+  } catch (e) {
+    const reason = e instanceof Error ? e.message : String(e);
+    return { error: 'internal_error', reason: `move_project_to_stage:${reason}` };
+  }
+
+  // Post-commit dispatch fan-out per ADR-033. Failures isolated per recipient
+  // and captured in Sentry; the stage transition itself is durable even if
+  // notification delivery has a hiccup.
+  const orgMembers = await db
+    .select({ id: users.id })
+    .from(users)
+    .where(and(eq(users.orgId, ctx.orgId), isNull(users.deletedAt)));
+  const stakeholders = await db
+    .select({ clientId: projectStakeholders.clientId })
+    .from(projectStakeholders)
+    .where(
+      and(
+        eq(projectStakeholders.projectId, projectId),
+        isNotNull(projectStakeholders.acceptedAt),
+        isNull(projectStakeholders.deletedAt),
+      ),
+    );
+
+  for (const u of orgMembers) {
+    try {
+      await dispatchNotification({
+        recipientType: 'user',
+        recipientId: u.id,
+        eventType: 'project.stage_changed',
+        payload,
+      });
+    } catch (err) {
+      Sentry.captureException(err, {
+        tags: {
+          scope: 'notification_dispatch',
+          action: 'moveProjectToStage',
+          event_type: 'project.stage_changed',
+          org_id: ctx.orgId,
+        },
+        extra: { recipientUserId: u.id, projectId },
+      });
+    }
+  }
+  for (const s of stakeholders) {
+    try {
+      await dispatchNotification({
+        recipientType: 'client',
+        recipientId: s.clientId,
+        eventType: 'project.stage_changed',
+        payload,
+      });
+    } catch (err) {
+      Sentry.captureException(err, {
+        tags: {
+          scope: 'notification_dispatch',
+          action: 'moveProjectToStage',
+          event_type: 'project.stage_changed',
+          org_id: ctx.orgId,
+        },
+        extra: { recipientClientId: s.clientId, projectId },
+      });
+    }
+  }
 
   await logAudit({
     orgId: ctx.orgId,
@@ -421,17 +538,7 @@ export async function moveProjectToStage(
     action: 'stage_changed',
     resourceType: 'project',
     resourceId: projectId,
-    metadata: {
-      from_stage_id: fromStage.id,
-      from_stage_name: fromStage.name,
-      from_stage_position: fromStage.position,
-      to_stage_id: toStage.id,
-      to_stage_name: toStage.name,
-      to_stage_position: toStage.position,
-      workflow_id: project.workflowId,
-      is_backward_transition: isBackwardTransition,
-      is_terminal_destination: isTerminalDestination,
-    },
+    metadata: stageChangeMetadata,
   });
 
   revalidatePath(`/dashboard/projects/${projectId}`, 'layout');

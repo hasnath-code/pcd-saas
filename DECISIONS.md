@@ -33,6 +33,42 @@
 
 ---
 
+## ADR-033 — Notification dispatch + outbound email run AFTER the action's transaction commits; failures isolated, do not roll back the domain write
+**Date:** 13 May 2026 (Session 11 DEBT-049 hotfix, Phase F walk)
+**Codebase:** SaaS
+**Status:** Accepted (carveout to Session 11 plan Hard Rule 6)
+
+**Context:** Session 11 Phase 5 wired `dispatchNotification` INSIDE each action's `db.transaction(...)` per the kickoff's Hard Rule 6 ("dispatch is part of the same server-action transaction"). The dispatcher's email channel calls Resend HTTPS for each enabled recipient — every call holds the transaction open for ~1-2s. Phase F walk against PR #12 preview surfaced **Vercel 504 Gateway Timeout** on `inviteStakeholder` for a 2-3 person test org: total wall-clock exceeded Vercel's 10-second function limit because the transaction held over multiple Resend network calls plus the existing magic-link Resend call.
+
+Cloud DB state at failure: transaction rolled back (no `clients` / `project_stakeholders` / `invitations` rows), but the user's `auth.users` row (created out-of-band by an earlier sign-in attempt) was orphaned, blocking the same email from being re-used in retest. Required a one-shot cleanup script (`scripts/cleanup-debt049-orphans.ts`) to delete the orphan via Supabase admin.
+
+The fundamental issue: holding a Drizzle transaction during external HTTPS calls is bad practice independent of the timeout — it lengthens lock holds and exposes the action to transient network failures that should NOT roll back domain state. A Resend rate-limit hiccup shouldn't lose a user's stakeholder invite.
+
+**Decision:** Three locked invariants:
+
+1. **DB-only writes inside the transaction.** The `db.transaction(...)` block does the action's domain insert/update PLUS `logActivityTx` (Phase 6 — append-only, cheap, atomic-with-action is desirable). Nothing else.
+
+2. **All `dispatchNotification` calls + outbound email sends (`sendEmail`) happen AFTER `tx.commit()`.** Recipient list queries also move outside the transaction (read-only, no need to hold the connection). The dispatcher itself still uses the pooled `db` connection but each call is a fresh non-transactional unit of work.
+
+3. **Per-recipient failures are isolated.** Each `dispatchNotification` call site is wrapped in its own `try/catch`; failures are captured to Sentry with `scope: 'notification_dispatch'` tag plus action/event/org context, but they DO NOT re-throw. One Resend hiccup doesn't kill the rest of the fan-out, and no notification failure ever rolls back a committed domain write.
+
+**Applies to all 5 wired Session 11 actions:** `sendMessage`, `moveProjectToStage`, `confirmUpload`, `inviteStakeholder`, `createMilestone`. (`sendMessage` had no domain reason for a `db.transaction(...)` wrap after this change — only one INSERT — so the wrap was removed entirely. The other four keep their transactions for the activity-row + domain-write atomicity.)
+
+**Alternatives rejected:**
+- Keep dispatch inside the tx + raise Vercel function timeout to 60s (Vercel Pro feature) — masks the underlying problem (long-held DB locks; transient network failures rolling back valid writes). Doesn't compose with future queue-worker migration.
+- Move dispatch to a fire-and-forget pattern (`waitUntil()` or similar) — Hard Rule 4 explicitly prohibits queue infrastructure in Phase 1c. Sync post-commit is the right middle ground for now.
+- Have the dispatcher write notification ROWS inside the tx but defer email sends — split-personality function with two modes; bug-prone. Single post-commit pass is simpler.
+- Make activity-log writes ALSO post-commit — activity is the canonical timeline record; users would see stage transitions on the project page but no activity row if dispatch crashed mid-flight. The whole point of activity-rows-in-tx is "if this row exists, the action happened."
+
+**Reconsider if:**
+- A queue worker (Inngest / Trigger.dev) lands in Phase 4+ — at that point dispatch becomes a single enqueue operation, fast enough to live anywhere (in tx or not). The post-commit boundary can stay as documentation.
+- A specific action surfaces a "the user expected notifications to be guaranteed" complaint — at that point the relevant action grows a retry-on-page-revisit mechanism or sticky inbox surfacing of failed dispatches.
+- The orphan-auth.users class of bugs surfaces again — would suggest splitting `inviteStakeholder` further so the Supabase Auth admin call happens AFTER the public-schema tx commits (it currently happens out-of-band via a different code path entirely, so DEBT-049 didn't actually surface inside `inviteStakeholder` — the orphan was pre-existing).
+
+**Cross-references:** Session 11 Phase 5 commit `4a77f34` (original tx-bound wiring); Session 11 DEBT-049 hotfix commit (this ADR); `lib/notifications/dispatch.ts`; `actions/{messages,projects,files,stakeholders,milestones}.ts`; `scripts/cleanup-debt049-orphans.ts`; SKILL.md Hard Rule 6 (carveout added v3.7); DEBT-049 (closed by this ADR)
+
+---
+
 ## ADR-032 — All app-public URLs constructed via `getAppUrl()`; direct env-var reads forbidden outside the helper
 **Date:** 11 May 2026 (DEBT-026 mini-session, between Sessions 10 and 11)
 **Codebase:** SaaS

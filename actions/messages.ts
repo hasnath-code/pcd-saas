@@ -3,7 +3,8 @@
 import { z } from 'zod';
 import { v7 as uuidv7 } from 'uuid';
 import { revalidatePath } from 'next/cache';
-import { and, eq, isNull } from 'drizzle-orm';
+import { and, eq, isNull, not } from 'drizzle-orm';
+import * as Sentry from '@sentry/nextjs';
 import {
   AuthError,
   requireAuth,
@@ -18,6 +19,7 @@ import {
   users,
 } from '@/db/schema';
 import { logAudit } from '@/lib/audit/log';
+import { dispatchNotification } from '@/lib/notifications/dispatch';
 
 export type MessageActionResult<T = void> =
   | (T extends void ? { success: true } : { success: true; data: T })
@@ -150,6 +152,78 @@ export async function sendMessage(
   } catch (e) {
     const reason = e instanceof Error ? e.message : String(e);
     return { error: 'internal_error', reason: `send_message:${reason}` };
+  }
+
+  // Post-commit notification fan-out per ADR-033. Each recipient gets an
+  // isolated try/catch — one Resend hiccup doesn't kill the rest of the
+  // fan-out. Failures captured to Sentry but the message itself stays
+  // visible in the conversation.
+  const recipients = await db
+    .select({
+      participantType: conversationParticipants.participantType,
+      participantId: conversationParticipants.participantId,
+    })
+    .from(conversationParticipants)
+    .where(
+      and(
+        eq(conversationParticipants.conversationId, conversationId),
+        isNull(conversationParticipants.leftAt),
+        not(
+          and(
+            eq(conversationParticipants.participantType, sender.participantType),
+            eq(conversationParticipants.participantId, sender.participantId)!,
+          )!,
+        ),
+      ),
+    );
+
+  if (recipients.length > 0) {
+    const senderNameRow =
+      sender.participantType === 'user'
+        ? await db
+            .select({ name: users.name })
+            .from(users)
+            .where(eq(users.id, sender.participantId))
+            .limit(1)
+        : await db
+            .select({ name: clients.name })
+            .from(clients)
+            .where(eq(clients.id, sender.participantId))
+            .limit(1);
+    const senderName = senderNameRow[0]?.name ?? 'Someone';
+    const convNameRow = await db
+      .select({ name: conversations.name })
+      .from(conversations)
+      .where(eq(conversations.id, conversationId))
+      .limit(1);
+    const conversationName = convNameRow[0]?.name ?? 'a conversation';
+    const snippet = body.length > 120 ? `${body.slice(0, 120)}…` : body;
+
+    for (const r of recipients) {
+      try {
+        await dispatchNotification({
+          recipientType: r.participantType as 'user' | 'client',
+          recipientId: r.participantId,
+          eventType: 'message.new',
+          payload: {
+            conversationId,
+            conversationName,
+            senderName,
+            senderType: sender.participantType,
+            snippet,
+          },
+        });
+      } catch (err) {
+        Sentry.captureException(err, {
+          tags: {
+            scope: 'notification_dispatch',
+            action: 'sendMessage',
+            event_type: 'message.new',
+          },
+          extra: { recipientId: r.participantId, conversationId, messageId },
+        });
+      }
+    }
   }
 
   await logAudit({

@@ -5,6 +5,8 @@ import { v7 as uuidv7 } from 'uuid';
 import { and, eq, gt, isNull } from 'drizzle-orm';
 import { revalidatePath } from 'next/cache';
 import * as Sentry from '@sentry/nextjs';
+import { dispatchNotification } from '@/lib/notifications/dispatch';
+import { logActivityTx } from '@/lib/activity/log';
 import {
   AuthError,
   requireAuth,
@@ -35,6 +37,7 @@ import {
   type VisibilityProfile,
 } from '@/lib/visibility-profiles';
 import { getAppUrl } from '@/lib/get-app-url';
+import { seedNotificationDefaultsTx } from '@/lib/notifications/seed-defaults';
 
 export type StakeholderActionResult<T = void> =
   | (T extends void
@@ -263,6 +266,29 @@ export async function inviteStakeholder(
         createdByUserId: ctx.userId,
       });
 
+      // Activity row — org-internal. Stakeholders don't surface "X joined"
+      // events in their own timeline view (visibleToStakeholders=false).
+      // Stays inside the tx per ADR-033 (DB-only writes are atomic with the
+      // domain mutation; notification dispatch + Resend calls move out).
+      await logActivityTx(tx, {
+        projectId,
+        actorType: 'user',
+        actorId: ctx.userId,
+        eventType: 'stakeholder.added_to_project',
+        payload: {
+          projectId,
+          projectNumber: project.projectNumber,
+          stakeholderName: name,
+          stakeholderEmail: email,
+          role,
+          visibilityProfile,
+          inviterName,
+          invitationId,
+          reinvited: alreadyExistedDeleted,
+        },
+        visibleToStakeholders: false,
+      });
+
       return { clientId: co.clientId };
     });
     clientId = result.clientId;
@@ -274,7 +300,19 @@ export async function inviteStakeholder(
     return { error: 'internal_error', reason: `invite_stakeholder_tx:${msg}` };
   }
 
-  // Send email. Wrap in try/catch (Session 5 hotfix pattern).
+  // Post-commit side effects per ADR-033 / Hard Rule 6 carveout:
+  //   - Magic-link Resend send (existing behavior; pre-Session-11 already
+  //     post-tx, kept here).
+  //   - Notification dispatch fan-out to org members. MOVED out of the tx
+  //     in the DEBT-049 hotfix because each Resend call inside the dispatcher
+  //     held the tx open for ~1s per recipient, tipping Vercel 504 on
+  //     2-3 person orgs.
+  //
+  // Failures of either are captured in Sentry but DO NOT roll back the
+  // domain write. The user's invite is durable even if the side effects
+  // fail; ops sees the breadcrumb and can re-trigger manually.
+
+  // Magic-link email.
   const acceptUrl = `${getAppUrl()}/invitations/${token}`;
   const { subject, html } = stakeholderInvitationEmail({
     inviterName,
@@ -298,6 +336,44 @@ export async function inviteStakeholder(
       tags: { action: 'inviteStakeholder', org_id: ctx.orgId, project_id: projectId },
       extra: { invitationId, recipient: email },
     });
+  }
+
+  // Org-member notification fan-out (informational; the stakeholder
+  // themselves receives the magic-link email above, not a notification).
+  const dispatchPayload = {
+    projectId,
+    projectNumber: project.projectNumber,
+    stakeholderName: name,
+    stakeholderEmail: email,
+    role,
+    visibilityProfile,
+    inviterName,
+    invitationId,
+    reinvited: alreadyExistedDeleted,
+  };
+  const orgMembers = await db
+    .select({ id: users.id })
+    .from(users)
+    .where(and(eq(users.orgId, ctx.orgId), isNull(users.deletedAt)));
+  for (const u of orgMembers) {
+    try {
+      await dispatchNotification({
+        recipientType: 'user',
+        recipientId: u.id,
+        eventType: 'stakeholder.added_to_project',
+        payload: dispatchPayload,
+      });
+    } catch (err) {
+      Sentry.captureException(err, {
+        tags: {
+          scope: 'notification_dispatch',
+          action: 'inviteStakeholder',
+          event_type: 'stakeholder.added_to_project',
+          org_id: ctx.orgId,
+        },
+        extra: { recipientUserId: u.id, projectId, invitationId },
+      });
+    }
   }
 
   await logAudit({
@@ -440,6 +516,13 @@ export async function acceptStakeholderInvitation(
         orgId: invitation.orgId,
         createdByUserId: invitation.invitedBy,
       });
+
+      // Session 11 §17: defensive seed of notification preferences. The
+      // stakeholder's clients row was created at invite-time via
+      // findOrCreateClientTx which already seeds. This call is idempotent —
+      // it covers the edge case where a clients row predates Session 11
+      // (no prefs seeded yet) and the stakeholder accepts a fresh invitation.
+      await seedNotificationDefaultsTx(tx, { clientId: client.id });
     });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
