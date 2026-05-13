@@ -35,9 +35,10 @@ Decide once at Session 12 / mini-session kickoff time; either is acceptable.
 
 ## Open follow-up
 
-- **MINI-SESSION-DEBT-059** — `listFilesForProject` pooler-bypass fix scheduled for this week. Pre-existing from S10; flagged HIGH; fix is a one-line filter. Kickoff doc will be drafted before the session starts. See `ARCHITECTURE-saas.md §35.11` row 4 + `DEBT-LOG.md` DEBT-059 entry.
+- ~~**MINI-SESSION-DEBT-059**~~ — **Shipped 14 May 2026** on branch `debt-059-stakeholder-files-filter` (commits `19b3f3f` + `1a958dd`); DEBT-059 → DEBT-R006. Audit also surfaced DEBT-060 + DEBT-061 (participation-gate variants on portal conversation queries — Medium severity, recommend bundling into a future mini-session). See `ARCHITECTURE-saas.md §35.11` row 4 + `DEBT-LOG.md` DEBT-R006.
 - **Phase F UX polish bundle** — DEBT-048 / 050-055 (7 entries from the Phase F walk). Pre-launch session.
 - **Realtime root-cause** — DEBT-029 / DEBT-058 both reproduce the same `subscribe()` → `CLOSED` pattern locally. Polling fallback handles the UX; targeted diagnosis deferred until a feature can't tolerate 30s lag.
+- **DEBT-060 + DEBT-061** — caller-enforced participation gates on `getConversationDetail` + `listMessagesForConversation`. Medium severity defense-in-depth; surfaced during DEBT-059 audit. Bundle into a future mini-session (Decision 3 path (a) chose not to expand DEBT-059's scope per Hard Rule 1).
 
 ## State at session close
 

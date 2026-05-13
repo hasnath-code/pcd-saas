@@ -53,7 +53,9 @@ export default async function ProjectDetailPage({
   const [stakeholders, pendingInvites, files] = await Promise.all([
     listStakeholdersForProject(projectId, ctx.orgId),
     listStakeholderInvitationsForProject(projectId, ctx.orgId),
-    listFilesForProject(projectId),
+    // Org-side: see all files. Pooler bypasses RLS, but org members are
+    // entitled to both visibility classes — so visibleOnly: false (DEBT-059).
+    listFilesForProject({ projectId, visibleOnly: false }),
   ]);
 
   const canDelete = ctx.role === 'owner' || ctx.role === 'admin';
