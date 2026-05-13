@@ -50,24 +50,66 @@
 
 # Open Debt
 
-## DEBT-059 — `listFilesForProject` may surface `org_only` rows to stakeholders via pooler bypass
-**Added:** 14 May 2026 (Session 11 Phase 9 observation; pre-existing — not introduced by S11)
+## DEBT-062 — Dashboard URL redirects to `/onboarding` in specific Chrome profile
+**Added:** 14 May 2026 (MINI-SESSION-DEBT-059 Phase F observation)
 **Codebase:** SaaS
-**Severity:** **HIGH**
-**Type:** Bug / Security
+**Severity:** Low
+**Type:** Bug (suspected stale auth state)
 **Status:** Open
 
-**The debt:** `db/queries/files.ts:listFilesForProject` claims in its header comment "RLS enforces access" but uses the Drizzle pooler (`db`) which connects as the postgres role and BYPASSES RLS. The query filters only by `project_id` and `deleted_at IS NULL`. Stakeholders viewing `/portal/projects/[projectId]` may currently receive `project_files` rows where `visibility = 'org_only'` — rows the table's SELECT RLS policy would otherwise hide from them.
+**The debt:** A particular Chrome profile, when navigating to `/dashboard/projects/[projectId]` on the Vercel preview, redirects to `/onboarding` instead of rendering the org dashboard. Other Chrome profiles for the same org user navigate successfully. Profile had been used repeatedly across sessions — suspected stale Supabase auth cookie or `users` table row mismatch in the org-bootstrap redirect logic.
 
-**Why it exists:** Pre-existing from Session 10 file-upload primitive. The query was written assuming RLS would auto-filter; the comment reflects the author's belief at the time. The bug didn't surface during S10 Phase F because the test orgs didn't have `org_only` files plus stakeholders simultaneously.
+**Why it exists:** Unknown root cause. Observed during DEBT-059 Phase F walk; not introduced by the fix (DEBT-059 changes don't touch middleware, layout auth checks, or onboarding routing).
 
-**Cost of leaving it:** Active data leak in production for any project that has both org-internal files AND accepted stakeholders. Severity HIGH because it bypasses an explicit privacy gate the org user set on a per-file basis. Magnitude bounded by how often `org_only` is selected in real usage — but the existence is the bug.
+**Cost of leaving it:** Confusion for users who switch browser profiles or have cookie/storage drift; possible support load if real users hit it. Magnitude bounded — may be specific to this developer profile's stale state.
 
-**Fix sketch:** Add `WHERE visibility = 'org_and_stakeholders'` filter to `listFilesForProject` when the caller is a stakeholder (or always, since stakeholders see the call site and org users see all files regardless — `org_only` ⊂ stakeholders-can't-see is the gate). One-line change. Add a regression action test asserting the filter holds. ~15 min.
+**Fix sketch:** Reproduce in a fresh incognito window with clean state. If reproducible from clean state → real bug in middleware/org-bootstrap redirect logic (investigate). If only reproducible with stale cookies/storage → document the cookie-clear workaround for users, optionally add a "stuck on onboarding?" recovery path.
 
-**Trigger:** **Pre-merge audit OR immediate-post-merge mini-session.** Session 11's `db/queries/project-activity.ts` was written with the explicit-filter pattern from the start because Phase 9 surfaced this bug shape — so the activity timeline doesn't replicate the issue. The file query needs the same treatment.
+**Trigger:** Real user reports the issue OR pre-launch operational pass.
 
-**Cross-references:** `db/queries/files.ts:listFilesForProject`; pattern parallel in `db/queries/project-activity.ts:listProjectActivity` (which has the `visibleOnly` flag); ARCHITECTURE-saas.md §12.4 (project_files visibility model)
+**Cross-references:** Observed during MINI-SESSION-DEBT-059 Phase F walk; URL `pcd-saas-git-debt-059-stakeholde-c875c9-saliqueh-6333s-projects.vercel.app/dashboard/projects/019e2336-7768-711a-9a76-93e077417f94` redirected to `/onboarding` in one Chrome profile while working correctly in others.
+
+---
+
+## DEBT-061 — `listMessagesForConversation` pooler-bypass: caller-enforced participation gate (no query-level filter)
+**Added:** 14 May 2026 (MINI-SESSION-DEBT-059 audit observation; sibling of DEBT-060)
+**Codebase:** SaaS
+**Severity:** Medium
+**Type:** Bug / Security (defense-in-depth)
+**Status:** Open
+
+**The debt:** `db/queries/conversations.ts:listMessagesForConversation` scopes only by `conversationId`. The Drizzle pooler `db` bypasses RLS so the `messages` SELECT policy doesn't apply. Stakeholder portal pages (`app/portal/conversations/[conversationId]/page.tsx`) re-enforce participation via a separate query before calling (line 33–45 → `notFound()` on mismatch), so the SQL layer fetches arbitrary rows but they're never user-surfaced. Same shape as DEBT-060.
+
+**Why it exists:** Surfaced during the DEBT-059 audit (Phase 1 inventory). Different bug class than DEBT-059: visibility here is participation-based (`conversation_participants` join on `participantType + participantId`), not a single-column visibility flag — the `visibleOnly: boolean` pattern doesn't naturally extend.
+
+**Cost of leaving it:** Defense-in-depth gap. If the page-level participation check were ever removed or a new caller forgot it, the leak would become live (identical risk class to pre-fix DEBT-059).
+
+**Fix sketch:** Add a required `participant: { participantType: 'user' | 'client'; participantId: string }` parameter; AND it into the WHERE via an EXISTS sub-query on `conversation_participants` (active row, matching participantType + participantId, leftAt IS NULL). Bundle with DEBT-060 — the two functions are siblings, one PR makes sense. ~30–45 min including regression tests for both.
+
+**Trigger:** Pre-launch operational pass OR a future change that touches portal conversation rendering.
+
+**Cross-references:** `db/queries/conversations.ts:listMessagesForConversation`; `app/portal/conversations/[conversationId]/page.tsx:33-47` (caller-side participation check); DEBT-060 (sibling); DEBT-R006 (DEBT-059 fix as pattern reference); ARCHITECTURE-saas.md §12.3 (`messages`)
+
+---
+
+## DEBT-060 — `getConversationDetail` pooler-bypass: caller-enforced participation gate (no query-level filter)
+**Added:** 14 May 2026 (MINI-SESSION-DEBT-059 audit observation; same bug-class family as DEBT-059)
+**Codebase:** SaaS
+**Severity:** Medium
+**Type:** Bug / Security (defense-in-depth)
+**Status:** Open
+
+**The debt:** `db/queries/conversations.ts:getConversationDetail` scopes only by `conversationId` and `deletedAt IS NULL`. The Drizzle pooler `db` bypasses RLS so the `conversations` SELECT policy doesn't apply. Stakeholder portal pages (`app/portal/conversations/[conversationId]/page.tsx:29`) call this query BEFORE the participation check at lines 33–45, so the SQL fetches arbitrary conversation metadata; rendering is gated by `notFound()` afterwards. Caller-enforced gate, not query-level — defense-in-depth gap.
+
+**Why it exists:** Surfaced during the DEBT-059 audit. Different bug class than DEBT-059: visibility here is participation-based (requires join to `conversation_participants` for `participantType + participantId` match), not a single-column visibility flag. The DEBT-059 `visibleOnly: boolean` pattern doesn't naturally extend; needs a `participant: { type, id }` argument with an EXISTS sub-query instead.
+
+**Cost of leaving it:** Active SQL-level fetch of arbitrary conversation rows by ID for any authenticated user who hits the portal detail page. Not user-visible today (page-level participation check filters), but the leak window opens if the page-level check is ever removed or a new caller forgets it. Same shape as pre-fix DEBT-059.
+
+**Fix sketch:** Add a required `participant: { participantType: 'user' | 'client'; participantId: string }` parameter; AND it into the WHERE via an EXISTS sub-query on `conversation_participants`. Update both callers (`app/portal/conversations/[conversationId]/page.tsx`, `app/(org)/conversations/[conversationId]/page.tsx`). Bundle with DEBT-061. ~30–45 min including regression tests.
+
+**Trigger:** Pre-launch operational pass OR a future change that touches portal conversation rendering.
+
+**Cross-references:** `db/queries/conversations.ts:getConversationDetail`; `app/portal/conversations/[conversationId]/page.tsx:29-45` (call site + caller-side check); DEBT-061 (sibling); DEBT-R006 (DEBT-059 fix as the canonical visibility-column variant of this pattern); ARCHITECTURE-saas.md §12.1 (`conversations`)
 
 ---
 
@@ -1132,6 +1174,24 @@ Likely also need to audit `actions/orgs.ts createOrganization` for any callers t
 ---
 
 # Resolved Debt
+
+## DEBT-R006 — `listFilesForProject` pooler-bypass of `project_files` visibility RLS
+**Resolved:** 14 May 2026 in commit `1a958dd` (MINI-SESSION-DEBT-059, branch `debt-059-stakeholder-files-filter`)
+**Codebase:** SaaS
+**Severity:** HIGH → Resolved
+**Type:** Bug / Security (was DEBT-059)
+
+**The debt was:** `db/queries/files.ts:listFilesForProject` claimed in its header comment "RLS enforces access" but used the Drizzle pooler (`db`, postgres role) which bypasses RLS. The query filtered only by `project_id` and `deleted_at IS NULL`. Stakeholders viewing `/portal/projects/[projectId]` could receive `project_files` rows where `visibility = 'org_only'` — rows the table's SELECT RLS policy would otherwise hide. Pre-existing from Session 10; surfaced during Session 11 Phase 9 timeline wiring.
+
+**Resolution:** Refactored `listFilesForProject` signature to `opts: { projectId: string; visibleOnly: boolean }`. `visibleOnly` is REQUIRED — TypeScript fail-fast catches missed callers. When `visibleOnly === true`, the WHERE adds `eq(visibility, 'org_and_stakeholders')`. Mirrors `db/queries/project-activity.ts:listProjectActivity` (Session 11 Phase 9 canonical pattern). Stakeholder portal caller (`app/portal/projects/[projectId]/page.tsx`) passes `true`; org-side caller (`app/(org)/dashboard/projects/[projectId]/page.tsx`) passes `false`. Header comment block rewritten to explain the pooler-bypass-RLS reality + defense-in-depth role of the flag (RLS policy from migration 0018 is still canonical at the DB boundary if the query is ever re-routed through the Supabase REST client).
+
+Two regression tests added in `tests/actions/files.test.ts` (`describe('listFilesForProject — visibleOnly filter (DEBT-059)')`): asserts that `visibleOnly: true` returns only `org_and_stakeholders` rows; asserts that `visibleOnly: false` returns all visibilities. Suite results: Actions 198 → 200; RLS 221/221 unchanged; cloud-smoke 14/14 unchanged; TypeScript clean. Phase F manual flow on Vercel preview verified end-to-end: org user uploads `org_only` + `org_and_stakeholders` files, stakeholder signs in via magic link, asserts `org_only` file hidden + `org_and_stakeholders` file visible.
+
+Phase 1 audit covered all 30 exported functions across 13 `db/queries/*.ts` files. **1 BUG-verdict** (`listFilesForProject` — same shape as the documented DEBT-059); **2 YELLOW-verdict** (`getConversationDetail`, `listMessagesForConversation` — different bug class: participation-based gate enforced caller-side, filed as DEBT-060 + DEBT-061); **27 SAFE-verdict**. The single BUG count means Decision 3 path (a) from the kickoff: no new SKILL Hard Rule, no new ADR — the resolution paragraph + `listProjectActivity` cross-ref serve as the canonical pattern.
+
+**Cross-references:** PR (TBD on merge — `debt-059-stakeholder-files-filter` branch); commits `19b3f3f` (kickoff doc) + `1a958dd` (fix + tests); pre-fix tag `pre-mini-debt-059` at `36dd5a2`; canonical pattern reference `db/queries/project-activity.ts:listProjectActivity` (Session 11 Phase 9); ARCHITECTURE-saas.md §12.4 (project_files RLS policy from migration 0018, unchanged); related siblings DEBT-060 + DEBT-061 (different bug class, recommend bundling); kickoff doc `mini-session-debt-059-kickoff.md`
+
+---
 
 ## DEBT-R005 — `VERCEL_BRANCH_URL` preference for preview magic-link PKCE
 **Resolved:** 11 May 2026 in PR #11 commit `6b17806` (Phase 0 of Session 11)
