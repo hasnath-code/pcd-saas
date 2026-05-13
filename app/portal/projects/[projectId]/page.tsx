@@ -44,10 +44,11 @@ export default async function PortalProjectDetailPage({
   const view = await getStakeholderProjectView(projectId, ctx.authUserId);
   if (!view) notFound();
 
-  // Files: only fetched when can_view_drawings — RLS would already filter
-  // these to zero rows, but skipping the query saves a round-trip.
+  // Files: only fetched when can_view_drawings. The pooler `db` bypasses
+  // RLS, so `visibleOnly: true` is REQUIRED to enforce the project_files
+  // visibility gate at the query layer (DEBT-059, mirrors listProjectActivity).
   const files = view.flags.canViewDrawings
-    ? await listFilesForProject(projectId)
+    ? await listFilesForProject({ projectId, visibleOnly: true })
     : [];
 
   return (

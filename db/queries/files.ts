@@ -3,13 +3,27 @@ import { and, desc, eq, isNull } from 'drizzle-orm';
 import { db } from '@/db';
 import { clients, projectFiles, projects, users } from '@/db/schema';
 
-// Phase 1c §12.4. SSR data fetches for project_files. RLS enforces
-// access; this query just shapes the data for the file-list UI.
+// Phase 1c §12.4. SSR data fetches for project_files. Body shaped here so
+// server components share the same display contract.
 //
 // DEBT-027 audit (Session 10): all date columns are direct table columns —
 // Drizzle coerces timestamptz→Date correctly for those. No `sql<Date>`
 // subqueries here; if a future query needs one, coerce inside the .map()
 // projection so the public type stays honest as Date.
+//
+// Server-side visibility filter (DEBT-059, Session 11 mini-session)
+// ==================================================================
+// `db` is the Drizzle pooler client (postgres role) which BYPASSES RLS.
+// That means the project_files SELECT policy from migration 0018 doesn't
+// apply to these queries — we must enforce the stakeholder-visibility gate
+// explicitly when the caller is a stakeholder. The `visibleOnly` flag does
+// exactly that: org-side callers pass false (org members see everything;
+// they wouldn't pass the stakeholder filter anyway since they're not
+// stakeholders), portal-side callers pass true. Defense-in-depth — even if
+// a future refactor accidentally passes the wrong flag, the RLS policy
+// from 0018 is still the canonical gate at the database boundary and
+// would re-apply if the query were ever routed through the Supabase REST
+// client (authenticated role). Mirrors `listProjectActivity` (project-activity.ts).
 
 export type ProjectFileSource =
   | 'surveyor_upload'
@@ -34,15 +48,27 @@ export type ProjectFileRow = {
   createdAt: Date;
 };
 
-// List visible files for a project, newest first. RLS auto-filters by the
-// caller's identity (org member of project's org OR stakeholder w/
-// can_view_drawings). Soft-deleted rows excluded.
+// List visible files for a project, newest first. Soft-deleted rows excluded.
+// `visibleOnly` is REQUIRED — see file-level comment block above for why.
 //
 // Decision 10.5: ordered by created_at DESC (most recent first). Matches
 // the ConversationsInbox pattern and what users expect from a file feed.
-export async function listFilesForProject(
-  projectId: string,
-): Promise<ProjectFileRow[]> {
+export async function listFilesForProject(opts: {
+  projectId: string;
+  /** When true, filter rows to visibility='org_and_stakeholders'. */
+  visibleOnly: boolean;
+}): Promise<ProjectFileRow[]> {
+  const baseWhere = opts.visibleOnly
+    ? and(
+        eq(projectFiles.projectId, opts.projectId),
+        eq(projectFiles.visibility, 'org_and_stakeholders'),
+        isNull(projectFiles.deletedAt),
+      )
+    : and(
+        eq(projectFiles.projectId, opts.projectId),
+        isNull(projectFiles.deletedAt),
+      );
+
   const rows = await db
     .select({
       id: projectFiles.id,
@@ -72,9 +98,7 @@ export async function listFilesForProject(
         eq(projectFiles.uploadedByType, 'client'),
       ),
     )
-    .where(
-      and(eq(projectFiles.projectId, projectId), isNull(projectFiles.deletedAt)),
-    )
+    .where(baseWhere)
     .orderBy(desc(projectFiles.createdAt));
 
   return rows.map((r) => ({

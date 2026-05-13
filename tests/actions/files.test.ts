@@ -23,6 +23,7 @@ import {
   restoreFile,
   softDeleteFile,
 } from '@/actions/files';
+import { listFilesForProject } from '@/db/queries/files';
 import * as auth from '@/lib/auth/requireAuth';
 
 const BUCKET = 'org-files';
@@ -630,5 +631,88 @@ describe('softDeleteFile + restoreFile', () => {
       .eq('id', memberFileId)
       .single();
     expect(row?.deleted_at).toBeNull();
+  });
+});
+
+// ─── listFilesForProject visibility filter (DEBT-059) ─────────────────────────
+// Regression: before the fix, listFilesForProject scoped by project_id + soft-
+// delete only. Because the Drizzle pooler bypasses RLS, stakeholders viewing
+// the portal project page received `visibility='org_only'` rows. The fix
+// adds a required `visibleOnly: boolean` and ANDs in
+// `visibility='org_and_stakeholders'` when true. These tests pin that
+// contract at the query layer (RLS-level coverage continues to live in
+// tests/rls/project-files.test.ts).
+
+describe('listFilesForProject — visibleOnly filter (DEBT-059)', () => {
+  let f: WorkflowProjectFixture;
+  const trackedFileIds = new Set<string>();
+  let visibleFileId: string;
+  let hiddenFileId: string;
+
+  beforeAll(async () => {
+    f = await createWorkflowProjectFixture();
+    visibleFileId = uuidv7();
+    hiddenFileId = uuidv7();
+    await f.service.from('project_files').insert([
+      {
+        id: visibleFileId,
+        project_id: f.extras.orgAProject.id,
+        uploaded_by_type: 'user',
+        uploaded_by_id: f.userA.userId,
+        storage_path: `org/${f.orgA.id}/projects/${f.extras.orgAProject.id}/surveyor-uploads/${visibleFileId}.pdf`,
+        original_filename: 'shared.pdf',
+        mime_type: 'application/pdf',
+        size_bytes: 1024,
+        source: 'surveyor_upload',
+        visibility: 'org_and_stakeholders',
+      },
+      {
+        id: hiddenFileId,
+        project_id: f.extras.orgAProject.id,
+        uploaded_by_type: 'user',
+        uploaded_by_id: f.userA.userId,
+        storage_path: `org/${f.orgA.id}/projects/${f.extras.orgAProject.id}/surveyor-uploads/${hiddenFileId}.pdf`,
+        original_filename: 'internal.pdf',
+        mime_type: 'application/pdf',
+        size_bytes: 2048,
+        source: 'surveyor_upload',
+        visibility: 'org_only',
+      },
+    ]);
+    trackedFileIds.add(visibleFileId);
+    trackedFileIds.add(hiddenFileId);
+  });
+
+  afterAll(async () => {
+    if (trackedFileIds.size > 0) {
+      await f.service
+        .from('project_files')
+        .delete()
+        .in('id', Array.from(trackedFileIds));
+    }
+    await f.cleanup();
+  });
+
+  test('visibleOnly: true returns only org_and_stakeholders rows', async () => {
+    const rows = await listFilesForProject({
+      projectId: f.extras.orgAProject.id,
+      visibleOnly: true,
+    });
+    const ids = rows.map((r) => r.id);
+    expect(ids).toContain(visibleFileId);
+    expect(ids).not.toContain(hiddenFileId);
+    for (const row of rows) {
+      expect(row.visibility).toBe('org_and_stakeholders');
+    }
+  });
+
+  test('visibleOnly: false returns all visibilities', async () => {
+    const rows = await listFilesForProject({
+      projectId: f.extras.orgAProject.id,
+      visibleOnly: false,
+    });
+    const ids = rows.map((r) => r.id);
+    expect(ids).toContain(visibleFileId);
+    expect(ids).toContain(hiddenFileId);
   });
 });
