@@ -50,23 +50,249 @@
 
 # Open Debt
 
-## DEBT-043 — PKCE code_verifier cookie mismatch between Vercel per-deploy and branch alias URLs
-**Added:** 11 May 2026 (DEBT-026 mini-session Phase F surfaced)
+## DEBT-059 — `listFilesForProject` may surface `org_only` rows to stakeholders via pooler bypass
+**Added:** 14 May 2026 (Session 11 Phase 9 observation; pre-existing — not introduced by S11)
+**Codebase:** SaaS
+**Severity:** **HIGH**
+**Type:** Bug / Security
+**Status:** Open
+
+**The debt:** `db/queries/files.ts:listFilesForProject` claims in its header comment "RLS enforces access" but uses the Drizzle pooler (`db`) which connects as the postgres role and BYPASSES RLS. The query filters only by `project_id` and `deleted_at IS NULL`. Stakeholders viewing `/portal/projects/[projectId]` may currently receive `project_files` rows where `visibility = 'org_only'` — rows the table's SELECT RLS policy would otherwise hide from them.
+
+**Why it exists:** Pre-existing from Session 10 file-upload primitive. The query was written assuming RLS would auto-filter; the comment reflects the author's belief at the time. The bug didn't surface during S10 Phase F because the test orgs didn't have `org_only` files plus stakeholders simultaneously.
+
+**Cost of leaving it:** Active data leak in production for any project that has both org-internal files AND accepted stakeholders. Severity HIGH because it bypasses an explicit privacy gate the org user set on a per-file basis. Magnitude bounded by how often `org_only` is selected in real usage — but the existence is the bug.
+
+**Fix sketch:** Add `WHERE visibility = 'org_and_stakeholders'` filter to `listFilesForProject` when the caller is a stakeholder (or always, since stakeholders see the call site and org users see all files regardless — `org_only` ⊂ stakeholders-can't-see is the gate). One-line change. Add a regression action test asserting the filter holds. ~15 min.
+
+**Trigger:** **Pre-merge audit OR immediate-post-merge mini-session.** Session 11's `db/queries/project-activity.ts` was written with the explicit-filter pattern from the start because Phase 9 surfaced this bug shape — so the activity timeline doesn't replicate the issue. The file query needs the same treatment.
+
+**Cross-references:** `db/queries/files.ts:listFilesForProject`; pattern parallel in `db/queries/project-activity.ts:listProjectActivity` (which has the `visibleOnly` flag); ARCHITECTURE-saas.md §12.4 (project_files visibility model)
+
+---
+
+## DEBT-058 — Notifications Realtime delivery broken locally (DEBT-029 pattern)
+**Added:** 14 May 2026 (Session 11 Phase 8 observation)
 **Codebase:** SaaS
 **Severity:** Medium
 **Type:** Bug
+**Status:** Open
 
-**The debt:** Magic-link Phase F walk on a preview PR: the form submitted at the stable branch alias (`pcd-saas-git-<branch>-…vercel.app`) writes the Supabase Auth PKCE `code_verifier` cookie scoped to that hostname, but `getAppUrl()` returns `https://${VERCEL_URL}` which is the per-deploy URL (`pcd-saas-<hash>-…vercel.app`). The magic-link email's `redirect_to` points to the per-deploy URL; the callback opens there with no `code_verifier` cookie and PKCE verification fails. The DEBT-026 fix is correct (email no longer points to localhost) but exposes this latent cookie-domain split.
+**The debt:** `scripts/realtime-smoke-notifications.mjs` confirms that subscriptions to `notifications:<recipientType>:<recipientId>` transition to `CLOSED` immediately on local Supabase — the same failure mode DEBT-029 documents for the `messages` channel. The `notifications` table IS in the `supabase_realtime` publication (verified Phase 1 cloud + local), RLS policies allow the subscriber to see their own rows (verified Phase 2), but the WebSocket channel handshake itself fails locally.
 
-**Why it exists:** Vercel sets `VERCEL_URL` per deployment (the deploy-specific URL), not to the stable branch alias. `VERCEL_BRANCH_URL` (introduced by Vercel specifically for this class of bug) is the per-branch alias. The helper picked `VERCEL_URL` as the simplest preview-correct option; the cookie-domain consequence wasn't surfaced until a real magic-link walk on the preview.
+**Why it exists:** Root cause uncharacterized — could be (a) Realtime container config in the local OrbStack stack, (b) a JWT/auth-context bridging issue in the local Realtime worker, (c) a Supabase Realtime CLI version drift. Cloud Realtime status during Phase F was inconclusive (the polling fallback masks the difference if Realtime ever fired faster than 30s).
 
-**Cost of leaving it:** Magic-link Phase F walks on preview PRs always fail at the PKCE verification step. Doesn't affect production (where `VERCEL_URL` resolves to the production alias and the user signs in on the same hostname). Doesn't affect local dev (single hostname). Hurts only the QA loop — but it hurts every session that wants to verify magic-link flows from preview, which is every session from Session 11 onwards (notification emails will trigger the same path).
+**Cost of leaving it:** Inbox UX has up to 30s lag on new notifications even when the publication and RLS are correctly wired. Polling fallback in `hooks/use-notifications.ts` handles it but burns DB cycles every 30s × every open notifications page. Not blocking — Phase F passed all 19 checks with polling alone. Worsens proportionally as more Realtime-dependent features land (presence indicators, typing dots in Phase 3+).
 
-**Fix sketch:** In `lib/get-app-url.ts`, prefer `VERCEL_BRANCH_URL` over `VERCEL_URL` on preview deploys (Vercel sets it to the stable branch alias). Production: keep the existing `NEXT_PUBLIC_APP_URL` override → `VERCEL_URL` fallback chain. Add a 6th regression test in `tests/actions/get-app-url.test.ts` for "VERCEL_BRANCH_URL set + VERCEL_URL set on preview → branch URL wins." ~30 min.
+**Fix sketch:** Same investigation path as DEBT-029. Suspected causes documented in DEBT-029's "Why it exists" section. The reproducer `scripts/realtime-smoke-notifications.mjs` is in the repo; pair with the existing `tests/rls/notifications.test.ts` for subscription-side RLS validation. 30-60 min diagnosis once budget is allocated.
 
-**Trigger:** Session 11 — notification emails will surface this on every Phase F walk. Recommend folding into Session 11 kickoff alongside the notification dispatch URL templating that will use `getAppUrl()` heavily.
+**Trigger:** Either (a) DEBT-029 gets prioritized — they're the same bug — or (b) a Realtime-dependent feature lands that can't tolerate 30s polling lag.
 
-**Cross-references:** DEBT-026 (resolved by PR #9 / DEBT-R004); `lib/get-app-url.ts`; ADR-032; Vercel system env var docs (`VERCEL_BRANCH_URL` vs `VERCEL_URL`)
+**Cross-references:** DEBT-029 (same pattern, messages channel); `hooks/use-notifications.ts` (polling fallback implementation); `scripts/realtime-smoke-notifications.mjs` (reproducer); ARCHITECTURE-saas.md §17 (Realtime + polling design); migration `0021_notifications.sql` (publication wiring)
+
+---
+
+## DEBT-057 — `updateMilestone` doesn't dispatch / log activity when `scheduledAt` is set on an existing placeholder
+**Added:** 14 May 2026 (Session 11 Phase 5/6 observation)
+**Codebase:** SaaS
+**Severity:** Low
+**Type:** Bug / Missing feature
+**Status:** Open
+
+**The debt:** `createMilestone` correctly dispatches `milestone.scheduled` + writes a `project_activity` row when `scheduledAt` is provided. But if the user creates a placeholder milestone (no `scheduledAt`) and later sets the date via `updateMilestone`, no notification fires and no activity row is written. The "milestone got scheduled" event silently passes through.
+
+**Why it exists:** Session 11 plan §F wired the dispatcher into 5 specific actions; `updateMilestone` wasn't on the list because the kickoff focused on creation events. The two-step "create placeholder, schedule later" workflow wasn't surfaced as a primary path.
+
+**Cost of leaving it:** Users who use the placeholder pattern lose visibility on the "milestone scheduled" event entirely — no email, no in-app, no activity row. Survey teams who track tentative dates separately from confirmed ones may rely on this workflow.
+
+**Fix sketch:** Add to `actions/milestones.ts:updateMilestone`: when `patch.scheduledAt` transitions from `NULL` to a value (and only on that transition), dispatch + log activity per the same post-commit pattern as `createMilestone`. The transition check is the tricky bit — read the old row inside the action to detect it. ~30 min including a regression test.
+
+**Trigger:** First user complaint about a "silently-scheduled milestone" OR pre-launch operational pass.
+
+**Cross-references:** `actions/milestones.ts:createMilestone` (the wired path); `actions/milestones.ts:updateMilestone` (the missing wire); ADR-033 (post-commit dispatch pattern)
+
+---
+
+## DEBT-056 — `acceptInvitation` non-transactional 3-write sequence
+**Added:** 14 May 2026 (Session 11 Phase 3 observation)
+**Codebase:** SaaS
+**Severity:** Low
+**Type:** Workaround / Risk
+**Status:** Open
+
+**The debt:** `actions/users.ts:acceptInvitation` does three DB writes in sequence outside any transaction: (1) `db.insert(users)` (new team member row), (2) `seedNotificationDefaultsTx(db, ...)` (48 preference rows), (3) `db.update(invitations)` (set `acceptedAt`). If any one fails, the others remain — partial state.
+
+**Why it exists:** `acceptInvitation` was a pre-Session-11 action that already shipped without a transaction. Session 11 Phase 3 wired the seed call but didn't refactor the existing structure — scope creep avoidance. The seed is idempotent so re-running the action would just re-attempt the invitation update, but the failure modes still produce partial states.
+
+**Cost of leaving it:** Edge case. Most common failure mode (seed fails → invitation never marked accepted) results in the user being able to re-click the magic link, hitting `STAKEHOLDER_ALREADY_INVITED` (since the users row exists), and seeing a confusing error. Won't surface in 99% of flows.
+
+**Fix sketch:** Wrap the three writes in `db.transaction(async (tx) => { ... })`. Per ADR-033 / Hard Rule 27, any side effects (email send, dispatcher) stay post-commit. The seed call accepts `DbOrTx` so it composes cleanly. ~20 min including a regression test.
+
+**Trigger:** First Sentry report of "user in users table without accepted invitation" OR opportunistic next-time-the-action-is-modified.
+
+**Cross-references:** `actions/users.ts:acceptInvitation`; `lib/notifications/seed-defaults.ts:seedNotificationDefaultsTx`; SKILL.md Hard Rule 19 (atomic multi-table writes); ADR-033 (post-commit dispatch carveout, doesn't apply here since there's no I/O)
+
+---
+
+## DEBT-055 — Conversations nav badge count appears inflated
+**Added:** 14 May 2026 (Session 11 Phase F)
+**Codebase:** SaaS
+**Severity:** Low
+**Type:** Bug
+**Status:** Open
+
+**The debt:** During Phase F, the Conversations nav badge in the org layout displayed an unread count that appeared higher than the actual unread state when verified by visiting `/conversations`. May be: (a) a stale `totalUnreadForOrgUser` query result cached at SSR time; (b) counting deleted-but-not-yet-acknowledged conversations; (c) counting messages where the user already navigated past via Realtime without a `markConversationRead` round-trip. Not reproducible enough during Phase F for a clean repro.
+
+**Why it exists:** Unknown — needs targeted investigation.
+
+**Cost of leaving it:** Mild user confusion. "Says 3 unread but I see 1" is annoying but not data-loss. The count refreshes correctly on next nav, so the discrepancy is transient.
+
+**Fix sketch:** Add Sentry breadcrumb logging on the `totalUnreadForOrgUser` query result vs the actual conversations-page-load count. Reproduce in a controlled scenario (send N messages, mark M read, expect N-M). ~1-2 hours including instrumentation + fix.
+
+**Trigger:** Pre-launch UX polish pass OR if customers complain about the badge.
+
+**Cross-references:** `app/(org)/layout.tsx` (badge render); `db/queries/conversations.ts:totalUnreadForOrgUser`
+
+---
+
+## DEBT-054 — Conversation thread empty-state layout pushes input to bottom
+**Added:** 14 May 2026 (Session 11 Phase F UX)
+**Codebase:** SaaS
+**Severity:** Low
+**Type:** UX
+**Status:** Open
+
+**The debt:** When opening an empty conversation (zero messages), the layout reserves all the vertical space for the (empty) message list and pushes the composer input to the very bottom of the viewport. Should compact the empty-state placeholder + keep the composer closer to the visual center.
+
+**Why it exists:** Default flex-grow on the messages container; no special-cased empty layout.
+
+**Cost of leaving it:** First-message UX is slightly awkward — user has to scroll or visually hunt for the composer. Cosmetic.
+
+**Fix sketch:** Conditional layout in `ConversationDetailClient.tsx` — when message list is empty, render the empty-state copy inline with the composer rather than as a flex-fill placeholder. ~30 min.
+
+**Trigger:** UX polish pass.
+
+**Cross-references:** `components/conversations/ConversationDetailClient.tsx`
+
+---
+
+## DEBT-053 — Notification bell icon styling polish
+**Added:** 14 May 2026 (Session 11 Phase F UX)
+**Codebase:** SaaS
+**Severity:** Low
+**Type:** UX
+**Status:** Open
+
+**The debt:** Phase 8 shipped a 🔔 emoji as the bell icon (avoiding a new icon dependency). Phase F observed that the emoji renders inconsistently across platforms (different sizes on macOS Chrome vs iOS Safari) and doesn't match the visual weight of the lucide icons used elsewhere in the nav.
+
+**Why it exists:** Phase 8 design choice to avoid `lucide-react` import bump; emoji "works" for an MVP but isn't a real design system fit.
+
+**Cost of leaving it:** Cosmetic. The nav looks slightly inconsistent under design review. Not blocking.
+
+**Fix sketch:** Swap the 🔔 emoji for `<Bell className="size-4" />` from `lucide-react` (already a dep). Match the sizing + spacing pattern from the Conversations link. ~5 min.
+
+**Trigger:** UX polish pass OR any time a designer reviews the layout.
+
+**Cross-references:** `app/(org)/layout.tsx`; `app/portal/layout.tsx` (both have the bell)
+
+---
+
+## DEBT-052 — "Direct" conversation label misleading with 3+ participants
+**Added:** 14 May 2026 (Session 11 Phase F UX)
+**Codebase:** SaaS
+**Severity:** Low
+**Type:** UX
+**Status:** Open
+
+**The debt:** `ConversationsInbox.tsx`'s `deriveTitle` function labels `one_to_one` conversations as "Direct" — correct semantically but misleading when the same conversation later grows to 3+ participants via `addConversationParticipant`. The conversation TYPE doesn't auto-promote from `one_to_one` to `group` on participant addition; only the participant list grows.
+
+**Why it exists:** Session 9 shipped `one_to_one` as a fixed type per ADR-026; participant promotion to `group` wasn't part of scope. The "Direct" label assumes 1:1 semantics that the underlying data doesn't enforce.
+
+**Cost of leaving it:** Mild confusion when a one_to_one thread sprouts a 3rd participant. The label still applies semantically (the conversation started 1:1) but the UX implies otherwise.
+
+**Fix sketch:** Either (a) auto-promote `type` to `group` in `addConversationParticipant` when count goes 2→3, or (b) compute the label based on current participant count rather than `type`. (b) is cleaner — `type` becomes pure history. ~20 min.
+
+**Trigger:** First user reports confusion about a "Direct" thread with 4 people.
+
+**Cross-references:** `components/conversations/ConversationsInbox.tsx:deriveTitle`; `actions/conversations.ts:addConversationParticipant`; ADR-026
+
+---
+
+## DEBT-051 — Stakeholder portal nav missing Settings link
+**Added:** 14 May 2026 (Session 11 Phase F UX)
+**Codebase:** SaaS
+**Severity:** Low
+**Type:** UX
+**Status:** Open
+
+**The debt:** The portal layout (`app/portal/layout.tsx`) has nav links for Projects, Conversations, and (after S11) Notifications. There's no Settings link — stakeholders have to either know the URL `/portal/settings/notifications` or navigate via the bell icon's "Manage preferences →" inline link. No top-level Settings entry.
+
+**Why it exists:** The portal had no settings to manage before S11 added notification preferences. Adding the nav link wasn't in the kickoff scope.
+
+**Cost of leaving it:** Stakeholders may not discover their notification preferences. Mild discoverability issue.
+
+**Fix sketch:** Add `<Link href="/portal/settings/notifications">Settings</Link>` to the portal nav. Or add a `/portal/settings` index page that lists the (one) child. ~10 min.
+
+**Trigger:** Pre-launch UX pass OR when a second `/portal/settings/*` page lands.
+
+**Cross-references:** `app/portal/layout.tsx`
+
+---
+
+## DEBT-050 — Misleading "check email to confirm" copy on stakeholder signup form
+**Added:** 14 May 2026 (Session 11 Phase F UX)
+**Codebase:** SaaS
+**Severity:** Low
+**Type:** UX / Copy
+**Status:** Open
+
+**The debt:** The stakeholder signup form (linked from the invitation email) shows "check your email to confirm" copy after submission. But the magic-link flow doesn't require email confirmation — Supabase Auth auto-confirms via the link click. The copy is a leftover from an earlier signup pattern and tells the user to do something they don't need to do.
+
+**Why it exists:** Copy carried over from the team-invitation flow which had a different confirmation mechanism. Wasn't updated when the stakeholder path adopted the cleaner magic-link contract.
+
+**Cost of leaving it:** Stakeholders may sit waiting for a (non-arriving) confirmation email when they're actually already signed in. Support burden.
+
+**Fix sketch:** Update the post-submit copy to match the actual flow: "Welcome — you're signed in. Redirecting to your portal..." with a fallback link. ~10 min.
+
+**Trigger:** Pre-launch UX pass.
+
+**Cross-references:** Stakeholder signup form component (location TBD during fix)
+
+---
+
+## DEBT-049 — Vercel 504 on `inviteStakeholder` from tx-bounded dispatcher + email sends
+**Added:** 13 May 2026 (Session 11 Phase F)
+**Codebase:** SaaS
+**Severity:** High (was — closed by hotfix)
+**Type:** Bug / Performance
+**Status:** **Resolved** 14 May 2026 (commit `61510b1`, ADR-033)
+
+**The debt (resolved):** Session 11 Phase 5 originally wired `dispatchNotification` INSIDE each action's `db.transaction(...)` per the kickoff's then-current Hard Rule 6. The dispatcher's email channel called Resend HTTPS for each recipient — every call held the transaction open for ~1-2s. Phase F's first `inviteStakeholder` walk on PR #12 preview hit Vercel 504 because total wall-clock exceeded the 10s function limit; the tx rolled back leaving a partial state (orphan `auth.users` row from an earlier sign-in attempt, no `clients`/`project_stakeholders`/`invitations` rows).
+
+**Resolution:** Adopted post-commit dispatch pattern (ADR-033). All 5 wired actions refactored in one pass: DB-only writes (domain mutation + `logActivityTx` rows) stay inside the transaction; dispatcher fan-out + outbound `sendEmail` calls move post-commit. Per-recipient failures captured to Sentry with isolated try/catch — one Resend hiccup doesn't kill the rest of the fan-out, and no notification failure ever rolls back a committed domain write. Cleanup script `scripts/cleanup-debt049-orphans.ts` removed the orphaned `auth.users` row so the test email could be re-used. Phase F re-walk post-hotfix: 19/19 PASS. SKILL.md Hard Rule 27 codifies the pattern for future I/O-emitting actions.
+
+**Cross-references:** ADR-033; SKILL.md Hard Rule 27 (v3.6 → v3.7); commit `61510b1` (hotfix); `actions/{messages,projects,files,stakeholders,milestones}.ts` (all 5 refactored); `scripts/cleanup-debt049-orphans.ts` (orphan cleanup tool)
+
+---
+
+## DEBT-048 — No UI for team-internal conversations
+**Added:** 14 May 2026 (Session 11 Phase F UX)
+**Codebase:** SaaS
+**Severity:** Low
+**Type:** Missing feature
+**Status:** Open
+
+**The debt:** Session 9 shipped the conversations primitive with `general`, `one_to_one`, and `group` types. The org-side `/conversations` inbox shows org↔client threads but offers no path to create a team-only conversation (e.g., two surveyors chatting about a project without the client seeing). The `general` type with no client participant is structurally possible but there's no UI button to create one.
+
+**Why it exists:** S9 scope was org↔client messaging; team-internal was a known absent feature. Session 11 didn't add it either.
+
+**Cost of leaving it:** Surveyors who want to chat about a project privately fall back to Slack / iMessage / email — losing the in-app context. Adoption headwind.
+
+**Fix sketch:** Add a "New team thread" button next to the existing "New conversation" affordance. Wire to a new `createTeamConversation` action that inserts a `group`-type conversation with only org-member participants (no client). RLS already supports this — client-side queries already filter by participation. ~2-3 hours including UI + action + tests.
+
+**Trigger:** First user request for team-only chat OR pre-launch UX pass.
+
+**Cross-references:** `app/(org)/conversations/page.tsx`; `actions/conversations.ts:createGroupConversation` (existing, can be reused with the new entry point)
 
 ---
 
@@ -907,6 +1133,20 @@ Likely also need to audit `actions/orgs.ts createOrganization` for any callers t
 
 # Resolved Debt
 
+## DEBT-R005 — `VERCEL_BRANCH_URL` preference for preview magic-link PKCE
+**Resolved:** 11 May 2026 in PR #11 commit `6b17806` (Phase 0 of Session 11)
+**Codebase:** SaaS
+**Severity:** Medium → Resolved
+**Type:** Bug (was DEBT-043)
+
+**The debt was:** Magic-link Phase F walks on Vercel preview PRs always failed PKCE verification. The form submitted at the stable branch alias (`pcd-saas-git-<branch>-…vercel.app`) wrote the Supabase Auth `code_verifier` cookie scoped to that hostname; `getAppUrl()` returned `https://${VERCEL_URL}` which is the per-deploy URL (`pcd-saas-<hash>-…vercel.app`). The magic-link email's `redirect_to` pointed to the per-deploy URL; the callback opened there with no cookie and PKCE failed. Surfaced during the DEBT-026 mini-session's Phase F walk — DEBT-026's fix was correct (no more localhost leaks) but exposed this latent Vercel per-deploy vs branch-alias cookie-domain split. Blocked every magic-link Phase F walk from Session 9 onwards.
+
+**Resolution:** `lib/get-app-url.ts` now prefers `VERCEL_BRANCH_URL` over `VERCEL_URL` on preview/dev deploys. Vercel sets `VERCEL_BRANCH_URL` to the stable per-branch alias — same hostname as where the form was submitted, so the PKCE cookie survives the round-trip. Production chain unchanged (`NEXT_PUBLIC_APP_URL` custom-domain override → `VERCEL_URL` production alias). Test suite extended 5 → 6 cases covering "VERCEL_BRANCH_URL + VERCEL_URL both set on preview → branch URL wins." Shipped as Session 11 Phase 0 to unblock the rest of the session's Phase F walks. Verified by user: "Magic-link round-trip verified. Email redirect_to pointed to branch alias (pcd-saas-git-debt-043-pkce-branch-url-…), clicked successfully, landed at /onboarding authenticated. No PKCE error."
+
+**Cross-references:** ADR-032 (`getAppUrl()` contract — reconsider-if clause anticipated this); SKILL.md Hard Rule 26; PR #11; commit `6b17806`; pre-fix tag `pre-session-11` at `d56b568`; DEBT-R004 (DEBT-026, the trigger that exposed this); Vercel system env var docs (`VERCEL_BRANCH_URL` vs `VERCEL_URL`)
+
+---
+
 ## DEBT-R004 — `getAppUrl()` helper for app-public URL construction
 **Resolved:** 11 May 2026 in PR #9 commit `aa6899d`
 **Codebase:** SaaS
@@ -1013,8 +1253,8 @@ For quick lookup of what needs to happen at each upcoming milestone:
 ## HOTFIX before Session 11 (must land before S11 kickoff)
 - _(empty — DEBT-037 resolved 10 May 2026 by PR #7 commit `0565777`, ADR-031)_
 
-## Session 11 candidates (notifications + activity)
-- DEBT-043: PKCE cookie mismatch on Vercel preview magic-link walks (surfaced by DEBT-026 fix; recommend folding into S11 kickoff so notification-email Phase F can use magic-link path)
+## Session 11 candidates (notifications + activity) — ✓ SHIPPED 14 May 2026
+- DEBT-043: PKCE cookie mismatch on Vercel preview magic-link walks → **Resolved** 11 May 2026 (Phase 0 of Session 11, PR #11 commit `6b17806`) — see DEBT-R005
 - DEBT-029: Realtime subscription not auto-updating message UI
 - DEBT-030: Project detail UI lacks deep-link to conversations (file portion resolved)
 - DEBT-031: Unread badge in nav + per-row indicator

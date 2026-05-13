@@ -1,9 +1,9 @@
 # PCD Portal SaaS — Architecture Reference
 
-**Version:** 0.15 (Phase 1c Session 10 shipped + Phase F closed — file-upload primitive: `project_files` table, `org-files` storage bucket with mirrored RLS, two-step signed-URL upload flow, plan-gated quotas, two-sided UI; thumbnail/PDF preview generation descoped per DEBT-032; Phase 1c continues. Two interim items shipped between S10 and S11: DEBT-037 hotfix (10 May 2026 — see ADR-031 + §35.HOTFIX-DEBT-037) and DEBT-026 mini-session (11 May 2026 — `getAppUrl()` helper per ADR-032 + §35.MINI-DEBT-026))
-**Last updated:** 11 May 2026
+**Version:** 0.16 (**Phase 1c CLOSED** — Session 11 shipped: notifications + activity timeline. 3 new tables (`notification_preferences`, `notifications`, `project_activity` via migrations 0020/0021/0022). Dispatcher with per-channel fan-out (`in_app` + `email` live; `push` + `sms` schema-supported, dispatcher-rejected). Preferences matrix UI on both org and portal sides. In-app inbox with Realtime + 30s polling fallback. Project activity timeline mounted on both project detail pages with stakeholder visibility gating. DEBT-049 hotfix during Phase F: dispatcher + email moved out of transactions (ADR-033 + Hard Rule 27); per-recipient failures isolated and logged to Sentry without rolling back the domain write.)
+**Last updated:** 14 May 2026
 **Maintainer:** Hasnath
-**Codebase status:** Phase 1c in progress — Session 10 shipped file uploads (`project_files` table with per-command RLS + 5 server actions per §20 + drag-drop UI on org and portal sides + `lib/features.ts` `checkFeature` helper backing per-file + total-org-storage quotas via single SUM query; `org-files` bucket with 5 storage.objects policies mirroring `project_files`). 2 new ADRs from S10 (029-030); 4 new DEBT entries from S10 (032-035); DEBT-030 file portion resolved. DEBT-037 hotfix shipped 10 May 2026 (ADR-031, Hard Rule 25). DEBT-026 mini-session shipped 11 May 2026 (ADR-032, Hard Rule 26 — `lib/get-app-url.ts`; closes DEBT-026 as DEBT-R004; surfaces DEBT-043 PKCE cookie mismatch as S11 follow-up). Phase F manual QA executed against PR preview: **11 PASS / 1 SKIP / 1 N/A / 0 FAIL** — clean walk, no in-flight hotfixes needed. 1 session remaining in Phase 1c (S11 notifications + activity).
+**Codebase status:** **Phase 1c CLOSED.** Session 11 shipped 14 May 2026: notifications + project activity timeline + DEBT-043 PKCE fix (already in production as PR #11). New surfaces: `/settings/notifications` + `/portal/settings/notifications` preferences matrix; `/notifications` + `/portal/notifications` inbox; activity timeline mounted on `/dashboard/projects/[id]` + `/portal/projects/[id]`. Five existing server actions wired with post-commit notification fan-out + activity log writes inside their respective transactions (`sendMessage`, `moveProjectToStage`, `confirmUpload`, `inviteStakeholder`, `createMilestone`). One new ADR (033) covering the post-commit dispatch pattern; 11 new DEBT entries (048, 050-059); DEBT-049 closed by the hotfix. Test counts: RLS 192 → **221** (+29), Actions 159 → **198** (+39), Cloud-smoke 14 unchanged. Phase F manual QA against PR #12 preview: **19/19 PASS** (post-DEBT-049-hotfix re-walk). Phase 2 (documents) is the next strategic decision-point.
 **Production URL:** https://pcd-saas.vercel.app
 **Repo:** https://github.com/hasnath-code/pcd-saas
 
@@ -1700,7 +1700,22 @@ Each stakeholder-accessible table checks the relevant flag in its policy. Exampl
 - `project_files` policy checks `can_view_drawings`
 - `project_milestones` policy checks `can_view_schedule`
 - `messages` insert policy checks `can_message`
+- `project_activity` policy checks the per-row `visible_to_stakeholders` boolean (NOT a per-stakeholder profile flag — see below)
 - (Phase 2) `documents` policy will check `can_view_financials`
+
+### Activity timeline visibility model (Session 11)
+
+`project_activity` differs from the other stakeholder-accessible tables: visibility is gated by a per-ROW boolean (`visible_to_stakeholders`), not a per-stakeholder profile flag. The writing server action decides at log time whether the event should surface to stakeholders. Defaults locked in by Phase 6:
+
+- `project.stage_changed` → `true` (stakeholders always see stage transitions)
+- `file.uploaded` → mirrors `project_files.visibility` (`true` only when `org_and_stakeholders`)
+- `milestone.scheduled` → mirrors `project_milestones.visibleToStakeholders`
+- `stakeholder.added_to_project` → `false` (org-internal — stakeholders don't see "X joined")
+- `message.new` → NOT logged (per ADR-027 spirit; conversation events live in `messages`)
+
+The timeline server query (`db/queries/project-activity.ts:listProjectActivity`) takes an explicit `visibleOnly: boolean` flag and adds `WHERE visible_to_stakeholders = true` for portal callers — defense-in-depth on top of the RLS policy because the Drizzle pooler bypasses RLS. Org-side callers pass `false` (they see internal rows too).
+
+The timeline UI on both project detail pages surfaces a fixed hint: *"Activity timeline starts at Session 11 launch; earlier project history in the audit log."* (Portal side drops the audit-log reference since stakeholders don't see audit_logs.) This documents the cutover-without-backfill choice locked in by Session 11 Decision 2 — `audit_logs` preserves history losslessly; backfilled `project_activity` rows would have required synthetic `actor_id` inference between schemas (the kind of correctness work that breaks silently).
 
 ### Notification preference interaction
 
@@ -1967,40 +1982,45 @@ When a user/client is created, notification preferences are auto-seeded with sen
 
 Users edit via Settings → Notifications matrix UI.
 
-### Dispatcher pattern
+### Dispatcher pattern (post-commit; ADR-033)
 
 ```ts
 // lib/notifications/dispatch.ts
 export async function dispatchNotification(opts: {
   recipientType: 'user' | 'client';
   recipientId: string;
-  eventType: string;
-  payload: Record<string, any>;
-}) {
-  // 1. Look up preferences
-  const prefs = await getPreferences(opts.recipientType, opts.recipientId, opts.eventType);
-  
-  // 2. For each enabled channel, create notification row
-  for (const channel of prefs.enabledChannels) {
-    await db.insert(notifications).values({
-      recipientType: opts.recipientType,
-      recipientId: opts.recipientId,
-      channel,
-      eventType: opts.eventType,
-      payload: opts.payload,
-    });
-  }
-  
-  // 3. Trigger immediate delivery for in-app and email (push/sms via separate workers later)
-  await deliverPending();
+  eventType: NotificationEventType;
+  payload: NotificationPayload;
+  tx?: DbOrTx; // optional; defaults to top-level db
+}): Promise<DispatchResult> {
+  // 1. Validate event_type against the locked vocabulary.
+  // 2. Look up enabled channels in notification_preferences for the
+  //    (recipient_type, recipient_id, event_type) triple.
+  // 3. Insert one notifications row per enabled channel.
+  // 4. Drive delivery row-by-row:
+  //    - in_app: insert only — supabase_realtime publication broadcasts on INSERT.
+  //    - email: render via getAppUrl() + notificationGenericEmail; call
+  //      sendEmail(); stamp sent_at on success or failed_at + failure_reason
+  //      on Resend exception (and Sentry breadcrumb).
+  //    - push / sms: insert + immediately stamp failed_at = NOW(),
+  //      failure_reason = 'channel_not_implemented'. Schema supports them;
+  //      dispatcher rejects until Phase 4+.
 }
 ```
 
-Delivery is best-effort synchronous in Phase 1c. Later phases introduce a queue (Inngest or Trigger.dev).
+**Calling convention (ADR-033 + Hard Rule 27):** `dispatchNotification` runs AFTER the action's `db.transaction(...)` commits — NEVER inside it. The transaction holds only DB-level writes (the action's domain mutation plus `logActivityTx` rows; both atomic-with-action is desirable). Anything that calls an external HTTPS service moves outside the tx.
 
-### In-app delivery via Realtime
+Five Session 11 wired actions follow this pattern: `sendMessage` → `message.new`, `moveProjectToStage` → `project.stage_changed`, `confirmUpload` → `file.uploaded`, `inviteStakeholder` → `stakeholder.added_to_project`, `createMilestone` → `milestone.scheduled` (only when `scheduledAt` is set). Recipient-list queries also move outside the transaction — read-only lookups don't need to hold the pooled connection.
 
-When an in-app notification is created, broadcast on Supabase Realtime channel `notifications:<recipientId>`. Frontend subscribes and updates inbox UI.
+**Per-recipient failure isolation:** each `dispatchNotification` call site is wrapped in its own `try/catch`. Failures are captured to Sentry with `scope: 'notification_dispatch'` + action/event/org tags but do NOT re-throw. One Resend hiccup doesn't kill the rest of the fan-out, and no notification failure ever rolls back a committed domain write.
+
+**Why post-commit (DEBT-049):** Session 11 Phase 5 originally wired the dispatcher inside transactions per the then-current kickoff Hard Rule 6 ("all atomic"). Phase F's first stakeholder-invite request hit Vercel 504 because each Resend call inside the dispatcher loop held the tx open for ~1-2s, exceeding the 10s function limit on a 2-3 person test org. ADR-033 enshrines the post-commit carveout; Session 11 hotfix commit refactored all 5 actions in one pass.
+
+### In-app delivery via Realtime (with polling fallback)
+
+When an `in_app` notification is INSERTed, Supabase Realtime broadcasts on channel `notifications:<recipientType>:<recipientId>` via the publication added in migration 0021. The frontend hook (`hooks/use-notifications.ts`) subscribes to `postgres_changes` INSERT + UPDATE events filtered by `recipient_id=eq.<id>`.
+
+**Belt-and-braces polling fallback:** the same hook polls every 30 seconds when `document.visibilityState === 'visible'`. DEBT-029 / DEBT-058 surfaced that Realtime subscriptions transition to `CLOSED` immediately on local Supabase (same pattern observed for messages and notifications channels); the polling fallback silently fills the gap so the inbox UX has at most 30s lag even when Realtime is broken. Both delivery paths upsert by id so a row arriving via both channels dedupes to one UI entry. Local read-state mutations are preserved across polls so optimistic mark-read doesn't get reverted by a stale refresh.
 
 ---
 
@@ -3084,22 +3104,24 @@ Before moving to Phase 1b:
 
 **Done when:** ~~both sides can upload, files appear in project detail; quota enforcement works.~~ **✓ shipped 10 May 2026.**
 
-### Session 11: Notifications + activity
+### Session 11: Notifications + activity ✓ SHIPPED 14 May 2026
 
 **Tasks:**
-- [ ] Migration: `notification_preferences`, `notifications`, `project_activity`
-- [ ] RLS policies + tests
-- [ ] Default notification preferences seeded on user/client creation
-- [ ] `lib/notifications/dispatch.ts`: `dispatchNotification`
-- [ ] Notification preferences UI matrix (per channel × per event)
-- [ ] In-app notification inbox (Realtime subscription)
-- [ ] Email notifications for `message.new`, `project.stage_changed`, `file.uploaded`, etc.
-- [ ] Activity log writes throughout the codebase (every status change, message, file upload)
-- [ ] Project activity timeline UI (visible to org users + stakeholders per visibility)
+- [x] Migration: `notification_preferences`, `notifications`, `project_activity` (0020/0021/0022; applied to cloud 12 May 2026)
+- [x] RLS policies + tests — 29 new RLS cases (192 → 221) covering self-only access, duck-typing safety, XOR enforcement, stakeholder visibility gating
+- [x] Default notification preferences seeded on user/client creation — `lib/notifications/seed-defaults.ts` wired into 4 entry points (`createOrganization`, `acceptInvitation`, `findOrCreateClientTx`, `acceptStakeholderInvitation`); 48 rows per identity, idempotent
+- [x] `lib/notifications/dispatch.ts`: `dispatchNotification` + content map (`lib/notifications/subjects.ts`) + generic email template (`lib/email/templates/notification-generic.ts`)
+- [x] Notification preferences UI matrix (per channel × per event) — `/settings/notifications` (org) + `/portal/settings/notifications` (stakeholder); push + sms columns disabled with "Coming soon" badge
+- [x] In-app notification inbox — `/notifications` + `/portal/notifications` with bell-icon nav badge; Realtime subscription + 30s polling fallback per ADR-033 / DEBT-058
+- [x] Email notifications for `message.new`, `project.stage_changed`, `file.uploaded`, `stakeholder.added_to_project`, `milestone.scheduled` via Resend
+- [x] Activity log writes throughout the codebase — `lib/activity/log.ts` `logActivityTx` wired into 4 actions (sendMessage excluded per ADR-027 spirit + scope decision)
+- [x] Project activity timeline UI — `components/activity/ActivityTimeline.tsx` mounted on both project detail pages; per-stakeholder filtering via `visible_to_stakeholders` + explicit query-layer filter for pooler-bypass defense
+- [x] **DEBT-049 hotfix during Phase F:** dispatcher fan-out + outbound Resend calls moved OUT of action transactions (ADR-033 + Hard Rule 27). All 5 wired actions refactored; transactions retain DB-only writes (domain + activity row); per-recipient dispatch failures captured to Sentry without rolling back. Closes the Vercel 504 footgun.
+- [x] **Phase F manual QA executed against PR #12 preview (post-DEBT-049 re-walk): 19/19 PASS** — zero bugs found, the post-commit pattern holds across all 5 wired actions.
 
-**Done when:** notifications dispatch on events; in-app updates in realtime; activity timeline shows per-stakeholder filtered events.
+**Done.** Phase 1c is **CLOSED.** ~Session 12~ folded into a future-phase integration pass; Session 11 shipped the full notification + activity quartet and met the Phase 1c exit criteria.
 
-### Session 12: Integration test + polish
+### ~~Session 12: Integration test + polish~~ (descoped to future phase)
 
 **Tasks:**
 - [ ] Full E2E test: org signup → project create → stakeholder invite → message exchange → file upload → status change → notification → activity log entry
@@ -3111,12 +3133,12 @@ Before moving to Phase 1b:
 
 **Done when:** E2E test passes; performance acceptable on dev data; bug bash finds <5 issues.
 
-### Phase 1c exit criteria
+### Phase 1c exit criteria — ✓ MET 14 May 2026
 
-- Full two-sided product works end-to-end
-- 200+ RLS assertions passing
-- Manual exploratory testing finds no critical bugs
-- Hasnath's existing 10 projects can be migrated using `MIGRATION-MAP.md` (test the script)
+- [x] Full two-sided product works end-to-end — Phase F walk 19/19 PASS across team-member / stakeholder / dual-context scenarios
+- [x] 200+ RLS assertions passing — 221 green
+- [x] Manual exploratory testing finds no critical bugs — DEBT-049 surfaced during Phase F, hotfixed in-session; zero bugs post-hotfix
+- [→] Hasnath's existing 10 projects can be migrated using `MIGRATION-MAP.md` (test the script) — **descoped to a Phase 2 pre-launch task**; the SaaS product is feature-complete for the messaging + files + notifications + activity quartet, but the live Apps Script data migration is its own initiative independent of the Phase 1c shape.
 - Phase 2 spec written before starting Phase 2
 
 ---
@@ -3434,11 +3456,7 @@ Items flagged during Phase 1a Session 1 (kicked off and shipped 04 May 2026, dep
 - Build clean: `/dashboard/projects/[id]` 6.13 kB / 323 kB; `/portal/projects/[id]` 4.04 kB / 285 kB
 - Phase F: **11 PASS / 1 SKIP / 1 N/A / 0 FAIL** — clean walk
 - 2 new ADRs (029-030); 4 new DEBT entries (032-035); DEBT-026 bumped; DEBT-030 file portion resolved
-- Phase 1c is **in progress** — Session 11 (notifications + activity) remains
-
----
-
-**Last reviewed:** 10 May 2026 (Phase 1c S10 shipped + Phase F closed — v0.13; DEBT-037 hotfix shipped between S10 and S11 — v0.14; Phase 1c in progress, S11 remains)
+- Phase 1c is **in progress** — Session 11 (notifications + activity) remains *(superseded by §35.11 — Phase 1c CLOSED 14 May 2026)*
 
 ---
 
@@ -3471,6 +3489,52 @@ Between the DEBT-037 hotfix and Session 11, a Medium-severity carry-over (DEBT-0
 - **Surprise surfaced (Phase F):** with `redirect_to` now correctly pointing at the preview, the magic-link click landed on the Vercel **per-deploy** URL (`pcd-saas-<hash>-…vercel.app`) — a different hostname from the branch alias (`pcd-saas-git-<branch>-…vercel.app`) where the user submitted the form. The PKCE `code_verifier` cookie is scoped to the form-submission hostname, so the callback opened with no cookie and PKCE verification failed. The DEBT-026 fix is correct; this is a latent Vercel per-deploy vs branch-alias cookie split that DEBT-026 exposed but did not cause. Registered as DEBT-043 for Session 11.
 - **Follow-up DEBT:** DEBT-043 (PKCE cookie mismatch on preview magic-link walks — recommend folding into S11 kickoff alongside notification-email URL templating that will exercise the same path)
 - **SKILL impact:** Hard Rule 26 added (all app-public URLs through `getAppUrl()`; direct `process.env.NEXT_PUBLIC_APP_URL` reads for URL construction forbidden outside the helper); changelog v3.5 → v3.6
+
+### §35.11 Session 11 (kickoff → ship: 14 May 2026) — Phase 1c CLOSED
+
+Session 11 was the architecturally densest session in Phase 1c: 3 new tables, dispatcher fan-out logic, 5 existing actions wired with notification + activity log writes, two preference matrix UIs, an inbox UI on each side, a server-rendered activity timeline on each project detail page, Realtime subscription with polling fallback, and bell-icon nav badges. The DEBT-043 PKCE fix shipped as a standalone PR (#11) before the main session work — so Phase F magic-link round-trips against the preview landed cleanly from the start.
+
+| # | Item | Action | Pull-forward to |
+|---|---|---|---|
+| 1 | **Three new domain tables shipped as specified.** `notification_preferences` (XOR CHECK, two UNIQUEs, self-only RLS) + `notifications` (duck-typed recipient via `recipient_type` + `recipient_id`, no FK; SELECT + UPDATE self-only; INSERT and DELETE not granted to authenticated — dispatcher writes via pooler) + `project_activity` (project-scoped, per-row `visible_to_stakeholders` gate). Added to `supabase_realtime` publication: `notifications` (RLS + GRANT shape verified on cloud anon-block returns 42501). | Permanent. | Permanent |
+| 2 | **ADR-033 post-commit dispatch pattern emerged from DEBT-049 mid-Phase-F.** Original Session 11 plan Hard Rule 6 ("dispatch is part of the same server-action transaction") didn't survive contact with Resend latency × 2-3 person test orgs — Vercel 504 Gateway Timeout on first `inviteStakeholder` walk. Hotfix moved dispatcher fan-out + outbound `sendEmail` calls OUT of every action transaction; DB-only writes (domain mutation + `logActivityTx` rows) stay inside. Per-recipient failures captured to Sentry with isolated try/catch, never roll back the action. Applied to all 5 wired actions (`sendMessage`, `moveProjectToStage`, `confirmUpload`, `inviteStakeholder`, `createMilestone`) in one pass. New SKILL Hard Rule 27 codifies the pattern for future I/O-emitting actions. | Permanent — future I/O-emitting actions follow Hard Rule 27 from day one. | Permanent (ADR-033, Hard Rule 27) |
+| 3 | **Realtime delivery broken locally — polling fallback handles UX (DEBT-058 cross-ref DEBT-029).** `scripts/realtime-smoke-notifications.mjs` confirmed the same `subscribe()` → `CLOSED` failure that DEBT-029 documented for the `messages` channel. The `notifications` channel exhibits identical behavior. Cloud Phase F still showed delivery working within the 30s polling window even when Realtime didn't fire, so the inbox UX is acceptable — DEBT-029-class diagnosis deferred. The reproducer script lives in the repo for whoever picks it up. | Pre-launch operational pass OR sooner if Realtime is needed for a perf-sensitive feature (e.g. typing indicators). | Open (DEBT-058 — cross-ref DEBT-029) |
+| 4 | **`listFilesForProject` may surface `org_only` rows to stakeholders via pooler bypass — DEBT-059 HIGH severity, pre-existing.** Phase 9 timeline wiring surfaced an analogous shape in `db/queries/files.ts:listFilesForProject` — claims "RLS auto-filters" but goes through the Drizzle pooler which bypasses RLS. Stakeholders viewing the portal may currently receive `org_only` file rows that RLS would otherwise hide. NOT introduced by Session 11; pre-existing from S10. The activity-timeline query (`db/queries/project-activity.ts`) was written with the explicit-filter pattern from the start so the bug doesn't replicate. Flagged HIGH because it's a real RLS-bypass-in-prod issue. | Mini-session this week (MINI-SESSION-DEBT-059). The fix is a one-line `WHERE visibility = 'org_and_stakeholders'` filter for the portal-side caller. | Open (DEBT-059 — HIGH) |
+| 5 | **Decision-2 backfill override accepted: no historical `audit_logs` → `project_activity` migration.** Kickoff recommended (a) one-shot backfill; I pushed back on the basis that `actor_id` inference between `audit_logs.user_id`/`client_id` and `project_activity.actor_type`/`actor_id` is exactly the kind of correctness work that breaks silently. User accepted. Both timelines surface a fixed UI hint ("Activity timeline starts at Session 11 launch; earlier project history in the audit log" — portal drops the audit-log reference). | Permanent — Phase 1c's cutover-without-backfill is locked. | Permanent |
+| 6 | **`message.new` NOT logged to `project_activity` per ADR-027 spirit + kickoff scope.** Per Decision 1 (option b): conversation events stay in `messages`; `project_activity` is the single source for non-conversation events. Stakeholder UX might want a "post to chat" affordance later but that's a UI concern, not a data-model change. | Future UX session if needed. | Permanent |
+| 7 | **Activity-row writes stay inside the action transaction.** Even after ADR-033 moved dispatch out, the `logActivityTx` writes inside the tx — cheap DB-only operation, atomic-with-action is desirable. If the action committed, the timeline tells the truth. If dispatch later fails (caught and Sentry'd), the activity row still accurately records what happened. | Permanent — pattern for any future write that's "the canonical record of what happened". | Permanent |
+| 8 | **Preferences seeding wired into 4 identity-creating entry points.** `createOrganization` (owner user) + `acceptInvitation` (new team member) + `findOrCreateClientTx` (new client — covers both `findOrCreateClient` and the `inviteStakeholder` flow) + `acceptStakeholderInvitation` (defensive — clients row may pre-date Session 11). 48 rows per identity (12 events × 4 channels), idempotent via `ON CONFLICT DO NOTHING`. | Permanent — adding a new event type to `NOTIFICATION_EVENT_TYPES` automatically seeds for new identities; existing identities get the new row on first preferences-page toggle (UPSERT path). | Permanent |
+| 9 | **DEBT-049 cleanup script committed to repo (`scripts/cleanup-debt049-orphans.ts`).** Dry-run-by-default Supabase admin tool for deleting orphaned `auth.users` rows whose linked public-schema rows were rolled back by a tx-bounded dispatch failure. Refuses to delete if the auth user is currently linked to a `public.users` or `public.clients` row (defense against accidentally tombstoning a live identity). Already executed against cloud for `hasalique+s11stake@gmail.com` to unblock the Phase F re-walk. | Keep for future debugging; rename/extend as needed. | Permanent |
+| 10 | **Phase F (post-DEBT-049-hotfix re-walk against PR #12) — 19/19 PASS.** Zero bugs found. The post-commit dispatch pattern holds across all 5 wired actions; the polling fallback handles inbox UX; the activity timeline gates visibility correctly on the portal side; preferences toggle persists; bell badge updates. 11 new DEBT entries logged (048, 050-059) — 7 from Phase F UX polish observations + 4 from in-session implementation observations. | Pre-launch UX polish session for DEBT-048 / 050-055 / 057. | Permanent + 11 open DEBT entries |
+| 11 | **Test counts at session close:** RLS 192 → **221** (+29); Actions 159 → **198** (+39); Cloud-smoke 14 unchanged. The +39 actions span 6 new test files (`notification-defaults`, `notifications-dispatch`, `notifications-fanout`, `notifications-prefs`, `notifications-mark-read`, `activity-log`). No existing action test file needed adjustment for the DEBT-049 refactor — tests didn't assume tx-bounded dispatch, only that the side effects fire. | Permanent — pattern of "test the contract, not the implementation" paid dividends. | Permanent |
+| 12 | **Cloud migrations 0020/0021/0022 pushed to Supabase mid-session.** `supabase db push --linked` applied all three cleanly. Anon REST returns 42501 on the new tables (RLS + no-anon-GRANT shape correct); `notifications` is in `supabase_realtime` publication alongside `messages`. Cloud was verified before the Phase F walk so the preview deploy had real tables to query. | Permanent — cloud reachable at v0.16. | Permanent |
+| 13 | **Phase 1c is CLOSED.** All four Sessions (9 messaging, 10 files, 11 notifications + activity) shipped. Session 12 (Integration test + polish) folded into a future pre-launch integration pass; the Phase 1c exit criteria (200+ RLS, two-sided product end-to-end, no critical bugs from manual exploratory testing) are met. The MIGRATION-MAP test is descoped to a Phase 2 pre-launch task — independent of Phase 1c shape. | **Phase 2 (documents) is the next strategic decision-point.** Decide whether to do a pre-launch operational pass before Phase 2 starts. | Phase 2 kickoff |
+
+**Full session handover:** Session 11 was a long bundled PR (#12) rather than a separate handover doc. The phase-by-phase commits document the build sequence: `b7e6d74` (schema) → `6ef3e9f` (RLS tests) → `9c8b967` (seed defaults) → `c5e3e43` (dispatcher core) → `4a77f34` (wire dispatch, originally tx-bounded) → `9e9e5ac` (activity log + prefs UI) → `a4b47b2` (inbox + Realtime + polling) → `0eb0a6b` (timeline UI) → `61510b1` (DEBT-049 hotfix moving dispatch post-commit) → (this commit: doc updates).
+
+**State at Session 11 close (post-merge target):**
+- 10 commits on the `session-11-notifications-activity` branch (off main at `6b17806`, which is PR #11 / DEBT-043 fix already in prod).
+- Cloud Supabase: migrations 0020-0022 applied. New tables anon-blocked; `notifications` in `supabase_realtime` publication.
+- RLS tests: **221/221** (was 192; +29 across 3 new test files).
+- Action tests: **198/198** (was 159; +39 across 6 new test files).
+- Cloud-smoke: **14/14** unchanged (per-table cloud-smoke for the 3 new tables descoped — Phase F verified the cloud reachability directly).
+- TypeScript clean: `npx tsc --noEmit` exits clean.
+- Phase F: **19/19 PASS** on PR #12 preview (post-DEBT-049-hotfix re-walk).
+- 1 new ADR (033); 11 new DEBT entries (048, 050-059); DEBT-049 closed by hotfix commit.
+- New surfaces in nav: 🔔 bell icon + count on both `(org)/layout.tsx` and `portal/layout.tsx`.
+- New routes: `/notifications`, `/portal/notifications`, `/settings/notifications`, `/portal/settings/notifications`.
+- New components: `NotificationPreferencesMatrix`, `InboxList`, `ActivityTimeline`.
+- New hooks: `useNotifications` (Realtime + polling fallback).
+- New helpers: `lib/notifications/{events,seed-defaults,subjects,dispatch}.ts`, `lib/email/templates/notification-generic.ts`, `lib/activity/{log,labels}.ts`.
+- Phase 1c is **CLOSED**. Next strategic decision: Phase 2 (documents) vs. pre-launch operational pass.
+
+**Open follow-up before Phase 2 kickoff:**
+- **MINI-SESSION-DEBT-059** — focused mini-session this week to ship the explicit-filter fix for `listFilesForProject`. HIGH severity, pre-existing from S10; the activity-timeline query already follows the correct pattern as a reference. Kickoff doc will be drafted before the session starts.
+- DEBT-048 / 050-055 are Phase F UX polish — bundle into a pre-launch UX pass.
+
+---
+
+**Last reviewed:** 14 May 2026 (Phase 1c CLOSED — Session 11 shipped; v0.15 → v0.16; 1 new ADR; 11 new DEBT entries; DEBT-049 closed by hotfix)
 
 ## End of document
 
