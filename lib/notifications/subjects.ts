@@ -130,6 +130,22 @@ export const NOTIFICATION_CONTENT: Record<
     ctaLabel: 'Open project',
     ctaPath: projectPath(p, 'org'),
   }),
+  // Phase 2 Session 12 stubs — used as activity event types only this
+  // session; no dispatchNotification calls yet. Strings are written as if
+  // they were dispatchable so Session 13/14 can wire dispatches without
+  // editing copy. Recipient-side rewrite still applies to ctaPath.
+  'quote.sent': (p) => ({
+    subject: `Quote ${s(p.documentNumber, '')} sent`,
+    bodyText: `Quote ${s(p.documentNumber, '')} on ${s(p.projectNumber, 'a project')} was sent to the client.`,
+    ctaLabel: 'Open project',
+    ctaPath: projectPath(p, 'org'),
+  }),
+  'quote.accepted': (p) => ({
+    subject: `Quote ${s(p.documentNumber, '')} accepted`,
+    bodyText: `Quote ${s(p.documentNumber, '')} on ${s(p.projectNumber, 'a project')} was accepted by ${s(p.acceptedByName, 'the client')}.`,
+    ctaLabel: 'Open project',
+    ctaPath: projectPath(p, 'org'),
+  }),
 };
 
 // Thin facade for callers that only need the subject string (audit logs,

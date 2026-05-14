@@ -23,6 +23,17 @@ export const NOTIFICATION_EVENT_TYPES = [
   'file.uploaded',
   'milestone.scheduled',
   'milestone.completed',
+  // Phase 2 Session 12: quote lifecycle. Used as activity-row event types
+  // (logActivityTx requires NotificationEventType). No dispatchNotification
+  // calls in Session 12 — adding them here keeps NOTIFICATION_CONTENT
+  // exhaustive (compile-time enforced) and lets Session 13/14 wire
+  // dispatches without re-touching this file. Existing identities don't
+  // have notification_preferences rows for these new types; the seed-on-
+  // identity-create path covers new identities, and a backfill migration
+  // is the natural shape if/when dispatch is wired (see DEBT note for
+  // future-Phase-2-Session-13).
+  'quote.sent',
+  'quote.accepted',
 ] as const;
 
 export type NotificationEventType = (typeof NOTIFICATION_EVENT_TYPES)[number];
