@@ -29,6 +29,8 @@ const EVENT_LABELS: Record<NotificationEventType, string> = {
   'file.uploaded': 'File uploaded',
   'milestone.scheduled': 'Milestone scheduled',
   'milestone.completed': 'Milestone completed',
+  'quote.sent': 'Quote sent',
+  'quote.accepted': 'Quote accepted',
 };
 
 function renderSummary(

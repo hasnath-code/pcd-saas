@@ -21,6 +21,8 @@ const LABELS: Record<NotificationEventType, string> = {
   'file.uploaded': 'uploaded a file',
   'milestone.scheduled': 'scheduled a milestone',
   'milestone.completed': 'completed a milestone',
+  'quote.sent': 'sent a quote',
+  'quote.accepted': 'accepted a quote',
 };
 
 export function activityLabel(eventType: NotificationEventType): string {

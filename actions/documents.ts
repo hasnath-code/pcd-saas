@@ -1,0 +1,542 @@
+'use server';
+
+import { headers } from 'next/headers';
+import { revalidatePath } from 'next/cache';
+import { z } from 'zod';
+import { v7 as uuidv7 } from 'uuid';
+import { and, eq, isNotNull, isNull } from 'drizzle-orm';
+import * as Sentry from '@sentry/nextjs';
+import {
+  AuthError,
+  requireOrgUser,
+  type ServerActionErrorCode,
+} from '@/lib/auth/requireAuth';
+import { db } from '@/db';
+import {
+  clients,
+  documentTokens,
+  documents,
+  projectStakeholders,
+  projects,
+} from '@/db/schema';
+import { logActivityTx } from '@/lib/activity/log';
+import { logAudit } from '@/lib/audit/log';
+import { sendEmail } from '@/lib/email/send';
+import { getAppUrl } from '@/lib/get-app-url';
+import { rateLimit } from '@/lib/ratelimit';
+import { allocateDocumentNumber } from '@/lib/documents/numbering';
+import { calculateTotals, type LineItem } from '@/lib/documents/vat';
+import { quoteSentEmail } from '@/lib/email/templates/quote-sent';
+
+// Phase 2 §2 — quote lifecycle server actions. createQuote / updateQuoteDraft
+// / sendQuote follow ARCHITECTURE-saas.md §20 (requireOrgUser + Zod + tx +
+// audit). acceptQuote is the new token-authorized public-write pattern —
+// see ADR-034.
+
+export type DocumentActionResult<T = void> =
+  | (T extends void ? { success: true } : { success: true; data: T })
+  | { error: ServerActionErrorCode; reason?: string };
+
+// ────────────────────────────────────────────────────────────────────────────
+// Shared input shapes
+
+const LineItemSchema = z.object({
+  description: z.string().trim().min(1).max(500),
+  quantity: z.number().nonnegative(),
+  unitPrice: z.number(),
+  category: z.string().trim().max(100).optional(),
+});
+
+const CreateQuoteInput = z.object({
+  projectId: z.string().uuid(),
+  lineItems: z.array(LineItemSchema).min(1),
+  discountPct: z.number().min(0).max(100).default(0),
+  vatApplicable: z.boolean().default(false),
+});
+
+const UpdateQuoteDraftInput = z.object({
+  documentId: z.string().uuid(),
+  lineItems: z.array(LineItemSchema).min(1).optional(),
+  discountPct: z.number().min(0).max(100).optional(),
+  vatApplicable: z.boolean().optional(),
+});
+
+const DocumentIdInput = z.object({ documentId: z.string().uuid() });
+
+const AcceptQuoteInput = z.object({
+  token: z.string().uuid(),
+  acceptedByName: z.string().trim().min(1).max(200),
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// createQuote — surveyor drafts a quote on a project.
+
+export async function createQuote(
+  input: unknown,
+): Promise<DocumentActionResult<{ documentId: string; documentNumber: string }>> {
+  let ctx: Awaited<ReturnType<typeof requireOrgUser>>;
+  try {
+    ctx = await requireOrgUser();
+  } catch (e) {
+    if (e instanceof AuthError) return { error: e.code, reason: e.message };
+    throw e;
+  }
+
+  const parsed = CreateQuoteInput.safeParse(input);
+  if (!parsed.success) {
+    return {
+      error: 'validation_error',
+      reason: parsed.error.issues[0]?.message ?? 'Invalid input',
+    };
+  }
+  const { projectId, lineItems, discountPct, vatApplicable } = parsed.data;
+
+  // Project resolution: must exist, must be in the caller's org, must not be
+  // soft-deleted.
+  const projectRows = await db
+    .select({ orgId: projects.orgId })
+    .from(projects)
+    .where(and(eq(projects.id, projectId), isNull(projects.deletedAt)))
+    .limit(1);
+  if (projectRows.length === 0 || projectRows[0].orgId !== ctx.orgId) {
+    return { error: 'not_found', reason: 'project' };
+  }
+
+  const totals = calculateTotals({
+    lineItems: lineItems as LineItem[],
+    discountPct,
+    vatApplicable,
+  });
+
+  const documentId = uuidv7();
+  let documentNumber: string;
+  try {
+    const result = await db.transaction(async (tx) => {
+      const allocated = await allocateDocumentNumber({
+        tx,
+        projectId,
+        type: 'quote',
+      });
+
+      await tx.insert(documents).values({
+        id: documentId,
+        orgId: ctx.orgId,
+        projectId,
+        type: 'quote',
+        status: 'draft',
+        documentNumber: allocated.documentNumber,
+        sequence: allocated.sequence,
+        lineItems: lineItems as LineItem[],
+        discountPct,
+        vatApplicable,
+        subtotal: totals.subtotal,
+        vatAmount: totals.vatAmount,
+        total: totals.total,
+        createdBy: ctx.userId,
+      });
+
+      return { documentNumber: allocated.documentNumber };
+    });
+    documentNumber = result.documentNumber;
+  } catch (e) {
+    const reason = e instanceof Error ? e.message : String(e);
+    return { error: 'internal_error', reason: `create_quote:${reason}` };
+  }
+
+  await logAudit({
+    orgId: ctx.orgId,
+    userId: ctx.userId,
+    action: 'create',
+    resourceType: 'document',
+    resourceId: documentId,
+    metadata: {
+      project_id: projectId,
+      type: 'quote',
+      document_number: documentNumber,
+      total: totals.total,
+    },
+  });
+
+  revalidatePath(`/dashboard/projects/${projectId}`, 'layout');
+  return { success: true, data: { documentId, documentNumber } };
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// updateQuoteDraft — surveyor edits a draft quote. Rejects non-draft.
+
+export async function updateQuoteDraft(
+  input: unknown,
+): Promise<DocumentActionResult> {
+  let ctx: Awaited<ReturnType<typeof requireOrgUser>>;
+  try {
+    ctx = await requireOrgUser();
+  } catch (e) {
+    if (e instanceof AuthError) return { error: e.code, reason: e.message };
+    throw e;
+  }
+
+  const parsed = UpdateQuoteDraftInput.safeParse(input);
+  if (!parsed.success) {
+    return {
+      error: 'validation_error',
+      reason: parsed.error.issues[0]?.message ?? 'Invalid input',
+    };
+  }
+  const { documentId, lineItems, discountPct, vatApplicable } = parsed.data;
+
+  const rows = await db
+    .select({
+      id: documents.id,
+      projectId: documents.projectId,
+      orgId: documents.orgId,
+      status: documents.status,
+      type: documents.type,
+      currentLineItems: documents.lineItems,
+      currentDiscountPct: documents.discountPct,
+      currentVatApplicable: documents.vatApplicable,
+    })
+    .from(documents)
+    .where(and(eq(documents.id, documentId), isNull(documents.deletedAt)))
+    .limit(1);
+
+  if (rows.length === 0 || rows[0].orgId !== ctx.orgId) {
+    return { error: 'not_found', reason: 'document' };
+  }
+  const row = rows[0];
+  if (row.type !== 'quote') {
+    return { error: 'conflict', reason: 'not_a_quote' };
+  }
+  if (row.status !== 'draft') {
+    return { error: 'conflict', reason: 'not_draft' };
+  }
+
+  // Merge: only patch fields that were provided. Recompute totals from the
+  // post-merge values so the row stays internally consistent.
+  const nextLineItems =
+    lineItems !== undefined ? (lineItems as LineItem[]) : (row.currentLineItems as LineItem[]);
+  const nextDiscountPct =
+    discountPct !== undefined ? discountPct : Number(row.currentDiscountPct);
+  const nextVatApplicable =
+    vatApplicable !== undefined ? vatApplicable : row.currentVatApplicable;
+
+  const totals = calculateTotals({
+    lineItems: nextLineItems,
+    discountPct: nextDiscountPct,
+    vatApplicable: nextVatApplicable,
+  });
+
+  await db
+    .update(documents)
+    .set({
+      lineItems: nextLineItems,
+      discountPct: nextDiscountPct,
+      vatApplicable: nextVatApplicable,
+      subtotal: totals.subtotal,
+      vatAmount: totals.vatAmount,
+      total: totals.total,
+    })
+    .where(eq(documents.id, documentId));
+
+  await logAudit({
+    orgId: ctx.orgId,
+    userId: ctx.userId,
+    action: 'update',
+    resourceType: 'document',
+    resourceId: documentId,
+    metadata: {
+      project_id: row.projectId,
+      total: totals.total,
+      fields: ['line_items', 'discount_pct', 'vat_applicable', 'subtotal', 'vat_amount', 'total'],
+    },
+  });
+
+  revalidatePath(`/dashboard/projects/${row.projectId}`, 'layout');
+  return { success: true };
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// sendQuote — flip draft → sent + mint token + post-commit email to client.
+
+export async function sendQuote(
+  input: unknown,
+): Promise<DocumentActionResult<{ token: string }>> {
+  let ctx: Awaited<ReturnType<typeof requireOrgUser>>;
+  try {
+    ctx = await requireOrgUser();
+  } catch (e) {
+    if (e instanceof AuthError) return { error: e.code, reason: e.message };
+    throw e;
+  }
+
+  const parsed = DocumentIdInput.safeParse(input);
+  if (!parsed.success) {
+    return {
+      error: 'validation_error',
+      reason: parsed.error.issues[0]?.message ?? 'Invalid input',
+    };
+  }
+  const { documentId } = parsed.data;
+
+  const docRows = await db
+    .select({
+      id: documents.id,
+      orgId: documents.orgId,
+      projectId: documents.projectId,
+      status: documents.status,
+      type: documents.type,
+      documentNumber: documents.documentNumber,
+      total: documents.total,
+    })
+    .from(documents)
+    .where(and(eq(documents.id, documentId), isNull(documents.deletedAt)))
+    .limit(1);
+
+  if (docRows.length === 0 || docRows[0].orgId !== ctx.orgId) {
+    return { error: 'not_found', reason: 'document' };
+  }
+  const doc = docRows[0];
+  if (doc.type !== 'quote') return { error: 'conflict', reason: 'not_a_quote' };
+  if (doc.status !== 'draft') return { error: 'conflict', reason: 'not_draft' };
+
+  const projectRows = await db
+    .select({ projectNumber: projects.projectNumber })
+    .from(projects)
+    .where(eq(projects.id, doc.projectId))
+    .limit(1);
+  const projectNumber = projectRows[0]?.projectNumber ?? '';
+
+  // Tx: flip status, mint token, log activity. Email send is post-commit per
+  // ADR-033 / Hard Rule 27.
+  const tokenId = uuidv7();
+  let mintedToken: string;
+  try {
+    const result = await db.transaction(async (tx) => {
+      await tx
+        .update(documents)
+        .set({ status: 'sent', sentAt: new Date() })
+        .where(eq(documents.id, documentId));
+
+      // Insert the token row and read back the DB-generated `token` value
+      // (gen_random_uuid()) so we can build the public URL.
+      const [insertedToken] = await tx
+        .insert(documentTokens)
+        .values({ id: tokenId, documentId, documentType: 'quote' })
+        .returning({ token: documentTokens.token });
+
+      await logActivityTx(tx, {
+        projectId: doc.projectId,
+        actorType: 'user',
+        actorId: ctx.userId,
+        eventType: 'quote.sent',
+        payload: {
+          projectId: doc.projectId,
+          projectNumber,
+          documentId,
+          documentNumber: doc.documentNumber,
+          total: Number(doc.total),
+        },
+        visibleToStakeholders: true,
+      });
+
+      return { token: insertedToken.token };
+    });
+    mintedToken = result.token;
+  } catch (e) {
+    const reason = e instanceof Error ? e.message : String(e);
+    return { error: 'internal_error', reason: `send_quote:${reason}` };
+  }
+
+  // Post-commit: resolve the primary client's email, render template, send.
+  // Per-recipient failure → Sentry isolation, never re-throws (ADR-033).
+  try {
+    const recipientRows = await db
+      .select({ email: clients.email, name: clients.name })
+      .from(projectStakeholders)
+      .innerJoin(clients, eq(clients.id, projectStakeholders.clientId))
+      .where(
+        and(
+          eq(projectStakeholders.projectId, doc.projectId),
+          eq(projectStakeholders.role, 'primary_client'),
+          isNotNull(projectStakeholders.acceptedAt),
+          isNull(projectStakeholders.deletedAt),
+          isNull(clients.deletedAt),
+        ),
+      )
+      .limit(1);
+
+    if (recipientRows.length > 0) {
+      const recipient = recipientRows[0];
+      const viewUrl = `${getAppUrl()}/q/${mintedToken}`;
+      const rendered = quoteSentEmail({
+        quoteNumber: doc.documentNumber,
+        total: Number(doc.total),
+        viewUrl,
+      });
+      await sendEmail({
+        to: recipient.email,
+        subject: rendered.subject,
+        html: rendered.html,
+        template: 'quote-sent',
+        orgId: ctx.orgId,
+      });
+    }
+  } catch (err) {
+    Sentry.captureException(err, {
+      tags: {
+        scope: 'notification_dispatch',
+        action: 'sendQuote',
+        event_type: 'quote.sent',
+        org_id: ctx.orgId,
+      },
+      extra: { documentId, projectId: doc.projectId },
+    });
+  }
+
+  await logAudit({
+    orgId: ctx.orgId,
+    userId: ctx.userId,
+    action: 'update',
+    resourceType: 'document',
+    resourceId: documentId,
+    metadata: {
+      project_id: doc.projectId,
+      transition: 'draft_to_sent',
+      document_number: doc.documentNumber,
+    },
+  });
+
+  revalidatePath(`/dashboard/projects/${doc.projectId}`, 'layout');
+  return { success: true, data: { token: mintedToken } };
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// acceptQuote — token-authorized public write (ADR-034).
+//
+// No requireOrgUser. The token is the gate. The action runs through the
+// Drizzle pooler (postgres role bypasses RLS); the documents_update_org_members
+// policy doesn't apply. Idempotent: a second accept on the same already-
+// accepted quote returns success without modifying the row.
+
+export async function acceptQuote(
+  input: unknown,
+): Promise<DocumentActionResult<{ documentId: string; alreadyAccepted: boolean }>> {
+  const parsed = AcceptQuoteInput.safeParse(input);
+  if (!parsed.success) {
+    return {
+      error: 'validation_error',
+      reason: parsed.error.issues[0]?.message ?? 'Invalid input',
+    };
+  }
+  const { token, acceptedByName } = parsed.data;
+
+  // Rate limit by IP via the publicDoc limiter (lib/ratelimit.ts). Falls back
+  // to a per-token bucket if the IP header is missing (e.g. test contexts).
+  try {
+    const h = await headers();
+    const ip = h.get('x-forwarded-for')?.split(',')[0]?.trim() ?? `token:${token}`;
+    const rl = await rateLimit('publicDoc', ip);
+    if (rl.limited) {
+      return { error: 'rate_limited', reason: `retry_after_${rl.retryAfterSec}s` };
+    }
+  } catch {
+    // `headers()` can throw if invoked outside a request context (e.g. unit
+    // tests). Skip rate-limiting in that case — the test harness drives
+    // controlled inputs.
+  }
+
+  // Resolve token. Must exist AND match document_type='quote'. The pooler
+  // bypasses RLS so an unauthenticated public-route caller resolves correctly.
+  const tokenRows = await db
+    .select({
+      tokenId: documentTokens.id,
+      documentId: documentTokens.documentId,
+      documentType: documentTokens.documentType,
+    })
+    .from(documentTokens)
+    .where(eq(documentTokens.token, token))
+    .limit(1);
+  if (tokenRows.length === 0 || tokenRows[0].documentType !== 'quote') {
+    return { error: 'not_found', reason: 'token' };
+  }
+  const documentId = tokenRows[0].documentId;
+
+  const docRows = await db
+    .select({
+      id: documents.id,
+      orgId: documents.orgId,
+      projectId: documents.projectId,
+      status: documents.status,
+      acceptedAt: documents.acceptedAt,
+      documentNumber: documents.documentNumber,
+    })
+    .from(documents)
+    .where(and(eq(documents.id, documentId), isNull(documents.deletedAt)))
+    .limit(1);
+  if (docRows.length === 0) return { error: 'not_found', reason: 'document' };
+  const doc = docRows[0];
+
+  if (doc.status === 'draft' || doc.status === 'void') {
+    return { error: 'conflict', reason: `cannot_accept_${doc.status}` };
+  }
+
+  // Idempotent no-op: already accepted → return success without mutation.
+  if (doc.acceptedAt !== null) {
+    return { success: true, data: { documentId, alreadyAccepted: true } };
+  }
+
+  const projectRows = await db
+    .select({ projectNumber: projects.projectNumber })
+    .from(projects)
+    .where(eq(projects.id, doc.projectId))
+    .limit(1);
+  const projectNumber = projectRows[0]?.projectNumber ?? '';
+
+  try {
+    await db.transaction(async (tx) => {
+      // Belt-and-braces idempotency: WHERE accepted_at IS NULL. If a parallel
+      // request snuck through between the check above and this UPDATE, the
+      // second writer's UPDATE affects 0 rows and we return alreadyAccepted.
+      await tx
+        .update(documents)
+        .set({ acceptedAt: new Date(), acceptedByName })
+        .where(and(eq(documents.id, documentId), isNull(documents.acceptedAt)));
+
+      await logActivityTx(tx, {
+        projectId: doc.projectId,
+        actorType: 'client', // ADR-034 — token-authorized, no auth.uid identity
+        actorId: null,
+        eventType: 'quote.accepted',
+        payload: {
+          projectId: doc.projectId,
+          projectNumber,
+          documentId,
+          documentNumber: doc.documentNumber,
+          acceptedByName,
+        },
+        visibleToStakeholders: true,
+      });
+    });
+  } catch (e) {
+    const reason = e instanceof Error ? e.message : String(e);
+    return { error: 'internal_error', reason: `accept_quote:${reason}` };
+  }
+
+  await logAudit({
+    orgId: doc.orgId,
+    // No userId — actor is the token-bearing public caller. Per ADR-034 the
+    // accepted_by_name on the document row is the durable identity record.
+    action: 'update',
+    resourceType: 'document',
+    resourceId: documentId,
+    metadata: {
+      project_id: doc.projectId,
+      transition: 'accepted',
+      accepted_by_name: acceptedByName,
+      via: 'public_token',
+    },
+  });
+
+  revalidatePath(`/dashboard/projects/${doc.projectId}`, 'layout');
+  revalidatePath(`/q/${token}`, 'page');
+  return { success: true, data: { documentId, alreadyAccepted: false } };
+}

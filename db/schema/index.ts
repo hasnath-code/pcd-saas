@@ -24,3 +24,6 @@ export * from './project-files';
 export * from './notification-preferences';
 export * from './notifications';
 export * from './project-activity';
+// Phase 2
+export * from './documents';
+export * from './document-tokens';

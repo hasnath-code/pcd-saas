@@ -1,9 +1,9 @@
 # PCD Portal SaaS — Architecture Reference
 
-**Version:** 0.16 (**Phase 1c CLOSED** — Session 11 shipped: notifications + activity timeline. 3 new tables (`notification_preferences`, `notifications`, `project_activity` via migrations 0020/0021/0022). Dispatcher with per-channel fan-out (`in_app` + `email` live; `push` + `sms` schema-supported, dispatcher-rejected). Preferences matrix UI on both org and portal sides. In-app inbox with Realtime + 30s polling fallback. Project activity timeline mounted on both project detail pages with stakeholder visibility gating. DEBT-049 hotfix during Phase F: dispatcher + email moved out of transactions (ADR-033 + Hard Rule 27); per-recipient failures isolated and logged to Sentry without rolling back the domain write.)
-**Last updated:** 14 May 2026
+**Version:** 0.17 (**Phase 2 Session 12 shipped** — quote lifecycle end-to-end on the `documents` schema. 2 new tables (`documents`, `document_tokens` via migrations 0023/0024). One unified table discriminated by `type` (`quote`/`invoice`/`receipt`); status enum (`draft`/`sent`/`superseded`/`void`); acceptance via `accepted_at IS NOT NULL` (boolean flip, not a status value). Four server actions: `createQuote` / `updateQuoteDraft` / `sendQuote` (post-commit client email per ADR-033) / `acceptQuote` (new token-authorized public-write pattern per ADR-034 — no `requireOrgUser`, pooler bypass, `publicDoc` rate-limit, idempotent). Helpers: `lib/documents/vat.ts` ports V2's `calculateTotals` with integer-pennies math + per-step rounding; `lib/documents/numbering.ts` allocates `{projectNumber}-Q{seq}` under a `SELECT FOR UPDATE` project lock. Public `/q/[token]` route lit up (Phase 1a placeholder deferred to here). Org-side `/dashboard/projects/[id]/quotes/{new,[quoteId]}` for create/edit/view. ADR-034 codifies the token-authorized public-write pattern.)
+**Last updated:** 15 May 2026
 **Maintainer:** Hasnath
-**Codebase status:** **Phase 1c CLOSED.** Session 11 shipped 14 May 2026: notifications + project activity timeline + DEBT-043 PKCE fix (already in production as PR #11). New surfaces: `/settings/notifications` + `/portal/settings/notifications` preferences matrix; `/notifications` + `/portal/notifications` inbox; activity timeline mounted on `/dashboard/projects/[id]` + `/portal/projects/[id]`. Five existing server actions wired with post-commit notification fan-out + activity log writes inside their respective transactions (`sendMessage`, `moveProjectToStage`, `confirmUpload`, `inviteStakeholder`, `createMilestone`). One new ADR (033) covering the post-commit dispatch pattern; 11 new DEBT entries (048, 050-059); DEBT-049 closed by the hotfix. Test counts: RLS 192 → **221** (+29), Actions 159 → **198** (+39), Cloud-smoke 14 unchanged. Phase F manual QA against PR #12 preview: **19/19 PASS** (post-DEBT-049-hotfix re-walk). Phase 2 (documents) is the next strategic decision-point.
+**Codebase status:** **Phase 2 Session 12 shipped** 15 May 2026. New surfaces: `/dashboard/projects/[id]/quotes/new`, `/dashboard/projects/[id]/quotes/[quoteId]` (org-side create/edit/view with editable drafts + send button + public-link surfacer); `/q/[token]` public quote view (token-only auth, `publicDoc` rate-limited, ADR-034 acceptance flow). New ADR (034) for token-authorized public writes. Test counts: RLS 221 → **238** (+17 documents + document_tokens cross-org + financial visibility), Actions 214 → **245** (+31: createQuote/updateQuoteDraft/sendQuote/acceptQuote + VAT helper + numbering helper). Cloud-smoke 14 unchanged. Schema-forever (Hard Rule 1) holds — additive only: two new tables, no changes to Phase 1a/1b/1c rows, RLS, actions, or tests. Phase 1c CLOSED status unchanged. Sessions 13–14 add the invoice + payment + receipt objects on the same `documents` table additively (e.g. `invoice_subtype` column, `payment_id` FK).
 **Production URL:** https://pcd-saas.vercel.app
 **Repo:** https://github.com/hasnath-code/pcd-saas
 
@@ -1573,6 +1573,95 @@ CREATE POLICY "project_activity_select" ON project_activity
 
 ---
 
+## 12.P2. Schema — Phase 2 Tables
+
+Two tables added by Phase 2 Session 12 (migrations 0023/0024). `documents` is the unified table for quotes/invoices/receipts (one row per peer document object); `document_tokens` carries the public-route bearer token. Sessions 13–14 will add invoice-subtype + payment FK columns additively (Hard Rule 1).
+
+### 12.P2.1 `documents`
+
+```sql
+CREATE TABLE documents (
+  id uuid PRIMARY KEY,
+  org_id uuid NOT NULL REFERENCES organizations(id) ON DELETE RESTRICT,
+  project_id uuid NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  type text NOT NULL CHECK (type IN ('quote','invoice','receipt')),
+  status text NOT NULL DEFAULT 'draft' CHECK (status IN ('draft','sent','superseded','void')),
+  document_number text NOT NULL,
+  sequence int NOT NULL CHECK (sequence >= 1),
+  line_items jsonb NOT NULL DEFAULT '[]'::jsonb,
+  discount_pct numeric(5,2) NOT NULL DEFAULT 0 CHECK (discount_pct >= 0 AND discount_pct <= 100),
+  vat_applicable boolean NOT NULL DEFAULT false,
+  subtotal numeric(12,2) NOT NULL DEFAULT 0,
+  vat_amount numeric(12,2) NOT NULL DEFAULT 0,
+  total numeric(12,2) NOT NULL DEFAULT 0,
+  currency text NOT NULL DEFAULT 'GBP',
+  sent_at timestamptz,
+  accepted_at timestamptz,
+  accepted_by_name text,
+  supersedes_document_id uuid REFERENCES documents(id) ON DELETE SET NULL,
+  created_by uuid NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  deleted_at timestamptz,
+  UNIQUE (project_id, type, sequence),
+  CHECK (subtotal >= 0 AND vat_amount >= 0 AND total >= 0)
+);
+
+CREATE INDEX idx_documents_project ON documents(project_id) WHERE deleted_at IS NULL;
+CREATE INDEX idx_documents_org ON documents(org_id) WHERE deleted_at IS NULL;
+```
+
+**Key invariants:**
+- **One table discriminated by `type`.** Phase 2 ships `quote` only; Sessions 13–14 exercise `invoice` and `receipt` on the same shape.
+- **Status enum is `draft`/`sent`/`superseded`/`void`.** Acceptance is the boolean `accepted_at IS NOT NULL`, NOT a status value (matches V2's `quote_accepted` flip).
+- **Money columns:** `subtotal` is the pre-discount line-item sum; `vat_amount` is computed on the discounted subtotal; `total = subtotal − discount_amount + vat_amount`. `discount_amount` is derived on read from `discount_pct + subtotal` (exact reconstruction, not stored). See `lib/documents/vat.ts:calculateTotals` for the rounding cascade.
+- **Numbering:** `document_number` follows `{projects.project_number}-{TYPE_CHAR}{sequence}` (TYPE_CHAR = Q/I/R). Allocated by `lib/documents/numbering.ts:allocateDocumentNumber` under a `SELECT FOR UPDATE` on the projects row. The UNIQUE constraint on `(project_id, type, sequence)` is the belt-and-braces.
+- **Revision chain:** `supersedes_document_id` self-FK supports "revise a sent quote = new row + old row.status flips to 'superseded'". `ON DELETE SET NULL` so admin-recovery of the parent doesn't take the child with it.
+- **Soft-delete via `deleted_at`.** Soft-deleted rows count toward the sequence — no number recycling.
+
+**RLS (migration 0023, four per-command policies — ADR-016):**
+- `documents_select`: `deleted_at IS NULL AND (project_id IN (auth_user_org_project_ids()) OR COALESCE((SELECT can_view_financials FROM auth_user_stakeholder_project_visibility(project_id)), false))`. This is the §14/§26 financial-visibility branch made live.
+- `documents_insert_org_members`: project_id in caller's org-project set AND `created_by` matches caller's `public.users.id`.
+- `documents_update_org_members`: org-members of the project's org. The token-authorized `acceptQuote` write does NOT pass through this policy — it routes through the Drizzle pooler (RLS-bypass) per ADR-034.
+- `documents_delete_org_admins`: admin-recovery hard-delete only.
+
+### 12.P2.2 `document_tokens`
+
+```sql
+CREATE TABLE document_tokens (
+  id uuid PRIMARY KEY,
+  token uuid NOT NULL UNIQUE DEFAULT gen_random_uuid(),
+  document_id uuid NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+  document_type text NOT NULL CHECK (document_type IN ('quote','invoice','receipt')),
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE UNIQUE INDEX idx_document_tokens_token ON document_tokens(token);
+CREATE INDEX idx_document_tokens_document ON document_tokens(document_id);
+```
+
+**Key invariants:**
+- **`token` is uuid v4 (random), not v7.** §25 rationale: a public-route gate needs randomness, not time-sortability. `id` stays uuid v7 (app-generated) for index locality per the project-wide PK convention.
+- **`document_type` is duplicated on the token row** so the public-route lookup can match `(token, document_type)` in a single index probe without first resolving the document. Token-type mismatch (e.g. an invoice token hitting `/q/`) returns 404 — part of the ADR-034 security envelope.
+- **No revocation in Phase 2** (matches Apps Script ADR-001). A future additive `revoked_at` column is the natural shape if needed.
+
+**RLS (migration 0024, four per-command policies):**
+All four gate on org-membership of the underlying document's project via the subquery `document_id IN (SELECT id FROM documents WHERE project_id IN (auth_user_org_project_ids()))`. Stakeholders don't list tokens (they reach docs by URL); the `can_view_financials` branch of `documents`' RLS is intentionally NOT propagated here.
+
+### 12.P2.3 Helpers + actions
+
+- **`lib/documents/vat.ts:calculateTotals`** — pure-math VAT/discount/total computer. Integer-pennies internally, rounds per-line then discount then VAT separately. Used by the org-side form for live totals AND by `createQuote`/`updateQuoteDraft` server-side.
+- **`lib/documents/numbering.ts:allocateDocumentNumber`** — tx-bound, `SELECT FOR UPDATE` on projects row + count + format. Caller must INSERT the document inside the same tx; otherwise the next allocator sees the same count and reuses the sequence (the UNIQUE constraint catches it but is the belt, not the braces).
+- **`actions/documents.ts`** — `createQuote` / `updateQuoteDraft` / `sendQuote` / `acceptQuote`. The first three follow §20's `requireOrgUser` shape; `acceptQuote` follows ADR-034 (token-authorized public write, no `auth.uid()`). `sendQuote` dispatches the client email post-commit per ADR-033.
+- **`db/queries/documents.ts`** — `listQuotesForProject({ visibleOnly })`, `getDocumentById`, `getDocumentByToken`. Mirrors the DEBT-059 visibility-flag convention; portal-side caller doesn't exist this session, flag stays in the signature.
+
+### 12.P2.4 Public routes
+
+- `/q/[token]` — live (Session 12). Token validation → `publicDoc` rate-limit → `getDocumentByToken` → render quote with AcceptForm (only when status='sent' and not yet accepted).
+- `/i/[token]` — Session 13 will populate.
+- `/r/[token]` — Session 14 will populate.
+
+---
+
 ## 13. Workflow System
 
 How workflows are defined, seeded, cloned, and used.
@@ -1703,7 +1792,7 @@ Each stakeholder-accessible table checks the relevant flag in its policy. Exampl
 - `project_milestones` policy checks `can_view_schedule`
 - `messages` insert policy checks `can_message`
 - `project_activity` policy checks the per-row `visible_to_stakeholders` boolean (NOT a per-stakeholder profile flag — see below)
-- (Phase 2) `documents` policy will check `can_view_financials`
+- `documents` policy (Phase 2 Session 12) checks `can_view_financials` via `auth_user_stakeholder_project_visibility(project_id)`. A `progress_only` stakeholder gets zero rows; a `full` profile sees the project's quotes.
 
 ### Activity timeline visibility model (Session 11)
 
@@ -2244,6 +2333,11 @@ Standard error codes:
 - `quota_exceeded`
 - `conflict`
 - `internal_error`
+- `rate_limited` (Session 4)
+
+### Token-authorized public writes — separate pattern (ADR-034)
+
+A class of server actions cannot use `requireOrgUser()` because they are reached from public token-gated routes (`/q/[token]`, `/i/[token]`, `/r/[token]`) where `auth.uid()` is null. The first instance is `acceptQuote` in `actions/documents.ts` (Phase 2 Session 12). See **ADR-034** for the full pattern; the short form is: Zod validation → `publicDoc` rate-limit by IP → token resolution against `document_tokens` with `document_type` match → status preconditions → idempotent UPDATE through the Drizzle pooler (bypasses RLS) → activity row with `actor_type='client', actor_id=null` → audit row with null actor + `metadata.via='public_token'`. Post-commit dispatch (ADR-033) still applies for any notification fan-out.
 
 ---
 
@@ -2534,49 +2628,50 @@ Phase 1a ships **the pattern only**. Token generation lives in Phase 2 with quot
 /r/[token]    — Receipt view (Phase 2 populates)
 ```
 
-### Phase 1a deliverables for this section
+### Phase 1a / Phase 2 deliverables for this section
 
-1. **Route handlers exist** at `app/q/[token]/page.tsx`, `app/i/[token]/page.tsx`, `app/r/[token]/page.tsx`
-2. **Validation middleware:** validates token format (UUID), rate-limits by IP via `lib/ratelimit.ts`
-3. **Placeholder lookup:** queries a `document_tokens` table that doesn't exist yet — Phase 2 creates it. Phase 1a renders 404 from these routes, by design.
+1. **Route handlers exist** at `app/q/[token]/page.tsx` (Phase 2 Session 12 — live for quotes), `app/i/[token]/page.tsx` (Phase 2 Session 13), `app/r/[token]/page.tsx` (Phase 2 Session 14). Phase 1a was supposed to ship the 404 stubs but deferred them entirely to Phase 2 — the `publicDoc` rate limiter was wired in Phase 1a Session 4 and waited for a consumer.
+2. **Validation middleware:** validates token format (UUID), rate-limits by IP via `lib/ratelimit.ts:publicDoc`.
+3. **Lookup:** queries the `document_tokens` table created in Phase 2 Session 12 (migration 0024). `/q/[token]` is live; the other two routes 404 until their sessions ship.
 4. **Token format choice:** UUID v4 (random, not v7). Tokens are not time-sortable in usage; randomness is the only property that matters.
 
-### Token model (Phase 2 will create)
+### Token model (Phase 2 Session 12 — shipped)
 
-For reference, the `document_tokens` table that Phase 2 will add:
+The `document_tokens` table as it exists today (migration 0024):
 
 ```sql
 CREATE TABLE document_tokens (
-  id uuid PRIMARY KEY DEFAULT gen_uuid_v7(),
+  id uuid PRIMARY KEY,
   token uuid NOT NULL UNIQUE DEFAULT gen_random_uuid(),
-  document_id uuid NOT NULL REFERENCES documents(id) ON DELETE CASCADE,  -- documents table in Phase 2
-  document_type text NOT NULL CHECK (document_type IN ('quote', 'invoice_initial', 'invoice_final', 'receipt_initial', 'receipt_final')),
+  document_id uuid NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+  document_type text NOT NULL CHECK (document_type IN ('quote', 'invoice', 'receipt')),
   created_at timestamptz NOT NULL DEFAULT now()
 );
 
-CREATE INDEX idx_document_tokens_token ON document_tokens(token);
+CREATE UNIQUE INDEX idx_document_tokens_token ON document_tokens(token);
 ```
 
-Token validation logic (Phase 2):
+Note: the §25-original `document_type` sketch enumerated `('quote', 'invoice_initial', 'invoice_final', 'receipt_initial', 'receipt_final')` — Phase 2 scope §2.5 collapsed receipts into one peer object, and §2.4 keeps invoice initial/final as a `subtype` field on the document itself (Session 13 additive column), not as separate token types. The route discriminator stays at the doc-type level (`quote`/`invoice`/`receipt`).
+
+Token validation logic (Phase 2 Session 12):
 
 ```ts
 // app/q/[token]/page.tsx
-export default async function QuotePage({ params }: { params: { token: string } }) {
-  if (!isValidUuid(params.token)) notFound();
-  
-  const tokenRow = await db.query.documentTokens.findFirst({
-    where: and(
-      eq(documentTokens.token, params.token),
-      eq(documentTokens.documentType, 'quote')
-    )
-  });
-  
-  if (!tokenRow) notFound();
-  
-  // Render quote — no auth required
-  return <QuoteView documentId={tokenRow.documentId} />;
+export default async function QuotePage({ params }: { params: Promise<{ token: string }> }) {
+  const { token } = await params;
+  if (!UUID_RE.test(token)) notFound();
+
+  // publicDoc rate-limit by IP (lib/ratelimit.ts).
+  const result = await getDocumentByToken(token);
+  if (!result) notFound();
+  if (result.tokenDocumentType !== 'quote') notFound();
+  if (result.document.status === 'draft' || result.document.status === 'void') notFound();
+
+  // Render quote — no auth required.
 }
 ```
+
+Writes from this public-route context (e.g. the Accept button on a quote) follow ADR-034 — see §20's "Token-authorized public writes" note.
 
 ### Token vs auth
 
@@ -2671,14 +2766,25 @@ describe('<table> RLS', () => {
 
 ### Stakeholder visibility tests (Phase 1b+)
 
+The Phase 2-anticipated stakeholder-financial-visibility test is now live as `tests/rls/documents.test.ts` (Session 12). Pattern:
+
 ```ts
-test('Stakeholder with progress_only profile cannot view financials', async () => {
-  const stakeholder = await asUser(stakeholderAuthId);
-  const { data } = await stakeholder.from('documents').select('amount').eq('project_id', projectId);
-  // Phase 2: documents table includes amount field
-  expect(data).toEqual([]);
+test('Stakeholder with can_view_financials=false (progress_only) SEES NOTHING', async () => {
+  await f.service
+    .from('project_stakeholders')
+    .update({ can_view_financials: false, visibility_profile: 'progress_only' })
+    .eq('id', stakeholderRowId);
+  const c = await asUser(stakeholderAuth.email, stakeholderAuth.password);
+  await assertVisibleIds(c, 'documents', { column: 'id', values: [docAId] }, []);
+});
+
+test('Stakeholder with can_view_financials=true SEES the project document', async () => {
+  // ...stakeholder has full profile
+  await assertVisibleIds(c, 'documents', { column: 'id', values: [docAId] }, [docAId]);
 });
 ```
+
+Both branches exercise `auth_user_stakeholder_project_visibility(project_id).can_view_financials` from migration 0023's SELECT policy.
 
 ### Running tests
 
@@ -3538,7 +3644,52 @@ Session 11 was the architecturally densest session in Phase 1c: 3 new tables, di
 
 ---
 
-**Last reviewed:** 14 May 2026 (Phase 1c CLOSED — Session 11 shipped; v0.15 → v0.16; 1 new ADR; 11 new DEBT entries; DEBT-049 closed by hotfix)
+## 35.12 Phase 2 Session 12 Carryover
+
+**Shipped 15 May 2026 — Phase 2 begins.** Quote lifecycle end-to-end on a new `documents` schema; one unified table discriminated by `type` (quote/invoice/receipt) ready for Sessions 13–14 to layer onto. Hard Rule 1 (schema-forever, additive only post-Phase-1c) holds: two new tables, no changes to Phase 1a/1b/1c rows / RLS / actions / tests.
+
+### Build summary
+
+| Layer | Delivered |
+|---|---|
+| Schema | Migrations 0023 (`documents`) + 0024 (`document_tokens`). Both RLS-enabled with four per-command policies (ADR-016). `documents.SELECT` gates on org-member OR `can_view_financials` stakeholder — the §14/§26-stub case made live. |
+| Helpers | `lib/documents/vat.ts:calculateTotals` (integer-pennies math, round per-line then discount then VAT). `lib/documents/numbering.ts:allocateDocumentNumber` (project-scoped `SELECT FOR UPDATE` + count + `{projectNumber}-Q{seq}` format). |
+| Server actions | `createQuote` / `updateQuoteDraft` / `sendQuote` (post-commit Resend client email per ADR-033) / `acceptQuote` (new token-authorized public-write pattern per ADR-034). |
+| Read queries | `db/queries/documents.ts` — `listQuotesForProject({ visibleOnly })`, `getDocumentById`, `getDocumentByToken`. Mirrors DEBT-059 visibility-flag pattern. |
+| Email | `lib/email/templates/quote-sent.ts` — plain HTML, GBP-formatted, modeled on `team-invitation.ts`. |
+| Frontend (org) | `/dashboard/projects/[id]/quotes/new` (create form), `/dashboard/projects/[id]/quotes/[quoteId]` (view + draft-edit + send button), Quotes section on the project detail page. |
+| Frontend (public) | `/q/[token]` — UUID gate → `publicDoc` rate-limit → token resolution → render quote + AcceptForm. Hard Rule 14 (token routes never auth-walled) holds via existing middleware `PUBLIC_PREFIXES`. |
+| ADRs | **ADR-034** — Token-authorized public writes bypass `auth.uid()`; pooler is the security envelope. 9 locked invariants; alternatives + reconsider triggers documented. |
+| Notification events | `quote.sent` + `quote.accepted` appended to `NOTIFICATION_EVENT_TYPES`. Used as activity event types this session; no `dispatchNotification` calls yet. Existing identities don't have notification_preferences rows for these — fine since dispatch is unwired, but a backfill migration will be needed if Session 13/14 wires notifications. |
+
+### Test deltas
+
+- **RLS:** 221 → **238** (+17). `tests/rls/documents.test.ts` (12) + `tests/rls/document-tokens.test.ts` (5).
+- **Actions:** 214 → **245** (+31). `tests/actions/documents.test.ts` (17 covering createQuote/updateQuoteDraft/sendQuote/acceptQuote happy + edge paths including post-commit email failure isolation), `tests/actions/documents-vat.test.ts` (9 covering the rounding cascade + edge cases), `tests/actions/documents-numbering.test.ts` (5 covering serial + concurrent allocation via Promise.all asserting `b-a===1`, cross-project independence, cross-type independence, missing-project throw).
+- **Cloud-smoke:** 14/14 unchanged.
+
+### Notable decisions made in-session (not in scope doc)
+
+1. **Document-number format** — `{projectNumber}-{TYPE_CHAR}{seq}` (e.g. `PRJ-2026-001-Q1`). Drops V2's `-INV-` infix since TYPE_CHAR (Q/I/R) alone disambiguates.
+2. **`acceptQuote` activity-row identity** — `actor_type='client', actor_id=null`. Token-authorized writes don't bind to a specific clients row; `accepted_by_name` on the document is the durable identity record.
+3. **Money math** — integer pennies internally, round at every step (per-line → discount → VAT), `.toFixed(2)` only at boundaries. Per kickoff guidance to ensure each displayed number is an exact 2dp value.
+4. **`document_tokens.document_type` enum** — collapsed from §25's `('quote','invoice_initial','invoice_final','receipt_initial','receipt_final')` to `('quote','invoice','receipt')`. Per Phase 2 scope §2.5 (receipts are peer objects) and §2.4 (invoice initial/final is a `subtype` field on the document, not a token discriminator). Session 13 will add `invoice_subtype` additively.
+5. **`/q/[token]` route was never stubbed in Phase 1a** despite §25 + §31 Session 4 listing it. The `publicDoc` rate limiter shipped but no consumer existed until this session. Session 12 lights up the actual route.
+
+### What was deliberately deferred (not gaps)
+
+- **Notification dispatch for `quote.accepted`** — kickoff scope mentioned it but session prompt only listed sendQuote's client email. Notification fan-out can be added in Session 13/14 alongside its own backfill migration for existing identities' notification_preferences. Activity-row logging is in place.
+- **Invoice + receipt + payment objects** — Sessions 13–14. `documents` table is shaped for additive growth (new nullable columns: `invoice_subtype`, `payment_id`).
+- **PDF generation** — still an open question per `phase-2-scope.md` §5 Q7. The frontend shows the quote in browser; PDF export decision deferred.
+- **"Coming Soon" financials placeholder** — comes with the invoice/receipt sessions per scope §2.11.
+
+### Open carryover
+
+- **DEBT-064 (TBD)** — If a future session wires `dispatchNotification` for `quote.accepted` / `quote.sent`, an additive backfill migration must seed `notification_preferences` rows for existing identities (current per-identity seed runs only on identity create). Not a leak — `dispatchNotification` returns 0 inserts for unconfigured event types, so existing identities silently won't receive the new notification — but operationally surprising.
+
+---
+
+**Last reviewed:** 15 May 2026 (Phase 2 Session 12 shipped — v0.16 → v0.17; 1 new ADR (034); 2 new tables; 4 new actions; 1 new public route lit up; +48 tests; new label for DEBT-064 pending if dispatch is wired in S13/S14)
 
 ## End of document
 

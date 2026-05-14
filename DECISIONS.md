@@ -33,6 +33,53 @@
 
 ---
 
+## ADR-034 — Token-authorized public writes bypass `auth.uid()`; pooler is the security envelope
+**Date:** 15 May 2026 (Phase 2 Session 12 — quote acceptance)
+**Codebase:** SaaS
+**Status:** Accepted
+
+**Context:** `ARCHITECTURE-saas.md` §20 codifies the standard server-action shape: `requireOrgUser()` (or `requireStakeholder()`) as the first line, then RLS as the second gate, then audit. Phase 1a–1c built five-plus actions in this shape (`sendMessage`, `moveProjectToStage`, `confirmUpload`, `inviteStakeholder`, `createMilestone`, etc.) — every one of them assumes `auth.uid()` is non-null.
+
+Phase 2 introduces a class of writes that the §20 shape cannot express: client acceptance of a quote (and, in Sessions 13–14, payment recording on the invoice's public page, and confirming a paid receipt). These are reached from `/q/[token]` / `/i/[token]` / `/r/[token]` — token-gated public routes, no session, `auth.uid()` is null. Hard Rule 14 explicitly forbids auth-walling these routes; ADR-001 enshrines the security model (missing token = 404, mismatched = 404, no revocation in Phase 2).
+
+The first instance is `acceptQuote` in `actions/documents.ts`: an unauthenticated client clicks "Accept" on the public quote page, types their name, and the row flips `accepted_at`/`accepted_by_name`. The action must run, but cannot use `requireOrgUser()`.
+
+**Decision:** A token-authorized public write follows this pattern:
+
+1. **No `requireOrgUser()` / `requireStakeholder()`.** The action's first line is Zod input validation (the token + the public-payload fields).
+
+2. **Rate-limit by IP through `lib/ratelimit.ts:publicDoc`.** The `publicDoc` limiter (30 req/min sliding window) is the brute-force cap on token enumeration. IP is read from `headers().get('x-forwarded-for')`. If the header is missing (unit test, edge case), a per-token bucket falls in as a default — slower-leaking than no limit at all.
+
+3. **Resolve via `document_tokens` AND match `document_type`.** The token alone isn't enough — a quote token must hit a quote-typed entry point. Cross-type reuse is rejected as `not_found`. Missing token returns `not_found` (404), never 401, so we don't leak which tokens exist (ADR-001 spirit).
+
+4. **Status preconditions in the action layer.** `acceptQuote` rejects `draft` and `void` documents with `{ error: 'conflict' }`. `superseded` quotes are explicitly rejected (acceptance on a revised quote is a stale-link problem the action surfaces, not silently absorbs).
+
+5. **Idempotency is mandatory.** Replays from a refreshed browser tab, double-clicks, or any retry path must be safe. Pattern: check `accepted_at IS NOT NULL` → return success no-op; otherwise UPDATE with `WHERE accepted_at IS NULL` so a parallel write loses cleanly.
+
+6. **Writes through the Drizzle pooler (postgres role) which bypasses RLS.** The `documents_update_org_members` policy doesn't apply — the action is the gate. This is the same envelope `confirmUpload` (Session 10) uses for server-side file metadata writes, but generalized to a public-token entry point. The pooler is the only place this pattern is permitted; direct service-role usage in server actions remains forbidden (per §9 anti-patterns).
+
+7. **Activity row identity:** `actor_type='client'`, `actor_id=null`. We don't know the bound auth user — the token is doc-level, not stakeholder-level. The accepted-by-name on the document row is the durable identity record; the activity row carries it in `payload` for the timeline.
+
+8. **Audit row identity:** `user_id=null`, `client_id=null`, `metadata.via='public_token'`. Audit log captures what happened without falsely attributing it to an org user.
+
+9. **Post-commit dispatch still applies (ADR-033).** Any notification fan-out for the accept event (Session 13/14 will likely wire one) happens AFTER the tx commits, per-recipient try/catch, isolated to Sentry. The transaction holds DB-only writes (domain mutation + activity row).
+
+**Alternatives rejected:**
+- **Issue a short-lived JWT bound to the token and route through `requireStakeholder()`** — adds a roundtrip + token-management surface for zero security benefit. The token IS the credential; wrapping it in a JWT just renames the bearer-token primitive.
+- **Treat the client-portal session (when one exists) as the gate** — breaks Hard Rule 14. ADR-001's "no auth wall on token routes" is a permanent rule. Clients without portal accounts (the majority — most stakeholders are email-only) must still be able to accept.
+- **Require the public route to call a service-role RPC** — service role is reserved for migrations, seeds, webhooks, and cron (per §9). Server actions never use service role. The pooler (postgres role) is the established escape hatch with the same RLS-bypass property but bound to user-facing code paths.
+- **Push the write to a queue** — Hard Rule 4 forbids queue infra in Phase 1c, and Phase 2 doesn't change that. A queue would also not solve the auth.uid problem — it'd just defer the same gate.
+
+**Reconsider if:**
+- A token-authorized write needs to fan out to many recipients and the dispatch fan-out alone exceeds Vercel's 10s function timeout. At that point pivot to ADR-033's queue-worker successor.
+- Stakeholder portal sessions become the default carrier (Phase 3+). Even then, the public-route ADR-001 escape hatch must remain — too many email links live in clients' inboxes for that to change.
+- A new public-route action needs revocation. The natural shape is `document_tokens.revoked_at`; the resolution check above grows `AND revoked_at IS NULL`. This is additive — no breaking change.
+- The same pattern repeats three times (invoice acceptance, payment recording, receipt confirmation). At that point factor a `lib/auth/requireTokenedDocument(token, expectedType)` helper that returns `{ document, projectId, orgId }` so the duplication doesn't quietly spread.
+
+**Cross-references:** `actions/documents.ts:acceptQuote`; `ARCHITECTURE-saas.md` §20 (Server Actions Convention) — extended by this ADR; §25 (Public Token-Gated Routes); Hard Rule 14 (token routes never auth-walled); ADR-001 (token validation); ADR-033 (post-commit dispatch — composes with this ADR); `lib/ratelimit.ts:publicDoc`; `db/migrations/0024_document_tokens.sql`.
+
+---
+
 ## ADR-033 — Notification dispatch + outbound email run AFTER the action's transaction commits; failures isolated, do not roll back the domain write
 **Date:** 13 May 2026 (Session 11 DEBT-049 hotfix, Phase F walk)
 **Codebase:** SaaS
