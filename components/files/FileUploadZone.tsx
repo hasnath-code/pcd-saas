@@ -8,6 +8,7 @@ import { Upload, Loader2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { confirmUpload, createUploadUrl } from '@/actions/files';
 import type { ProjectFileSource } from '@/db/queries/files';
+import { uploadBatchSequentially } from './upload-helpers';
 
 // Two-step upload zone. Used on org and portal project detail pages. The
 // server action contract (createUploadUrl → direct PUT to signed URL →
@@ -125,22 +126,20 @@ export function FileUploadZone({ projectId, source, accept }: FileUploadZoneProp
   );
 
   const handleFiles = useCallback(
-    async (fileList: FileList) => {
-      // Sequential to keep memory + UI state simple; small batch sizes only.
-      // If multi-file upload needs to ship larger batches, swap to a parallel
-      // pool here.
-      for (let i = 0; i < fileList.length; i++) {
-        const file = fileList[i];
-        if (!file) continue;
-        await uploadOne(file);
-      }
-    },
+    // Sequential to keep memory + UI state simple; small batch sizes only.
+    // If multi-file upload needs to ship larger batches, swap to a parallel
+    // pool here.
+    (files: File[]) => uploadBatchSequentially(files, uploadOne),
     [uploadOne],
   );
 
   const onInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files && e.target.files.length > 0) {
-      void handleFiles(e.target.files);
+    const picked = e.target.files;
+    if (picked && picked.length > 0) {
+      // Snapshot the FileList into an array BEFORE clearing the input below.
+      // input.files is a live collection — clearing input.value empties it
+      // mid-iteration, which loses every file past the first.
+      void handleFiles(Array.from(picked));
     }
     // reset so re-uploading the same file works
     if (inputRef.current) inputRef.current.value = '';
@@ -154,8 +153,9 @@ export function FileUploadZone({ projectId, source, accept }: FileUploadZoneProp
   const onDrop = (e: React.DragEvent<HTMLDivElement>) => {
     e.preventDefault();
     setDragActive(false);
-    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
-      void handleFiles(e.dataTransfer.files);
+    const dropped = e.dataTransfer.files;
+    if (dropped && dropped.length > 0) {
+      void handleFiles(Array.from(dropped));
     }
   };
 
