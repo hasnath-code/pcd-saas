@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react';
 import Link from 'next/link';
 import { redirect } from 'next/navigation';
+import { Bell } from 'lucide-react';
 import { AuthError, requireStakeholder } from '@/lib/auth/requireAuth';
 import { totalUnreadForStakeholder } from '@/db/queries/conversations';
 import { unreadInAppCount } from '@/db/queries/notifications';
@@ -69,7 +70,7 @@ export default async function PortalLayout({ children }: { children: ReactNode }
                 aria-label="Notifications"
                 className="inline-flex items-center gap-1.5 text-muted-foreground hover:text-foreground"
               >
-                <span aria-hidden>🔔</span>
+                <Bell aria-hidden="true" className="size-4" />
                 <span className="sr-only">Notifications</span>
                 {unreadNotifCount > 0 ? (
                   <Badge className="rounded-full bg-primary px-1.5 text-primary-foreground">

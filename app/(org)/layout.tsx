@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react';
 import { cookies } from 'next/headers';
 import Link from 'next/link';
+import { Bell } from 'lucide-react';
 import { requireAuthOrRedirect } from '@/lib/auth/requireAuth';
 import { listMyMemberships } from '@/db/queries/orgs';
 import { totalUnreadForOrgUser } from '@/db/queries/conversations';
@@ -99,7 +100,7 @@ export default async function OrgLayout({ children }: { children: ReactNode }) {
                   aria-label="Notifications"
                   className="inline-flex items-center gap-1.5 text-muted-foreground hover:text-foreground"
                 >
-                  <span aria-hidden>🔔</span>
+                  <Bell aria-hidden="true" className="size-4" />
                   <span className="sr-only">Notifications</span>
                   {unreadNotifCount > 0 ? (
                     <Badge className="rounded-full bg-primary px-1.5 text-primary-foreground">
