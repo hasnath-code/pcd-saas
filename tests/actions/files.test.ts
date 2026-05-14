@@ -499,6 +499,18 @@ describe('getDownloadUrl', () => {
     const result = await getDownloadUrl({ fileId: uuidv7() });
     expect(result).toMatchObject({ error: 'not_found' });
   });
+
+  // DEBT-036: the signed URL must carry a `download` query param so Supabase
+  // Storage responds with Content-Disposition: attachment. Without this, PDFs
+  // and images render inline in the new tab instead of triggering a save.
+  test('signed URL carries the download disposition param with the original filename', async () => {
+    vi.mocked(auth.requireAuth).mockResolvedValue(asAuthUser(f.userA));
+    const result = await getDownloadUrl({ fileId: orgFileId });
+    if ('error' in result) throw new Error(`unexpected error: ${result.error}`);
+    expect(result.data.downloadUrl).toContain('download=');
+    const parsed = new URL(result.data.downloadUrl);
+    expect(parsed.searchParams.get('download')).toBe('shared.pdf');
+  });
 });
 
 // ─── softDeleteFile + restoreFile ─────────────────────────────────────────────
