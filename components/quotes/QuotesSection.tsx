@@ -57,7 +57,7 @@ export async function QuotesSection({ projectId }: { projectId: string }) {
         <div>
           <CardTitle className="text-base">Quotes</CardTitle>
           <CardDescription>
-            Quotes sent to this project's client. Drafts are private until sent.
+            Quotes sent to this project&apos;s client. Drafts are private until sent.
           </CardDescription>
         </div>
         <Button asChild size="sm" variant="outline">

@@ -1,5 +1,3 @@
-import 'server-only';
-
 // Phase 2 §2.8 — port of V2's `calculateTotals`. VAT is 20% on the discounted
 // subtotal; suppressed when `vatApplicable=false`. All money math runs in
 // integer pennies to avoid JS float drift, rounding at each step so each
