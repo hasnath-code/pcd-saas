@@ -78,6 +78,12 @@ export default async function PortalLayout({ children }: { children: ReactNode }
                   </Badge>
                 ) : null}
               </Link>
+              <Link
+                href="/portal/settings/notifications"
+                className="text-muted-foreground hover:text-foreground"
+              >
+                Settings
+              </Link>
             </nav>
           </div>
           <span className="text-xs text-muted-foreground">Client portal</span>
