@@ -16,9 +16,25 @@ const ORG_TYPE_DESCRIPTIONS: Record<string, { headline: string; body: string }> 
 
 type OrgType = { slug: string; name: string };
 
-export function OrgTypePicker({ orgTypes }: { orgTypes: OrgType[] }) {
+export function OrgTypePicker({
+  orgTypes,
+  fromPortal = false,
+}: {
+  orgTypes: OrgType[];
+  fromPortal?: boolean;
+}) {
   return (
     <div className="space-y-6">
+      {fromPortal && (
+        <div className="rounded-md border border-muted-foreground/20 bg-muted/30 p-4">
+          <p className="text-sm font-medium">Setting up your own firm</p>
+          <p className="mt-1 text-sm text-muted-foreground">
+            You&apos;re already in PCD as a stakeholder on other projects.
+            Creating your own organisation is a second identity — your existing
+            stakeholder access stays the same.
+          </p>
+        </div>
+      )}
       <div className="space-y-2 text-center">
         <h1 className="text-3xl font-semibold">Welcome to PCD</h1>
         <p className="text-muted-foreground">
