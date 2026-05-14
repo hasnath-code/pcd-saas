@@ -32,6 +32,7 @@ import { CancelInvitationButton } from '@/components/team/CancelInvitationButton
 import { FileList } from '@/components/files/FileList';
 import { FileUploadZone } from '@/components/files/FileUploadZone';
 import { ActivityTimeline } from '@/components/activity/ActivityTimeline';
+import { QuotesSection } from '@/components/quotes/QuotesSection';
 
 export default async function ProjectDetailPage({
   params,
@@ -220,6 +221,8 @@ export default async function ProjectDetailPage({
           />
         </CardContent>
       </Card>
+
+      <QuotesSection projectId={project.id} />
 
       <ActivityTimeline projectId={project.id} viewer="org" />
     </main>
