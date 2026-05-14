@@ -9,6 +9,7 @@ import {
 } from '@/components/ui/card';
 import { cn } from '@/lib/utils';
 import type { ConversationListItem } from '@/db/queries/conversations';
+import { deriveTitle } from './deriveTitle';
 
 const TYPE_LABELS: Record<ConversationListItem['type'], string> = {
   one_to_one: 'Direct',
@@ -34,17 +35,6 @@ function formatRelative(when: Date | string | null): string {
   if (ms < day) return `${Math.floor(ms / hr)}h`;
   if (ms < 7 * day) return `${Math.floor(ms / day)}d`;
   return d.toLocaleDateString();
-}
-
-function deriveTitle(item: ConversationListItem, callerName: string): string {
-  if (item.name) return item.name;
-  if (item.type === 'general') {
-    return item.participantNames.filter((n) => n !== callerName).join(', ') || 'General';
-  }
-  if (item.type === 'one_to_one') {
-    return item.participantNames.filter((n) => n !== callerName).join(', ') || 'Direct';
-  }
-  return 'Group';
 }
 
 export function ConversationsInbox({
