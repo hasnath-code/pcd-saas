@@ -97,6 +97,24 @@ export function ConversationDetailClient({
     return m.senderType === 'client' && m.senderId === caller.clientId;
   }
 
+  // Compact layout for empty threads: no messages to fill space, so keep the
+  // empty-state copy and composer visually together instead of letting flex-1
+  // push the composer to the viewport bottom.
+  if (!loading && !error && messages.length === 0) {
+    return (
+      <div className="space-y-3 rounded-lg border bg-card p-4">
+        <p className="text-sm text-muted-foreground">
+          No messages yet. Send the first one below.
+        </p>
+        <MessageComposer
+          conversationId={conversationId}
+          disabled={composerDisabled}
+          placeholder={composerPlaceholder}
+        />
+      </div>
+    );
+  }
+
   return (
     <div className="flex h-[calc(100vh-12rem)] flex-col rounded-lg border bg-card">
       <div
@@ -111,11 +129,6 @@ export function ConversationDetailClient({
         ) : null}
         {loading && messages.length === 0 ? (
           <div className="text-sm text-muted-foreground">Loading…</div>
-        ) : null}
-        {!loading && messages.length === 0 ? (
-          <div className="py-8 text-center text-sm text-muted-foreground">
-            No messages yet. Send the first one below.
-          </div>
         ) : null}
         {messages.map((m) => (
           <MessageBubble

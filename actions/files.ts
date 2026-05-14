@@ -634,9 +634,16 @@ export async function getDownloadUrl(
   }
 
   const supabase = createServiceClient();
+  // `download: filename` makes Supabase Storage respond with
+  // `Content-Disposition: attachment; filename="<originalFilename>"`, so the
+  // browser saves the file regardless of MIME type instead of rendering
+  // PDFs/images inline. Filename also rides through as a `?download=` query
+  // param on the signed URL.
   const { data, error } = await supabase.storage
     .from(BUCKET)
-    .createSignedUrl(file.storagePath, DOWNLOAD_TTL_SECONDS);
+    .createSignedUrl(file.storagePath, DOWNLOAD_TTL_SECONDS, {
+      download: file.originalFilename,
+    });
   if (error || !data) {
     return { error: 'internal_error', reason: error?.message ?? 'sign_failed' };
   }

@@ -50,6 +50,27 @@
 
 # Open Debt
 
+## DEBT-063 — Invitation landing page doesn't guide new invitees to Sign up vs Sign in
+**Added:** 15 May 2026 (Phase F UX polish bundle — DEBT-038 verification walk)
+**Codebase:** SaaS
+**Severity:** Medium
+**Type:** UX
+**Status:** Open
+
+**The debt:** The invitation landing page presents Sign up / Sign in / "Accept invitation" affordances with no guidance for brand-new invitees. A first-time invited stakeholder (their `clients` row exists from `inviteStakeholder`'s tx, but no `auth.users` row yet) who instinctively clicks "Sign in" hits "Invalid login credentials" with no redirect to Sign up. The natural recovery path (try the other option) is not surfaced.
+
+**Why it exists:** The landing page was built before ADR-031's dual-context routing. Sign-in vs sign-up disambiguation wasn't a Phase 1 priority; the magic-link flow assumed users would click the email's button rather than landing on the page first via the URL.
+
+**Cost of leaving it:** Conversion-funnel friction at a new client's first product interaction. They may interpret the "Invalid login credentials" message as evidence that the invitation is broken and abandon. Highest-value entry point for stakeholders, so the cost is over-indexed.
+
+**Fix sketch:** Distinguishing copy on the landing page ("New to PCD? Sign up" vs "Already have an account? Sign in") with Sign up as the visually primary action. Consider folding "Accept invitation" into the Sign in path so a first-time user is auto-routed to signup (or have the Sign in form detect "no account exists for this email" and redirect to `/signup?invitation=<token>`). ~30-45 min including a Phase F runbook addition. Related to DEBT-R008's copy clarity work in the same flow.
+
+**Trigger:** Pre-launch — a first stakeholder confusion report would surface this as urgent.
+
+**Cross-references:** invitation landing page component (TBD during fix); DEBT-R008 (same flow, post-signup copy clarity); DEBT-R015 (DEBT-038 verification walk surfaced this observation)
+
+---
+
 ## DEBT-062 — Dashboard URL redirects to `/onboarding` in specific Chrome profile
 **Added:** 14 May 2026 (MINI-SESSION-DEBT-059 Phase F observation)
 **Codebase:** SaaS
@@ -197,111 +218,6 @@
 
 ---
 
-## DEBT-054 — Conversation thread empty-state layout pushes input to bottom
-**Added:** 14 May 2026 (Session 11 Phase F UX)
-**Codebase:** SaaS
-**Severity:** Low
-**Type:** UX
-**Status:** Open
-
-**The debt:** When opening an empty conversation (zero messages), the layout reserves all the vertical space for the (empty) message list and pushes the composer input to the very bottom of the viewport. Should compact the empty-state placeholder + keep the composer closer to the visual center.
-
-**Why it exists:** Default flex-grow on the messages container; no special-cased empty layout.
-
-**Cost of leaving it:** First-message UX is slightly awkward — user has to scroll or visually hunt for the composer. Cosmetic.
-
-**Fix sketch:** Conditional layout in `ConversationDetailClient.tsx` — when message list is empty, render the empty-state copy inline with the composer rather than as a flex-fill placeholder. ~30 min.
-
-**Trigger:** UX polish pass.
-
-**Cross-references:** `components/conversations/ConversationDetailClient.tsx`
-
----
-
-## DEBT-053 — Notification bell icon styling polish
-**Added:** 14 May 2026 (Session 11 Phase F UX)
-**Codebase:** SaaS
-**Severity:** Low
-**Type:** UX
-**Status:** Open
-
-**The debt:** Phase 8 shipped a 🔔 emoji as the bell icon (avoiding a new icon dependency). Phase F observed that the emoji renders inconsistently across platforms (different sizes on macOS Chrome vs iOS Safari) and doesn't match the visual weight of the lucide icons used elsewhere in the nav.
-
-**Why it exists:** Phase 8 design choice to avoid `lucide-react` import bump; emoji "works" for an MVP but isn't a real design system fit.
-
-**Cost of leaving it:** Cosmetic. The nav looks slightly inconsistent under design review. Not blocking.
-
-**Fix sketch:** Swap the 🔔 emoji for `<Bell className="size-4" />` from `lucide-react` (already a dep). Match the sizing + spacing pattern from the Conversations link. ~5 min.
-
-**Trigger:** UX polish pass OR any time a designer reviews the layout.
-
-**Cross-references:** `app/(org)/layout.tsx`; `app/portal/layout.tsx` (both have the bell)
-
----
-
-## DEBT-052 — "Direct" conversation label misleading with 3+ participants
-**Added:** 14 May 2026 (Session 11 Phase F UX)
-**Codebase:** SaaS
-**Severity:** Low
-**Type:** UX
-**Status:** Open
-
-**The debt:** `ConversationsInbox.tsx`'s `deriveTitle` function labels `one_to_one` conversations as "Direct" — correct semantically but misleading when the same conversation later grows to 3+ participants via `addConversationParticipant`. The conversation TYPE doesn't auto-promote from `one_to_one` to `group` on participant addition; only the participant list grows.
-
-**Why it exists:** Session 9 shipped `one_to_one` as a fixed type per ADR-026; participant promotion to `group` wasn't part of scope. The "Direct" label assumes 1:1 semantics that the underlying data doesn't enforce.
-
-**Cost of leaving it:** Mild confusion when a one_to_one thread sprouts a 3rd participant. The label still applies semantically (the conversation started 1:1) but the UX implies otherwise.
-
-**Fix sketch:** Either (a) auto-promote `type` to `group` in `addConversationParticipant` when count goes 2→3, or (b) compute the label based on current participant count rather than `type`. (b) is cleaner — `type` becomes pure history. ~20 min.
-
-**Trigger:** First user reports confusion about a "Direct" thread with 4 people.
-
-**Cross-references:** `components/conversations/ConversationsInbox.tsx:deriveTitle`; `actions/conversations.ts:addConversationParticipant`; ADR-026
-
----
-
-## DEBT-051 — Stakeholder portal nav missing Settings link
-**Added:** 14 May 2026 (Session 11 Phase F UX)
-**Codebase:** SaaS
-**Severity:** Low
-**Type:** UX
-**Status:** Open
-
-**The debt:** The portal layout (`app/portal/layout.tsx`) has nav links for Projects, Conversations, and (after S11) Notifications. There's no Settings link — stakeholders have to either know the URL `/portal/settings/notifications` or navigate via the bell icon's "Manage preferences →" inline link. No top-level Settings entry.
-
-**Why it exists:** The portal had no settings to manage before S11 added notification preferences. Adding the nav link wasn't in the kickoff scope.
-
-**Cost of leaving it:** Stakeholders may not discover their notification preferences. Mild discoverability issue.
-
-**Fix sketch:** Add `<Link href="/portal/settings/notifications">Settings</Link>` to the portal nav. Or add a `/portal/settings` index page that lists the (one) child. ~10 min.
-
-**Trigger:** Pre-launch UX pass OR when a second `/portal/settings/*` page lands.
-
-**Cross-references:** `app/portal/layout.tsx`
-
----
-
-## DEBT-050 — Misleading "check email to confirm" copy on stakeholder signup form
-**Added:** 14 May 2026 (Session 11 Phase F UX)
-**Codebase:** SaaS
-**Severity:** Low
-**Type:** UX / Copy
-**Status:** Open
-
-**The debt:** The stakeholder signup form (linked from the invitation email) shows "check your email to confirm" copy after submission. But the magic-link flow doesn't require email confirmation — Supabase Auth auto-confirms via the link click. The copy is a leftover from an earlier signup pattern and tells the user to do something they don't need to do.
-
-**Why it exists:** Copy carried over from the team-invitation flow which had a different confirmation mechanism. Wasn't updated when the stakeholder path adopted the cleaner magic-link contract.
-
-**Cost of leaving it:** Stakeholders may sit waiting for a (non-arriving) confirmation email when they're actually already signed in. Support burden.
-
-**Fix sketch:** Update the post-submit copy to match the actual flow: "Welcome — you're signed in. Redirecting to your portal..." with a fallback link. ~10 min.
-
-**Trigger:** Pre-launch UX pass.
-
-**Cross-references:** Stakeholder signup form component (location TBD during fix)
-
----
-
 ## DEBT-049 — Vercel 504 on `inviteStakeholder` from tx-bounded dispatcher + email sends
 **Added:** 13 May 2026 (Session 11 Phase F)
 **Codebase:** SaaS
@@ -378,66 +294,6 @@
 
 ---
 
-## DEBT-040 — "Create your own firm" link on /portal/projects for dual-context discoverability
-**Added:** 10 May 2026 (DEBT-037 hotfix follow-up)
-**Codebase:** SaaS
-**Severity:** Low
-**Type:** UX / Deferred decision
-
-**The debt:** Per ADR-031, the auth-callback routing now correctly sends a stakeholder (Sarah at T+1) to `/portal/projects`. For Sarah Step 2 (T+6 months) when she chooses to create her own firm via the wizard, she must currently know to manually URL-type `/onboarding`. No UI affordance points stakeholders at this path.
-
-**Why it exists:** The DEBT-037 hotfix scope was locked to routing + guard, no UX additions. The path is functionally open (`createOrganization` accepts dual-context callers, audits the `dual_context_signup` metadata) but not discoverable.
-
-**Cost of leaving it:** Stakeholders who legitimately want to create their own firm don't realise it's possible from `/portal/projects`. They'd need an external nudge (email, support, docs) to find `/onboarding`. Friction for a small but important Sarah-Step-2 cohort.
-
-**Fix sketch:** Add a button/link on `/portal/projects` ("Create your own firm" → `/onboarding`). ~30 min. Should also apply some lightweight confirmation state on the wizard when called from this path (the audit metadata already flags it; UX should match).
-
-**Trigger:** Session 11 (notifications + activity) — bundle with /select-context work in DEBT-041 since both are dual-context UX.
-
-**Cross-references:** ADR-031, ARCHITECTURE-saas.md §8, `app/portal/projects/page.tsx`
-
----
-
-## DEBT-039 — Multi-file selection via file picker fails
-**Added:** 10 May 2026 (Session 10 / production smoke test)
-**Codebase:** SaaS
-**Severity:** Medium
-**Type:** Bug
-
-**The debt:** Selecting 2-3+ files via the "Choose files" button in `FileUploadZone` silently fails — only one or zero files appear in the upload queue. Drag-and-drop with the same set of files works correctly. Single-file selection via the picker also works. Two divergent code paths in the same component.
-
-**Why it exists:** Suspected. Likely the file-input component is missing the `multiple` attribute on `<input type="file">`, OR the click handler reads `e.target.files[0]` (first file only) while the drop handler iterates `e.dataTransfer.files`. Phase F's multi-file test was implicitly drag-drop only — the picker path wasn't separately exercised.
-
-**Cost of leaving it:** Users who default to clicking instead of dragging hit a frustrating UX bug. Anyone uploading >1 file expects the picker to be equivalent to drag-drop. Bulk-upload workflows are blocked via the click path.
-
-**Fix sketch:** Verify `<input type="file" multiple>` is set in `FileUploadZone`. Consolidate the click and drop handlers to iterate over the files collection consistently (both should call the same internal `handleFiles(fileList)` helper). Add a Phase F runbook step that explicitly tests multi-file selection via the picker as separate from drag-drop. ~30-60 min including the runbook update + a fresh Phase F multi-upload check.
-
-**Trigger:** Session 11 — bundle with other file-upload UX polish if scope allows; otherwise opportunistic (any session that touches the file UI).
-
-**Cross-references:** `components/files/FileUploadZone.tsx` (Session 10, squash commit on main); production smoke test 10 May 2026
-
----
-
-## DEBT-038 — Project-create form doesn't send invitation emails
-**Added:** 10 May 2026 (Session 10 / production smoke test)
-**Codebase:** SaaS
-**Severity:** Medium
-**Type:** Bug
-
-**The debt:** Creating a new project with stakeholders/clients attached in the create form: the `project_stakeholders` row is created but no invitation email fires via Resend. Workaround: open the created project, delete the stakeholder, re-invite from the project detail page — that path sends the email correctly.
-
-**Why it exists:** Suspected two code paths for adding stakeholders. The project-create action calls a different (or older) helper that skips the Resend send call. The project-detail "invite" action calls the correct helper. This kind of duplication is exactly what Hard Rule 19 (atomic multi-table writes via Drizzle transactions) was meant to prevent — somewhere along the way the create-with-stakeholders path stopped going through the canonical `inviteStakeholder` action.
-
-**Cost of leaving it:** Stakeholders attached at project-create time silently never get told they have access. Org users assume the email went out and never follow up. Discoverability gap that compounds with quiet org-creation issues like DEBT-037.
-
-**Fix sketch:** Audit `actions/projects.ts` create flow vs `actions/stakeholders.ts inviteStakeholder`. Consolidate to a single `addStakeholder` helper that always fires email + audit log + Resend send, used by both code paths. ~1-2 hours including a regression test in `tests/actions/projects.test.ts` asserting that creating a project WITH a stakeholder also creates an `outbound_emails` row.
-
-**Trigger:** Session 11 — alongside notification dispatch work (notifications + invitations are adjacent surfaces; the email-send path will get a wider audit anyway).
-
-**Cross-references:** `actions/projects.ts` (project-create with stakeholders); `actions/stakeholders.ts inviteStakeholder` (canonical path); production smoke test 10 May 2026
-
----
-
 ## DEBT-037 — Stakeholder accounts silently become org owners on sign-in
 **Added:** 10 May 2026 (Session 10 / production smoke test)
 **Codebase:** SaaS
@@ -467,26 +323,6 @@ Likely also need to audit `actions/orgs.ts createOrganization` for any callers t
 **Resolution (10 May 2026):** Hotfix PR #7 (commit `0565777`, pre-fix tag `pre-debt-037-hotfix` at `8ac9c0c`) restored the §8 contract. Three invariants enshrined in ADR-031: `createOrganization` requires `intent='wizard_signup'` Zod literal; all post-auth routing flows through new `lib/auth/postAuthResolve.ts:pickDestination` helper; auth callback only links `clients.auth_user_id` (idempotent + anti-hijack), never inserts into orgs/users. Phase F walk on Vercel preview confirmed all three §8 identities route correctly (stakeholder-only → /portal/projects, net-new owner → /onboarding → /dashboard, dual-context Sarah Step 2 → /portal/projects then /onboarding → /dashboard with `dual_context_signup=true` audit metadata). Production cleanup script `scripts/cleanup-debt-037-orphan-orgs.ts` shipped — dry-run identified 2 candidate orgs (PCD/sarhads@ + Plan Daily/saliqueh@), both have activity → both protected by per-row pre-flight, manual product judgment required for each (not auto-cleanup). New SKILL.md Hard Rule 25 added (`pickDestination` centralization); v3.4 → v3.5.
 
 **Cross-references:** DEBT-034 (this supersedes — milder UX framing was an undercount of severity); production smoke test 10 May 2026 (sarhads@/saliqueh@ pair); `middleware.ts`; `actions/auth/*`; `actions/orgs.ts createOrganization`; ADR-009 (single-clients-row guarantee — the basis for stakeholder identity resolution); ADR-031 (closure ADR — three invariants enshrined); commit `0565777` (PR #7); `lib/auth/postAuthResolve.ts`; `tests/actions/auth-callback.test.ts`; `docs/debt-037-investigation.md`; `scripts/cleanup-debt-037-orphan-orgs.ts`
-
----
-
-## DEBT-036 — File download opens in new tab instead of saving
-**Added:** 10 May 2026 (Session 10 / production smoke test)
-**Codebase:** SaaS
-**Severity:** Low
-**Type:** Bug — UX
-
-**The debt:** Clicking the download affordance in `FileRow` (either `/dashboard/projects/[id]` or `/portal/projects/[id]`) opens the Supabase signed URL in a new tab. PDFs and images render inline in the browser; binary files prompt save. User expected a save dialog regardless of MIME type.
-
-**Why it exists:** `getDownloadUrl` returns a Supabase signed URL without a `Content-Disposition: attachment` header. The browser default behavior takes over — in-browser-renderable types display, others save. `FileRow.handleDownload` opens the URL via `window.open(url, '_blank')` rather than using a synthetic `<a download>` element.
-
-**Cost of leaving it:** Users who want to save (vs. preview) a PDF have to right-click → Save As, which is non-obvious. Mild UX paper-cut. Not a security or data issue.
-
-**Fix sketch:** Two options. (a) Pass `download=<filename>` as a query param when minting the signed URL — Supabase respects this and adds the Content-Disposition header server-side. (b) Use Supabase's `createSignedUrl(path, expiresIn, { download: filename })` option in `getDownloadUrl`. (c) On the client, swap `window.open(url, '_blank')` for `<a href={url} download={filename}>` triggered programmatically. Option (b) is cleanest — central + server-side. ~30 min including a unit test asserting the returned URL contains the disposition param.
-
-**Trigger:** Session 11 — bundle with other file-upload UX polish (DEBT-039 is in the same component).
-
-**Cross-references:** `actions/files.ts:getDownloadUrl`; `components/files/FileRow.tsx:handleDownload`; production smoke test 10 May 2026
 
 ---
 
@@ -1175,6 +1011,143 @@ Likely also need to audit `actions/orgs.ts createOrganization` for any callers t
 
 # Resolved Debt
 
+## DEBT-R015 — Project-create form doesn't send invitation emails
+**Resolved:** 15 May 2026 in commit `299beef` (Phase F UX polish bundle, branch `phase-f-ux-polish-bundle`)
+**Codebase:** SaaS
+**Severity:** Medium → Resolved
+**Type:** Bug (was DEBT-038)
+
+**The debt was:** `actions/projects.ts:createProject` inserted a `project_stakeholders` row inline (with `acceptedAt: new Date()`) when given a `clientId`, but it skipped the invitation email entirely. Stakeholders attached at project-create time were silently added — they never received the magic-link email telling them they had access. The workaround was to delete + re-invite from the project detail page (which routes through `inviteStakeholder` and sends the email correctly). Caught by the 10 May 2026 production smoke test.
+
+**Resolution:** `createProject` now inserts only the `projects` row in its transaction and delegates stakeholder attachment to `inviteStakeholder` post-commit. When `clientId` is supplied, the action looks up the client's email/name/phone/companyName/companyType from the `clients` table and calls `inviteStakeholder({ projectId, …, role: 'primary_client', visibilityProfile: 'full' })`. `inviteStakeholder` runs its full canonical flow — atomic `project_stakeholders` + `invitations` + auto-create general conversation + activity log inside its own tx, then post-tx the magic-link email (Resend), notification dispatch, and audit log.
+
+Two behavioural changes worth flagging:
+
+1. **`acceptedAt` is now `null` on first attach** (was `new Date()`). The stakeholder must click the magic link to flip to accepted. This matches the contract the project-detail "Invite" path already used. The org-side `listStakeholdersForProject` query doesn't filter on `acceptedAt`, so the `/dashboard/projects` UI is unchanged. The portal-side queries in `db/queries/portal-projects.ts` already filtered `isNotNull(projectStakeholders.acceptedAt)` — so a stakeholder added at project-create time won't see the project in `/portal/projects` until they click the email link. Consistent with how a normal invite from the project detail page worked.
+2. **Project + stakeholder are no longer one tx.** If `inviteStakeholder` fails after the `projects` row commits (rate limit, transient DB issue, Resend down), `createProject` returns `success: true` with a new `data.stakeholderWarning: 'invite_failed'` field. `ProjectCreateForm` consumes this and surfaces a `toast.warning` ("Stakeholder invitation didn't send. You can re-invite from the project page.") so the user can re-invite manually.
+
+3 new regression tests in `tests/actions/projects.test.ts`: (1) clientId triggers `sendEmail` with `template='stakeholder_invitation'` — the load-bearing assertion (this is the email-send signal that was missing pre-fix and the precondition for the `outbound_emails` row the DEBT entry referenced), (2) no clientId sends no email, (3) a rejected `sendEmail` surfaces `stakeholderWarning='invite_failed'` to the caller. The existing happy-path test required adding `sendEmail` / `sentry` / `ratelimit` mocks since it now passes through `inviteStakeholder`. Phase F verified end-to-end on Vercel preview: project created with fresh-email stakeholder → invitation email arrived → stakeholder signed up → magic-link auto-confirmed → stakeholder landed in portal with project visible.
+
+**Cross-references:** commit `299beef`; `actions/projects.ts:createProject`; `actions/stakeholders.ts:inviteStakeholder`; `components/projects/ProjectCreateForm.tsx`; `tests/actions/projects.test.ts`; production smoke test 10 May 2026; DEBT-063 (invitation landing page Sign up vs Sign in disambiguation — surfaced during this fix's Phase F walk)
+
+---
+
+## DEBT-R014 — Multi-file selection via file picker fails
+**Resolved:** 15 May 2026 in commit `6dbde00` (Phase F UX polish bundle, branch `phase-f-ux-polish-bundle`)
+**Codebase:** SaaS
+**Severity:** Medium → Resolved
+**Type:** Bug (was DEBT-039)
+
+**The debt was:** Selecting 2-3+ files via the "Choose files" button in `FileUploadZone` silently dropped every file beyond the first. Drag-drop with the same set of files worked. Bulk-upload flows were broken on the click path.
+
+**Resolution:** The DEBT-039 hypotheses ("missing `multiple` attribute" / "click handler reads `[0]`") were both false — `<input multiple>` was set and both handlers already routed through `handleFiles(fileList)`. Actual root cause: `input.files` is a **live** FileList tied to the input element. The click handler invoked `void handleFiles(e.target.files)` followed synchronously by `inputRef.current.value = ''` (the existing line that lets re-selecting the same file fire `onChange` again). `handleFiles` ran synchronously up through its first `await uploadOne(file)` (reading file 0); control returned; the value-reset emptied the live FileList; when the await resolved and the loop checked `i < fileList.length`, length was now 0 and the loop exited. Drag-drop was unaffected because `dataTransfer.files` is a separate, non-live FileList.
+
+Fix: snapshot the FileList to a plain `File[]` array at both handler boundaries (`Array.from(e.target.files)`, `Array.from(e.dataTransfer.files)`) so the iteration is decoupled from the input element. Extracted the iteration loop into `components/files/upload-helpers.ts:uploadBatchSequentially` so it's unit-testable from Vitest's Node environment without a React render tree; `handleFiles` in `FileUploadZone` is now a one-line wrapper. 3 unit tests cover ordered iteration, the load-bearing async-iteration regression (the exact case the bug produced), and empty-batch tolerance. Phase F verified on Vercel preview by selecting 3 files via the picker and confirming all 3 land in the upload queue.
+
+**Cross-references:** commit `6dbde00`; `components/files/upload-helpers.ts` (new); `components/files/FileUploadZone.tsx`; `tests/actions/upload-helpers.test.ts`; production smoke test 10 May 2026
+
+---
+
+## DEBT-R013 — File download opens in new tab instead of saving
+**Resolved:** 15 May 2026 in commit `f0806dd` (Phase F UX polish bundle, branch `phase-f-ux-polish-bundle`)
+**Codebase:** SaaS
+**Severity:** Low → Resolved
+**Type:** Bug / UX (was DEBT-036)
+
+**The debt was:** `actions/files.ts:getDownloadUrl` minted a signed URL with no Content-Disposition hint. Supabase Storage's default behaviour served PDFs and images inline, so clicking the FileRow download icon opened the file in a new tab rather than triggering a save dialog. Caught by the 10 May 2026 production smoke test.
+
+**Resolution:** Per the kickoff fix sketch option (b) — server-side, central: pass `{ download: file.originalFilename }` to `createSignedUrl(path, expiresIn, options)`. Supabase Storage appends `?download=<encoded-filename>` to the signed URL and responds with `Content-Disposition: attachment; filename="<originalFilename>"`. The browser now saves regardless of MIME type, using the original filename. `FileRow.handleDownload`'s `window.open(url, '_blank')` is unchanged — its existing comment ("Browser handles the download based on Content-Disposition header from Supabase Storage") is now factually accurate. One regression test in `tests/actions/files.test.ts` asserts the returned `downloadUrl` exposes the disposition param via `URL.searchParams.get('download')`. Phase F verified by downloading a PDF and confirming a browser Save dialog instead of an inline preview tab.
+
+**Cross-references:** commit `f0806dd`; `actions/files.ts:getDownloadUrl`; `tests/actions/files.test.ts`; `components/files/FileRow.tsx:handleDownload`; production smoke test 10 May 2026
+
+---
+
+## DEBT-R012 — Conversation thread empty-state layout pushes input to bottom
+**Resolved:** 15 May 2026 in commit `2dfb28c` (Phase F UX polish bundle, branch `phase-f-ux-polish-bundle`)
+**Codebase:** SaaS
+**Severity:** Low → Resolved
+**Type:** UX (was DEBT-054)
+
+**The debt was:** `ConversationDetailClient.tsx` used a single full-height flex layout (`h-[calc(100vh-12rem)]` + `flex-1` on the message scroll area) for all states. When the message list was empty, the flex-1 div still reserved every available pixel, pushing the composer to the viewport bottom — visually disconnected from the empty-state copy. First-message UX was slightly awkward.
+
+**Resolution:** Added an early-return compact layout for the fully-loaded empty case (`!loading && !error && messages.length === 0`) — empty-state copy stacked directly above the composer with simple `space-y-3` padding, no flex-fill. As soon as the thread has any message (or while loading / on error), the existing full-height layout takes over. The auto-scroll and mark-read effects already short-circuit on empty threads, so swapping which JSX subtree renders has no behavioural effect on those paths — only the visual layout changes. Phase F verified on Vercel preview by opening a newly-created empty conversation.
+
+**Cross-references:** commit `2dfb28c`; `components/conversations/ConversationDetailClient.tsx`
+
+---
+
+## DEBT-R011 — "Direct" conversation label misleading with 3+ participants
+**Resolved:** 15 May 2026 in commit `016f39e` (Phase F UX polish bundle, branch `phase-f-ux-polish-bundle`)
+**Codebase:** SaaS
+**Severity:** Low → Resolved
+**Type:** UX (was DEBT-052)
+
+**The debt was:** `ConversationsInbox.tsx:deriveTitle` switched on `conversation.type` to label rows in the inbox. `type` is set at row-creation time and never mutated — when a `one_to_one` thread gained a third participant via `addConversationParticipant`, the inbox row continued labeling itself "Direct" forever. The data and the label drifted.
+
+**Resolution:** Extracted `deriveTitle` to `components/conversations/deriveTitle.ts` so the function is unit-testable from the Node Vitest environment without pulling the client component's JSX import chain through. Rewrote per the kickoff fix sketch option (b): label from the current participant count, not `type`. Logic — explicit name override wins; `general` threads join other-participant names ("General" fallback); `participantNames.length ≤ 2` → join other names ("Direct" fallback); 3+ → "Group". The `type` column is now history-only. 7 unit tests in `tests/actions/derive-title.test.ts` cover all branches; the load-bearing assertion: a 3-participant thread with `type='one_to_one'` labels as "Group." Phase F verified by adding a 3rd participant to a one_to_one thread and confirming the inbox row's label flipped from "Direct" to "Group."
+
+Two intentional scope limits: (1) the `TYPE_LABELS` Badge in the same component still reads `c.type` — same bug class, fix would have been mechanical, but kicked out per Hard Rule 1 ("no scope expansion"). (2) the conversation **detail page heading** (separate title source) also still shows "Direct" for promoted 1:1 threads — observed during Phase F. Both could be follow-up DEBTs if a user-driven signal makes them urgent; not yet warranted.
+
+**Cross-references:** commit `016f39e`; `components/conversations/deriveTitle.ts` (new); `components/conversations/ConversationsInbox.tsx`; `tests/actions/derive-title.test.ts`; `actions/conversations.ts:addConversationParticipant`; ADR-026
+
+---
+
+## DEBT-R010 — "Create your own firm" link on /portal/projects for dual-context discoverability
+**Resolved:** 15 May 2026 in commit `0796a9b` (Phase F UX polish bundle, branch `phase-f-ux-polish-bundle`)
+**Codebase:** SaaS
+**Severity:** Low → Resolved
+**Type:** UX / Deferred decision (was DEBT-040)
+
+**The debt was:** ADR-031 made `/onboarding` accept dual-context callers (a stakeholder creating their own firm — the Sarah-Step-2 cohort) but no UI affordance pointed stakeholders at the path. The DEBT-037 hotfix scope was locked to routing + guard, leaving the UX bridge open.
+
+**Resolution:** Added a bottom CTA Card on `/portal/projects` ("Running your own firm?") with a soft "Create your own firm" button linking to `/onboarding?from=portal`. On the wizard side, `OnboardingStartPage` now reads the `from` searchParam (Next 15 async pattern) and passes a `fromPortal` prop to `OrgTypePicker`, which renders a muted banner above the firm-type cards reassuring the stakeholder that their existing access stays intact. The `dual_context_signup` audit metadata was already firing inside `createOrganization` for callers with a pre-existing `clients` row — no audit change needed; this is the matching UX. Phase F verified the click-through from portal projects → onboarding banner → firm-type picker.
+
+**Cross-references:** commit `0796a9b`; `app/portal/projects/page.tsx`; `app/(onboarding)/onboarding/page.tsx`; `components/onboarding/OrgTypePicker.tsx`; ADR-031; ARCHITECTURE-saas.md §8
+
+---
+
+## DEBT-R009 — Stakeholder portal nav missing Settings link
+**Resolved:** 15 May 2026 in commit `65166c3` (Phase F UX polish bundle, branch `phase-f-ux-polish-bundle`)
+**Codebase:** SaaS
+**Severity:** Low → Resolved
+**Type:** UX (was DEBT-051)
+
+**The debt was:** Session 11 Phase 9 added `/portal/settings/notifications` (stakeholder notification preferences) but the portal nav (`app/portal/layout.tsx`) had no link to it. Stakeholders had to know the URL or paste it in manually.
+
+**Resolution:** Added a "Settings" `<Link>` to the portal nav after the bell-icon notifications link, matching the existing "My projects" link's pattern (plain text, hover state, no badge). Phase F verified the link is visible and clicks land on `/portal/settings/notifications`.
+
+**Cross-references:** commit `65166c3`; `app/portal/layout.tsx`
+
+---
+
+## DEBT-R008 — Misleading "check email to confirm" copy on stakeholder signup form
+**Resolved:** 15 May 2026 in commit `4aaf79b` (Phase F UX polish bundle, branch `phase-f-ux-polish-bundle`)
+**Codebase:** SaaS
+**Severity:** Low → Resolved
+**Type:** UX / Copy (was DEBT-050)
+
+**The debt was:** `/signup?invitation=<token>` (the stakeholder signup form linked from the invitation email) showed "Check your email to confirm your account" post-submit. Supabase Auth auto-confirms via the magic-link, so stakeholders were already signed in by the time the message rendered — the copy told them to do something they didn't need to do, leading to confusion or abandoned signups.
+
+**Resolution:** Branched the signup page's success state by `invitationToken`. When the search param is set, the form renders "Welcome — you're signed in. Redirecting to your portal…" in a green confirmation block with a "Continue to portal" fallback link, then `useRouter().push` to `/invitations/<token>/accept` via a 500 ms timeout (so the copy is visible before navigation). The non-invitation signup path keeps the existing "Check your email to confirm…" copy unchanged — that flow still requires email confirmation under current Supabase project settings. CardDescription for the invitation case updated to match. Phase F verified end-to-end with a fresh `+alias@gmail.com` invitee.
+
+**Cross-references:** commit `4aaf79b`; `app/(auth)/signup/page.tsx`; related DEBT-063 (invitation landing page Sign up vs Sign in disambiguation, surfaced during this fix's verification)
+
+---
+
+## DEBT-R007 — Notification bell icon styling polish
+**Resolved:** 15 May 2026 in commit `4e3a7f6` (Phase F UX polish bundle, branch `phase-f-ux-polish-bundle`)
+**Codebase:** SaaS
+**Severity:** Low → Resolved
+**Type:** UX (was DEBT-053)
+
+**The debt was:** Phase 8 used a 🔔 emoji for the notification bell in both `app/(org)/layout.tsx` and `app/portal/layout.tsx`. The emoji rendered inconsistently across platforms (macOS Chrome vs iOS Safari) and didn't match the visual weight of the lucide icons used elsewhere in the nav.
+
+**Resolution:** Swapped `<span aria-hidden>🔔</span>` for `<Bell aria-hidden="true" className="size-4" />` from `lucide-react` (already a project dep). The Notifications link's `inline-flex items-center gap-1.5` container was already consistent with the adjacent Conversations link, so only the icon glyph changed. No tests; visual verification on Vercel preview confirmed the icon matches adjacent nav weight on both org and portal sides.
+
+**Cross-references:** commit `4e3a7f6`; `app/(org)/layout.tsx`; `app/portal/layout.tsx`
+
+---
+
 ## DEBT-R006 — `listFilesForProject` pooler-bypass of `project_files` visibility RLS
 **Resolved:** 14 May 2026 in commit `1a958dd` (MINI-SESSION-DEBT-059, branch `debt-059-stakeholder-files-filter`)
 **Codebase:** SaaS
@@ -1319,10 +1292,10 @@ For quick lookup of what needs to happen at each upcoming milestone:
 - DEBT-030: Project detail UI lacks deep-link to conversations (file portion resolved)
 - DEBT-031: Unread badge in nav + per-row indicator
 - DEBT-035: File restore UI surface
-- DEBT-036: File download opens in new tab instead of saving
-- DEBT-038: Project-create form doesn't send invitation emails
-- DEBT-039: Multi-file selection via file picker fails
-- DEBT-040: "Create your own firm" link on /portal/projects (dual-context discoverability)
+- DEBT-036: File download opens in new tab instead of saving → **Resolved** 15 May 2026 (Phase F UX polish bundle, commit `f0806dd`) — see DEBT-R013
+- DEBT-038: Project-create form doesn't send invitation emails → **Resolved** 15 May 2026 (Phase F UX polish bundle, commit `299beef`) — see DEBT-R015
+- DEBT-039: Multi-file selection via file picker fails → **Resolved** 15 May 2026 (Phase F UX polish bundle, commit `6dbde00`) — see DEBT-R014
+- DEBT-040: "Create your own firm" link on /portal/projects (dual-context discoverability) → **Resolved** 15 May 2026 (Phase F UX polish bundle, commit `0796a9b`) — see DEBT-R010
 - DEBT-041: `/select-context` page for dual-context users
 
 ## Indefinite (revisit at trigger)

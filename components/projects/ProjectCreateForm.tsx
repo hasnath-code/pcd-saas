@@ -117,6 +117,11 @@ export function ProjectCreateForm({
         return;
       }
       toast.success(`Project ${values.projectNumber} created.`);
+      if (result.data.stakeholderWarning === 'invite_failed') {
+        toast.warning(
+          "Stakeholder invitation didn't send. You can re-invite from the project page.",
+        );
+      }
       router.push(`/dashboard/projects/${result.data.projectId}`);
     });
   }

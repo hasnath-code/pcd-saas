@@ -1,8 +1,8 @@
 'use client';
 
 import Link from 'next/link';
-import { useSearchParams } from 'next/navigation';
-import { Suspense, useState, useTransition } from 'react';
+import { useRouter, useSearchParams } from 'next/navigation';
+import { Suspense, useEffect, useState, useTransition } from 'react';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
@@ -28,8 +28,10 @@ export default function SignupPage() {
 function SignupInner() {
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
+  const [redirectingTo, setRedirectingTo] = useState<string | null>(null);
   const [isPending, startTransition] = useTransition();
   const searchParams = useSearchParams();
+  const router = useRouter();
   const invitationToken = searchParams.get('invitation');
   const next = invitationToken ? `/invitations/${invitationToken}/accept` : undefined;
 
@@ -38,13 +40,31 @@ function SignupInner() {
     defaultValues: { email: '', password: '' },
   });
 
+  // Invitation flow: Supabase auto-confirms the email on signUp, so the user
+  // is already signed in by the time the action returns. Push them to the
+  // accept route (which then redirects into the portal). 500 ms lets the
+  // confirmation copy render before navigation.
+  useEffect(() => {
+    if (!redirectingTo) return;
+    const timer = setTimeout(() => router.push(redirectingTo), 500);
+    return () => clearTimeout(timer);
+  }, [redirectingTo, router]);
+
   function onSubmit(values: z.infer<typeof schema>) {
     setError(null);
     setSuccess(null);
+    setRedirectingTo(null);
     startTransition(async () => {
       const result = await signUp({ ...values, next });
-      if ('error' in result) setError(result.error);
-      else setSuccess(result.message ?? 'Check your email.');
+      if ('error' in result) {
+        setError(result.error);
+        return;
+      }
+      if (invitationToken && next) {
+        setRedirectingTo(next);
+      } else {
+        setSuccess(result.message ?? 'Check your email.');
+      }
     });
   }
 
@@ -54,7 +74,7 @@ function SignupInner() {
         <CardTitle>Create account</CardTitle>
         <CardDescription>
           {invitationToken
-            ? "After confirming your email you'll be added to the team."
+            ? "You'll be signed in and added to the project automatically."
             : "We'll send a confirmation email. Click the link to finish signing up."}
         </CardDescription>
       </CardHeader>
@@ -89,7 +109,15 @@ function SignupInner() {
             />
             {error && <p className="text-sm text-destructive">{error}</p>}
             {success && <p className="text-sm text-green-600">{success}</p>}
-            <Button type="submit" className="w-full" disabled={isPending || !!success}>
+            {redirectingTo && (
+              <div className="rounded-md border border-green-200 bg-green-50 p-3 text-sm text-green-800">
+                <p>Welcome — you&apos;re signed in. Redirecting to your portal&hellip;</p>
+                <Link href={redirectingTo} className="mt-1 inline-block underline">
+                  Continue to portal
+                </Link>
+              </div>
+            )}
+            <Button type="submit" className="w-full" disabled={isPending || !!success || !!redirectingTo}>
               {isPending ? 'Creating account…' : 'Create account'}
             </Button>
           </form>

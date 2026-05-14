@@ -7,11 +7,17 @@ import { OrgTypePicker } from '@/components/onboarding/OrgTypePicker';
 
 // Onboarding step 1: pick the firm type. If the auth user already has a `users`
 // row, bounce them to /dashboard (no second-org setup in Phase 1a).
-export default async function OnboardingStartPage() {
+export default async function OnboardingStartPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ from?: string }>;
+}) {
   const user = await requireAuthOrRedirect();
   if (await authUserHasMembership(user.id)) {
     redirect('/dashboard');
   }
+
+  const { from } = await searchParams;
 
   const types = await db
     .select({
@@ -21,5 +27,5 @@ export default async function OnboardingStartPage() {
     .from(orgTypes)
     .orderBy(orgTypes.slug);
 
-  return <OrgTypePicker orgTypes={types} />;
+  return <OrgTypePicker orgTypes={types} fromPortal={from === 'portal'} />;
 }

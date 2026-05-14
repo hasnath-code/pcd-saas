@@ -13,6 +13,7 @@ import {
 import { db } from '@/db';
 import {
   clientOrgMemberships,
+  clients,
   projectStakeholders,
   projects,
   users,
@@ -21,9 +22,9 @@ import {
 } from '@/db/schema';
 import * as Sentry from '@sentry/nextjs';
 import { logAudit } from '@/lib/audit/log';
-import { VISIBILITY_PROFILES } from '@/lib/visibility-profiles';
 import { dispatchNotification } from '@/lib/notifications/dispatch';
 import { logActivityTx } from '@/lib/activity/log';
+import { inviteStakeholder } from '@/actions/stakeholders';
 
 export type ProjectActionResult<T = void> =
   | (T extends void ? { success: true } : { success: true; data: T })
@@ -41,14 +42,31 @@ const CreateProjectInput = z.object({
   scopeSummary: z.string().trim().max(2000).optional(),
 });
 
+export type CreateProjectData = {
+  projectId: string;
+  // Surfaced to the UI when the project itself was created but the
+  // stakeholder attachment (post-commit, via inviteStakeholder) didn't
+  // complete — e.g. rate limit, transient DB issue, email send failure.
+  // The project page can show a toast and let the user re-invite from
+  // the project detail page.
+  stakeholderWarning?: 'invite_failed';
+};
+
 // Create a project in the caller's org. Verifies the workflow and client (if
 // provided) both belong to the caller's org. Resolves currentStageId to the
 // stage with position=1 of the chosen workflow (rejects if the workflow has
 // no stages — would only happen for a malformed clone). System templates
 // can't be assigned to projects per ARCHITECTURE §13.
+//
+// When clientId is supplied, the stakeholder attachment is delegated to
+// inviteStakeholder post-commit (DEBT-038). That sends the magic-link
+// invitation email, dispatches notifications, logs the invite audit row,
+// and inserts project_stakeholders with acceptedAt=null. Pre-DEBT-038 this
+// action used to insert project_stakeholders inline with acceptedAt=now()
+// and skip the email — the stakeholder was silently attached.
 export async function createProject(
   input: unknown,
-): Promise<ProjectActionResult<{ projectId: string }>> {
+): Promise<ProjectActionResult<CreateProjectData>> {
   let ctx: Awaited<ReturnType<typeof requireOrgUser>>;
   try {
     ctx = await requireOrgUser();
@@ -132,13 +150,12 @@ export async function createProject(
 
   const projectId = uuidv7();
 
-  // When clientId is supplied we additionally insert a project_stakeholders
-  // row with role='primary_client' (visibility_profile='full', accepted_at=now()
-  // since the org user is implicitly opting the client into the project).
-  // The pair lives in one transaction so a duplicate-project race aborts
-  // both rows together. The Client column on /dashboard/projects reads from
-  // this row going forward (see Session 6 plan decision #5). Legacy Session 5
-  // projects without a stakeholder row show "—" in the column.
+  // Project insert lives in its own transaction. The stakeholder attachment
+  // is delegated to inviteStakeholder post-commit so the magic-link email,
+  // notification dispatch, and audit log fire through the canonical path
+  // (DEBT-038). Trade-off: the project is created even if the subsequent
+  // stakeholder invite fails; the caller receives `stakeholderWarning` and
+  // can re-invite from the project detail page.
   try {
     await db.transaction(async (tx) => {
       await tx.insert(projects).values({
@@ -151,24 +168,6 @@ export async function createProject(
         scopeSummary,
         createdBy: ctx.userId,
       });
-
-      if (clientId) {
-        const fullFlags = VISIBILITY_PROFILES.full;
-        await tx.insert(projectStakeholders).values({
-          id: uuidv7(),
-          projectId,
-          clientId,
-          role: 'primary_client',
-          visibilityProfile: 'full',
-          canMessage: fullFlags.canMessage,
-          canUploadFiles: fullFlags.canUploadFiles,
-          canViewFinancials: fullFlags.canViewFinancials,
-          canViewDrawings: fullFlags.canViewDrawings,
-          canViewSchedule: fullFlags.canViewSchedule,
-          invitedBy: ctx.userId,
-          acceptedAt: new Date(),
-        });
-      }
     });
   } catch (e) {
     // Race-condition fallback: if two concurrent createProject calls slip
@@ -191,7 +190,69 @@ export async function createProject(
 
   revalidatePath('/dashboard/projects');
 
-  return { success: true, data: { projectId } };
+  let stakeholderWarning: CreateProjectData['stakeholderWarning'];
+  if (clientId) {
+    const clientRows = await db
+      .select({
+        email: clients.email,
+        name: clients.name,
+        phone: clients.phone,
+        companyName: clients.companyName,
+        companyType: clients.companyType,
+      })
+      .from(clients)
+      .where(and(eq(clients.id, clientId), isNull(clients.deletedAt)))
+      .limit(1);
+    if (clientRows.length === 0) {
+      Sentry.captureException(
+        new Error(
+          'createProject: clientId resolved a membership row but the clients row is missing/soft-deleted',
+        ),
+        {
+          tags: { action: 'createProject', org_id: ctx.orgId, project_id: projectId },
+          extra: { clientId },
+        },
+      );
+      stakeholderWarning = 'invite_failed';
+    } else {
+      const c = clientRows[0];
+      const inviteResult = await inviteStakeholder({
+        projectId,
+        email: c.email,
+        name: c.name,
+        phone: c.phone ?? undefined,
+        companyName: c.companyName ?? undefined,
+        companyType: c.companyType ?? undefined,
+        role: 'primary_client',
+        visibilityProfile: 'full',
+      });
+      if ('error' in inviteResult) {
+        Sentry.captureException(
+          new Error(
+            `createProject: inviteStakeholder returned error ${inviteResult.error}${
+              inviteResult.reason ? `/${inviteResult.reason}` : ''
+            }`,
+          ),
+          {
+            tags: { action: 'createProject', org_id: ctx.orgId, project_id: projectId },
+            extra: {
+              clientId,
+              inviteError: inviteResult.error,
+              inviteReason: inviteResult.reason,
+            },
+          },
+        );
+        stakeholderWarning = 'invite_failed';
+      } else if (inviteResult.deliveryWarning === 'email_send_failed') {
+        stakeholderWarning = 'invite_failed';
+      }
+    }
+  }
+
+  return {
+    success: true,
+    data: stakeholderWarning ? { projectId, stakeholderWarning } : { projectId },
+  };
 }
 
 const UpdateProjectInput = z.object({

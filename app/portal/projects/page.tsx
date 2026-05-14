@@ -17,6 +17,7 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
+import { Button } from '@/components/ui/button';
 import { ProjectStageBadge } from '@/components/projects/ProjectStageBadge';
 
 export default async function PortalProjectsListPage() {
@@ -92,6 +93,24 @@ export default async function PortalProjectsListPage() {
           </CardContent>
         </Card>
       )}
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base font-semibold">
+            Running your own firm?
+          </CardTitle>
+          <CardDescription>
+            You can also create your own organisation on PCD and invite your
+            own clients. Your stakeholder access on existing projects stays
+            the same.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <Button asChild variant="outline">
+            <Link href="/onboarding?from=portal">Create your own firm</Link>
+          </Button>
+        </CardContent>
+      </Card>
     </main>
   );
 }

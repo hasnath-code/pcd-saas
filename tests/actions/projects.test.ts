@@ -20,6 +20,24 @@ vi.mock('next/cache', () => ({
   revalidatePath: vi.fn(),
 }));
 
+// DEBT-038: createProject now calls inviteStakeholder post-commit when a
+// clientId is supplied, which in turn rate-limits, calls Resend, and
+// captures Sentry exceptions. Stub those out so the tests are deterministic.
+vi.mock('@/lib/email/send', () => ({
+  sendEmail: vi.fn().mockResolvedValue({ messageId: 'mocked-msg', emailEventId: null }),
+}));
+
+vi.mock('@sentry/nextjs', () => ({
+  addBreadcrumb: vi.fn(),
+  captureException: vi.fn(),
+  setTag: vi.fn(),
+  setContext: vi.fn(),
+}));
+
+vi.mock('@/lib/ratelimit', () => ({
+  rateLimit: vi.fn().mockResolvedValue({ limited: false, retryAfterSec: 0 }),
+}));
+
 import {
   createProject,
   restoreProject,
@@ -27,6 +45,7 @@ import {
   updateProject,
 } from '@/actions/projects';
 import * as auth from '@/lib/auth/requireAuth';
+import * as email from '@/lib/email/send';
 import { AuthError } from '@/lib/auth/requireAuth';
 
 describe('createProject', () => {
@@ -42,6 +61,11 @@ describe('createProject', () => {
     vi.mocked(auth.requireOrgUser).mockResolvedValue(
       asOrgUserContext(f.userA, f.orgA.id, 'owner'),
     );
+    vi.mocked(email.sendEmail).mockClear();
+    vi.mocked(email.sendEmail).mockResolvedValue({
+      messageId: 'mocked-msg',
+      emailEventId: null,
+    });
   });
 
   test('happy path → success + project exists in DB', async () => {
@@ -136,6 +160,63 @@ describe('createProject', () => {
       workflowId: f.extras.orgAWorkflow.id,
     });
     expect(result).toMatchObject({ error: 'not_authenticated' });
+  });
+
+  // DEBT-038 regression: pre-fix createProject inserted project_stakeholders
+  // inline and skipped the magic-link email entirely. The fix delegates to
+  // inviteStakeholder post-commit, which is the canonical path that calls
+  // sendEmail with template='stakeholder_invitation' (the row that lands in
+  // outbound_emails downstream).
+  test('with a clientId, triggers the stakeholder_invitation email send', async () => {
+    const projectNumber = `P-debt038-${Date.now()}-${uuidv7().slice(0, 8)}`;
+    const result = await createProject({
+      projectNumber,
+      siteAddress: '1 DEBT-038 Lane',
+      workflowId: f.extras.orgAWorkflow.id,
+      clientId: f.extras.orgAClient.id,
+    });
+
+    expect('error' in result).toBe(false);
+    if ('error' in result) return;
+    expect(result.data.stakeholderWarning).toBeUndefined();
+
+    expect(email.sendEmail).toHaveBeenCalledTimes(1);
+    const args = vi.mocked(email.sendEmail).mock.calls[0]?.[0];
+    expect(args).toMatchObject({
+      template: 'stakeholder_invitation',
+      orgId: f.orgA.id,
+    });
+
+    await f.service.from('projects').delete().eq('id', result.data.projectId);
+  });
+
+  test('without a clientId, sends no email', async () => {
+    const result = await createProject({
+      projectNumber: `P-no-client-${Date.now()}-${uuidv7().slice(0, 8)}`,
+      siteAddress: '2 No-Client Lane',
+      workflowId: f.extras.orgAWorkflow.id,
+    });
+    expect('error' in result).toBe(false);
+    if ('error' in result) return;
+    expect(result.data.stakeholderWarning).toBeUndefined();
+    expect(email.sendEmail).not.toHaveBeenCalled();
+
+    await f.service.from('projects').delete().eq('id', result.data.projectId);
+  });
+
+  test('surfaces stakeholderWarning when inviteStakeholder email send fails', async () => {
+    vi.mocked(email.sendEmail).mockRejectedValueOnce(new Error('resend down'));
+    const result = await createProject({
+      projectNumber: `P-warn-${Date.now()}-${uuidv7().slice(0, 8)}`,
+      siteAddress: '3 Warning Lane',
+      workflowId: f.extras.orgAWorkflow.id,
+      clientId: f.extras.orgAClient.id,
+    });
+    expect('error' in result).toBe(false);
+    if ('error' in result) return;
+    expect(result.data.stakeholderWarning).toBe('invite_failed');
+
+    await f.service.from('projects').delete().eq('id', result.data.projectId);
   });
 });
 
