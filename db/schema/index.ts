@@ -27,3 +27,4 @@ export * from './project-activity';
 // Phase 2
 export * from './documents';
 export * from './document-tokens';
+export * from './payments';

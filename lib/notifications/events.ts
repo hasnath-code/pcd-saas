@@ -24,16 +24,28 @@ export const NOTIFICATION_EVENT_TYPES = [
   'milestone.scheduled',
   'milestone.completed',
   // Phase 2 Session 12: quote lifecycle. Used as activity-row event types
-  // (logActivityTx requires NotificationEventType). No dispatchNotification
-  // calls in Session 12 — adding them here keeps NOTIFICATION_CONTENT
-  // exhaustive (compile-time enforced) and lets Session 13/14 wire
-  // dispatches without re-touching this file. Existing identities don't
-  // have notification_preferences rows for these new types; the seed-on-
-  // identity-create path covers new identities, and a backfill migration
-  // is the natural shape if/when dispatch is wired (see DEBT note for
-  // future-Phase-2-Session-13).
+  // (logActivityTx requires NotificationEventType). Session 13 wired
+  // dispatchNotification fan-out for both (org members + can_view_financials
+  // stakeholders) and shipped migration 0027 to backfill existing identities'
+  // notification_preferences rows — see DEBT-064 resolution.
   'quote.sent',
   'quote.accepted',
+  // Phase 2 Session 13: invoice lifecycle + payment lifecycle. Dispatch is
+  // wired for invoice.sent (org + financial-visible stakeholders, plus a
+  // direct client email) and payment.recorded (org + financial-visible
+  // stakeholders). invoice.revised + payment.corrected are activity-only
+  // by design — kept in the exhaustive maps so future UI / preferences
+  // matrix work doesn't grow drift.
+  //
+  //   payment.corrected dispatch recipient resolution: ORG MEMBERS ONLY
+  //   (no stakeholders, no client email). Corrections are administrative.
+  //
+  // Existing identities got rows for these via migration 0027; new identities
+  // get them via the seedNotificationDefaultsTx path on identity creation.
+  'invoice.sent',
+  'invoice.revised',
+  'payment.recorded',
+  'payment.corrected',
 ] as const;
 
 export type NotificationEventType = (typeof NOTIFICATION_EVENT_TYPES)[number];

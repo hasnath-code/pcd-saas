@@ -18,6 +18,7 @@ import {
   documents,
   projectStakeholders,
   projects,
+  users,
 } from '@/db/schema';
 import { logActivityTx } from '@/lib/activity/log';
 import { logAudit } from '@/lib/audit/log';
@@ -26,7 +27,10 @@ import { getAppUrl } from '@/lib/get-app-url';
 import { rateLimit } from '@/lib/ratelimit';
 import { allocateDocumentNumber } from '@/lib/documents/numbering';
 import { calculateTotals, type LineItem } from '@/lib/documents/vat';
+import { diffInvoiceFields } from '@/lib/documents/revise-diff';
+import { dispatchNotification } from '@/lib/notifications/dispatch';
 import { quoteSentEmail } from '@/lib/email/templates/quote-sent';
+import { invoiceSentEmail } from '@/lib/email/templates/invoice-sent';
 
 // Phase 2 §2 — quote lifecycle server actions. createQuote / updateQuoteDraft
 // / sendQuote follow ARCHITECTURE-saas.md §20 (requireOrgUser + Zod + tx +
@@ -392,6 +396,26 @@ export async function sendQuote(
     });
   }
 
+  // DEBT-064: post-commit dispatchNotification fan-out for quote.sent.
+  // Recipients: org members + accepted stakeholders with
+  // can_view_financials=true. Composes with the direct client email above;
+  // dispatchNotification populates the in-app inbox + drives email reminders
+  // for any other financial-visible stakeholders beyond the primary client.
+  // Per-recipient try/catch → Sentry, never re-throws (ADR-033).
+  await dispatchQuoteOrInvoiceNotification({
+    eventType: 'quote.sent',
+    orgId: ctx.orgId,
+    projectId: doc.projectId,
+    actionName: 'sendQuote',
+    payload: {
+      projectId: doc.projectId,
+      projectNumber,
+      documentId,
+      documentNumber: doc.documentNumber,
+      total: Number(doc.total),
+    },
+  });
+
   await logAudit({
     orgId: ctx.orgId,
     userId: ctx.userId,
@@ -521,6 +545,26 @@ export async function acceptQuote(
     return { error: 'internal_error', reason: `accept_quote:${reason}` };
   }
 
+  // DEBT-064: post-commit dispatchNotification for quote.accepted. The
+  // accepting client is identified only by `accepted_by_name` (no auth.uid
+  // per ADR-034) — recipient fan-out is org members + accepted financial-
+  // visible stakeholders. The latter may include the client who just hit
+  // Accept (we can't exclude them — there's no actor_id); the dispatcher
+  // doesn't double-count rows and the redundancy is acceptable.
+  await dispatchQuoteOrInvoiceNotification({
+    eventType: 'quote.accepted',
+    orgId: doc.orgId,
+    projectId: doc.projectId,
+    actionName: 'acceptQuote',
+    payload: {
+      projectId: doc.projectId,
+      projectNumber,
+      documentId,
+      documentNumber: doc.documentNumber,
+      acceptedByName,
+    },
+  });
+
   await logAudit({
     orgId: doc.orgId,
     // No userId — actor is the token-bearing public caller. Per ADR-034 the
@@ -539,4 +583,747 @@ export async function acceptQuote(
   revalidatePath(`/dashboard/projects/${doc.projectId}`, 'layout');
   revalidatePath(`/q/${token}`, 'page');
   return { success: true, data: { documentId, alreadyAccepted: false } };
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Shared post-commit dispatch helper for quote/invoice events. Reused by
+// sendQuote / acceptQuote (DEBT-064 wiring) and sendInvoice. Recipients are
+// org members + accepted stakeholders with can_view_financials=true (the §14
+// gate). Per-recipient try/catch → Sentry, never re-throws (ADR-033).
+//
+// Not exported — these actions are the only callers; widening the surface
+// would invite drift. recordPayment / correctPayment use a slightly different
+// shape (correctPayment is org-only) and inline their own resolution.
+
+async function dispatchQuoteOrInvoiceNotification(opts: {
+  eventType: 'quote.sent' | 'quote.accepted' | 'invoice.sent' | 'invoice.revised';
+  orgId: string;
+  projectId: string;
+  actionName: string;
+  payload: Record<string, unknown>;
+}): Promise<void> {
+  const { eventType, orgId, projectId, actionName, payload } = opts;
+
+  const orgMembers = await db
+    .select({ id: users.id })
+    .from(users)
+    .where(and(eq(users.orgId, orgId), isNull(users.deletedAt)));
+
+  const financialStakeholders = await db
+    .select({ clientId: projectStakeholders.clientId })
+    .from(projectStakeholders)
+    .where(
+      and(
+        eq(projectStakeholders.projectId, projectId),
+        eq(projectStakeholders.canViewFinancials, true),
+        isNotNull(projectStakeholders.acceptedAt),
+        isNull(projectStakeholders.deletedAt),
+      ),
+    );
+
+  for (const u of orgMembers) {
+    try {
+      await dispatchNotification({
+        recipientType: 'user',
+        recipientId: u.id,
+        eventType,
+        payload,
+      });
+    } catch (err) {
+      Sentry.captureException(err, {
+        tags: {
+          scope: 'notification_dispatch',
+          action: actionName,
+          event_type: eventType,
+          org_id: orgId,
+        },
+        extra: { recipientUserId: u.id, projectId },
+      });
+    }
+  }
+
+  for (const s of financialStakeholders) {
+    try {
+      await dispatchNotification({
+        recipientType: 'client',
+        recipientId: s.clientId,
+        eventType,
+        payload,
+      });
+    } catch (err) {
+      Sentry.captureException(err, {
+        tags: {
+          scope: 'notification_dispatch',
+          action: actionName,
+          event_type: eventType,
+          org_id: orgId,
+        },
+        extra: { recipientClientId: s.clientId, projectId },
+      });
+    }
+  }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Phase 2 Session 13 — invoice lifecycle. createInvoice / updateInvoiceDraft /
+// sendInvoice mirror the Session 12 quote pattern. reviseInvoice ports V1's
+// "mutable row + revision log" approach: status stays at 'sent', the row
+// mutates in place, and revision_log_payload appends one entry per call.
+//
+// Key decision (locked in the four-decision table, Q1):
+//   - createInvoice with subtype='initial' allows NO accepted quote (deposit
+//     / mobilisation flow).
+//   - createInvoice with subtype='final'  REQUIRES an accepted quote;
+//     otherwise returns {error:'conflict', reason:'no_accepted_quote'}.
+//
+// reviseInvoice uses semantic diff (lib/documents/revise-diff.ts) — a no-op
+// resave returns {error:'conflict', reason:'no_changes'} rather than logging
+// a phantom revision.
+
+const InvoiceSubtypeSchema = z.enum(['initial', 'final']);
+
+const CreateInvoiceInput = z.object({
+  projectId: z.string().uuid(),
+  subtype: InvoiceSubtypeSchema,
+  lineItems: z.array(LineItemSchema).min(1),
+  discountPct: z.number().min(0).max(100).default(0),
+  vatApplicable: z.boolean().default(false),
+});
+
+const UpdateInvoiceDraftInput = z.object({
+  documentId: z.string().uuid(),
+  subtype: InvoiceSubtypeSchema.optional(),
+  lineItems: z.array(LineItemSchema).min(1).optional(),
+  discountPct: z.number().min(0).max(100).optional(),
+  vatApplicable: z.boolean().optional(),
+});
+
+const ReviseInvoiceInput = z.object({
+  documentId: z.string().uuid(),
+  subtype: InvoiceSubtypeSchema.optional(),
+  lineItems: z.array(LineItemSchema).min(1).optional(),
+  discountPct: z.number().min(0).max(100).optional(),
+  vatApplicable: z.boolean().optional(),
+  reason: z.string().trim().min(1).max(500),
+});
+
+// Helper — fetch the latest accepted quote's total for a project. Returns
+// null when no accepted quote exists. Used by createInvoice's final-subtype
+// precondition. Reads through the pooler (RLS bypass — caller is already
+// org-authenticated via requireOrgUser).
+async function getProjectAcceptedQuoteTotal(
+  projectId: string,
+): Promise<number | null> {
+  const rows = await db
+    .select({ total: documents.total, acceptedAt: documents.acceptedAt })
+    .from(documents)
+    .where(
+      and(
+        eq(documents.projectId, projectId),
+        eq(documents.type, 'quote'),
+        isNotNull(documents.acceptedAt),
+        isNull(documents.deletedAt),
+      ),
+    );
+  if (rows.length === 0) return null;
+  // Most-recently-accepted wins if there are multiple (revised quote chain).
+  rows.sort((a, b) => {
+    const at = a.acceptedAt ? a.acceptedAt.getTime() : 0;
+    const bt = b.acceptedAt ? b.acceptedAt.getTime() : 0;
+    return bt - at;
+  });
+  return Number(rows[0].total);
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// createInvoice — surveyor drafts an invoice (initial or final).
+
+export async function createInvoice(
+  input: unknown,
+): Promise<
+  DocumentActionResult<{ documentId: string; documentNumber: string }>
+> {
+  let ctx: Awaited<ReturnType<typeof requireOrgUser>>;
+  try {
+    ctx = await requireOrgUser();
+  } catch (e) {
+    if (e instanceof AuthError) return { error: e.code, reason: e.message };
+    throw e;
+  }
+
+  const parsed = CreateInvoiceInput.safeParse(input);
+  if (!parsed.success) {
+    return {
+      error: 'validation_error',
+      reason: parsed.error.issues[0]?.message ?? 'Invalid input',
+    };
+  }
+  const { projectId, subtype, lineItems, discountPct, vatApplicable } = parsed.data;
+
+  // Project resolution: org-scoped, not soft-deleted.
+  const projectRows = await db
+    .select({ orgId: projects.orgId })
+    .from(projects)
+    .where(and(eq(projects.id, projectId), isNull(projects.deletedAt)))
+    .limit(1);
+  if (projectRows.length === 0 || projectRows[0].orgId !== ctx.orgId) {
+    return { error: 'not_found', reason: 'project' };
+  }
+
+  // Decision Q1 — final invoices require an accepted quote; initial doesn't.
+  if (subtype === 'final') {
+    const acceptedTotal = await getProjectAcceptedQuoteTotal(projectId);
+    if (acceptedTotal === null) {
+      return { error: 'conflict', reason: 'no_accepted_quote' };
+    }
+  }
+
+  const totals = calculateTotals({
+    lineItems: lineItems as LineItem[],
+    discountPct,
+    vatApplicable,
+  });
+
+  const documentId = uuidv7();
+  let documentNumber: string;
+  try {
+    const result = await db.transaction(async (tx) => {
+      const allocated = await allocateDocumentNumber({
+        tx,
+        projectId,
+        type: 'invoice',
+      });
+
+      await tx.insert(documents).values({
+        id: documentId,
+        orgId: ctx.orgId,
+        projectId,
+        type: 'invoice',
+        invoiceSubtype: subtype,
+        status: 'draft',
+        documentNumber: allocated.documentNumber,
+        sequence: allocated.sequence,
+        lineItems: lineItems as LineItem[],
+        discountPct,
+        vatApplicable,
+        subtotal: totals.subtotal,
+        vatAmount: totals.vatAmount,
+        total: totals.total,
+        createdBy: ctx.userId,
+      });
+
+      return { documentNumber: allocated.documentNumber };
+    });
+    documentNumber = result.documentNumber;
+  } catch (e) {
+    const reason = e instanceof Error ? e.message : String(e);
+    return { error: 'internal_error', reason: `create_invoice:${reason}` };
+  }
+
+  await logAudit({
+    orgId: ctx.orgId,
+    userId: ctx.userId,
+    action: 'create',
+    resourceType: 'document',
+    resourceId: documentId,
+    metadata: {
+      project_id: projectId,
+      type: 'invoice',
+      invoice_subtype: subtype,
+      document_number: documentNumber,
+      total: totals.total,
+    },
+  });
+
+  revalidatePath(`/dashboard/projects/${projectId}`, 'layout');
+  return { success: true, data: { documentId, documentNumber } };
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// updateInvoiceDraft — surveyor edits a draft invoice.
+
+export async function updateInvoiceDraft(
+  input: unknown,
+): Promise<DocumentActionResult> {
+  let ctx: Awaited<ReturnType<typeof requireOrgUser>>;
+  try {
+    ctx = await requireOrgUser();
+  } catch (e) {
+    if (e instanceof AuthError) return { error: e.code, reason: e.message };
+    throw e;
+  }
+
+  const parsed = UpdateInvoiceDraftInput.safeParse(input);
+  if (!parsed.success) {
+    return {
+      error: 'validation_error',
+      reason: parsed.error.issues[0]?.message ?? 'Invalid input',
+    };
+  }
+  const { documentId, subtype, lineItems, discountPct, vatApplicable } = parsed.data;
+
+  const rows = await db
+    .select({
+      id: documents.id,
+      projectId: documents.projectId,
+      orgId: documents.orgId,
+      status: documents.status,
+      type: documents.type,
+      currentInvoiceSubtype: documents.invoiceSubtype,
+      currentLineItems: documents.lineItems,
+      currentDiscountPct: documents.discountPct,
+      currentVatApplicable: documents.vatApplicable,
+    })
+    .from(documents)
+    .where(and(eq(documents.id, documentId), isNull(documents.deletedAt)))
+    .limit(1);
+
+  if (rows.length === 0 || rows[0].orgId !== ctx.orgId) {
+    return { error: 'not_found', reason: 'document' };
+  }
+  const row = rows[0];
+  if (row.type !== 'invoice') {
+    return { error: 'conflict', reason: 'not_an_invoice' };
+  }
+  if (row.status !== 'draft') {
+    return { error: 'conflict', reason: 'not_draft' };
+  }
+
+  // If subtype is changing to 'final', enforce the accepted-quote precondition
+  // (mirrors createInvoice's Q1 decision).
+  if (subtype === 'final' && row.currentInvoiceSubtype !== 'final') {
+    const acceptedTotal = await getProjectAcceptedQuoteTotal(row.projectId);
+    if (acceptedTotal === null) {
+      return { error: 'conflict', reason: 'no_accepted_quote' };
+    }
+  }
+
+  const nextSubtype =
+    subtype !== undefined ? subtype : (row.currentInvoiceSubtype as 'initial' | 'final' | null);
+  const nextLineItems =
+    lineItems !== undefined
+      ? (lineItems as LineItem[])
+      : (row.currentLineItems as LineItem[]);
+  const nextDiscountPct =
+    discountPct !== undefined ? discountPct : Number(row.currentDiscountPct);
+  const nextVatApplicable =
+    vatApplicable !== undefined ? vatApplicable : row.currentVatApplicable;
+
+  const totals = calculateTotals({
+    lineItems: nextLineItems,
+    discountPct: nextDiscountPct,
+    vatApplicable: nextVatApplicable,
+  });
+
+  await db
+    .update(documents)
+    .set({
+      invoiceSubtype: nextSubtype,
+      lineItems: nextLineItems,
+      discountPct: nextDiscountPct,
+      vatApplicable: nextVatApplicable,
+      subtotal: totals.subtotal,
+      vatAmount: totals.vatAmount,
+      total: totals.total,
+    })
+    .where(eq(documents.id, documentId));
+
+  await logAudit({
+    orgId: ctx.orgId,
+    userId: ctx.userId,
+    action: 'update',
+    resourceType: 'document',
+    resourceId: documentId,
+    metadata: {
+      project_id: row.projectId,
+      total: totals.total,
+      fields: [
+        'invoice_subtype',
+        'line_items',
+        'discount_pct',
+        'vat_applicable',
+        'subtotal',
+        'vat_amount',
+        'total',
+      ],
+    },
+  });
+
+  revalidatePath(`/dashboard/projects/${row.projectId}`, 'layout');
+  return { success: true };
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// sendInvoice — draft → sent, mint token, email client, dispatch notifications.
+
+export async function sendInvoice(
+  input: unknown,
+): Promise<DocumentActionResult<{ token: string }>> {
+  let ctx: Awaited<ReturnType<typeof requireOrgUser>>;
+  try {
+    ctx = await requireOrgUser();
+  } catch (e) {
+    if (e instanceof AuthError) return { error: e.code, reason: e.message };
+    throw e;
+  }
+
+  const parsed = DocumentIdInput.safeParse(input);
+  if (!parsed.success) {
+    return {
+      error: 'validation_error',
+      reason: parsed.error.issues[0]?.message ?? 'Invalid input',
+    };
+  }
+  const { documentId } = parsed.data;
+
+  const docRows = await db
+    .select({
+      id: documents.id,
+      orgId: documents.orgId,
+      projectId: documents.projectId,
+      status: documents.status,
+      type: documents.type,
+      invoiceSubtype: documents.invoiceSubtype,
+      documentNumber: documents.documentNumber,
+      total: documents.total,
+    })
+    .from(documents)
+    .where(and(eq(documents.id, documentId), isNull(documents.deletedAt)))
+    .limit(1);
+
+  if (docRows.length === 0 || docRows[0].orgId !== ctx.orgId) {
+    return { error: 'not_found', reason: 'document' };
+  }
+  const doc = docRows[0];
+  if (doc.type !== 'invoice') return { error: 'conflict', reason: 'not_an_invoice' };
+  if (doc.status !== 'draft') return { error: 'conflict', reason: 'not_draft' };
+  if (doc.invoiceSubtype !== 'initial' && doc.invoiceSubtype !== 'final') {
+    // Defensive — createInvoice forces a subtype, but reject if drift sneaks in.
+    return { error: 'conflict', reason: 'invoice_subtype_missing' };
+  }
+
+  const projectRows = await db
+    .select({ projectNumber: projects.projectNumber })
+    .from(projects)
+    .where(eq(projects.id, doc.projectId))
+    .limit(1);
+  const projectNumber = projectRows[0]?.projectNumber ?? '';
+
+  const tokenId = uuidv7();
+  let mintedToken: string;
+  try {
+    const result = await db.transaction(async (tx) => {
+      await tx
+        .update(documents)
+        .set({ status: 'sent', sentAt: new Date() })
+        .where(eq(documents.id, documentId));
+
+      const [insertedToken] = await tx
+        .insert(documentTokens)
+        .values({ id: tokenId, documentId, documentType: 'invoice' })
+        .returning({ token: documentTokens.token });
+
+      await logActivityTx(tx, {
+        projectId: doc.projectId,
+        actorType: 'user',
+        actorId: ctx.userId,
+        eventType: 'invoice.sent',
+        payload: {
+          projectId: doc.projectId,
+          projectNumber,
+          documentId,
+          documentNumber: doc.documentNumber,
+          invoiceSubtype: doc.invoiceSubtype,
+          total: Number(doc.total),
+        },
+        visibleToStakeholders: true,
+      });
+
+      return { token: insertedToken.token };
+    });
+    mintedToken = result.token;
+  } catch (e) {
+    const reason = e instanceof Error ? e.message : String(e);
+    return { error: 'internal_error', reason: `send_invoice:${reason}` };
+  }
+
+  // Post-commit: direct Resend email to the primary client. Same shape as
+  // sendQuote — sees the /i/[token] public link in the email.
+  try {
+    const recipientRows = await db
+      .select({ email: clients.email, name: clients.name })
+      .from(projectStakeholders)
+      .innerJoin(clients, eq(clients.id, projectStakeholders.clientId))
+      .where(
+        and(
+          eq(projectStakeholders.projectId, doc.projectId),
+          eq(projectStakeholders.role, 'primary_client'),
+          isNotNull(projectStakeholders.acceptedAt),
+          isNull(projectStakeholders.deletedAt),
+          isNull(clients.deletedAt),
+        ),
+      )
+      .limit(1);
+
+    if (recipientRows.length > 0) {
+      const recipient = recipientRows[0];
+      const viewUrl = `${getAppUrl()}/i/${mintedToken}`;
+      const rendered = invoiceSentEmail({
+        invoiceNumber: doc.documentNumber,
+        subtype: doc.invoiceSubtype as 'initial' | 'final',
+        total: Number(doc.total),
+        viewUrl,
+      });
+      await sendEmail({
+        to: recipient.email,
+        subject: rendered.subject,
+        html: rendered.html,
+        template: 'invoice-sent',
+        orgId: ctx.orgId,
+      });
+    }
+  } catch (err) {
+    Sentry.captureException(err, {
+      tags: {
+        scope: 'notification_dispatch',
+        action: 'sendInvoice',
+        event_type: 'invoice.sent',
+        org_id: ctx.orgId,
+      },
+      extra: { documentId, projectId: doc.projectId },
+    });
+  }
+
+  // Post-commit: dispatchNotification fan-out (org + financial-visible
+  // stakeholders) per ADR-033.
+  await dispatchQuoteOrInvoiceNotification({
+    eventType: 'invoice.sent',
+    orgId: ctx.orgId,
+    projectId: doc.projectId,
+    actionName: 'sendInvoice',
+    payload: {
+      projectId: doc.projectId,
+      projectNumber,
+      documentId,
+      documentNumber: doc.documentNumber,
+      invoiceSubtype: doc.invoiceSubtype,
+      total: Number(doc.total),
+    },
+  });
+
+  await logAudit({
+    orgId: ctx.orgId,
+    userId: ctx.userId,
+    action: 'update',
+    resourceType: 'document',
+    resourceId: documentId,
+    metadata: {
+      project_id: doc.projectId,
+      transition: 'draft_to_sent',
+      document_number: doc.documentNumber,
+      invoice_subtype: doc.invoiceSubtype,
+    },
+  });
+
+  revalidatePath(`/dashboard/projects/${doc.projectId}`, 'layout');
+  return { success: true, data: { token: mintedToken } };
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// reviseInvoice — V1 port. Mutates a SENT invoice in place; appends a
+// revision_log_payload entry. Drafts are edited via updateInvoiceDraft;
+// reviseInvoice rejects non-sent statuses with {conflict, not_sent}.
+//
+// Semantic diff (lib/documents/revise-diff.ts) prevents phantom log entries
+// from no-op resaves. If nothing actually changed, returns
+// {error:'conflict', reason:'no_changes'}.
+
+export async function reviseInvoice(
+  input: unknown,
+): Promise<DocumentActionResult<{ revisionNumber: number; fieldsChanged: string[] }>> {
+  let ctx: Awaited<ReturnType<typeof requireOrgUser>>;
+  try {
+    ctx = await requireOrgUser();
+  } catch (e) {
+    if (e instanceof AuthError) return { error: e.code, reason: e.message };
+    throw e;
+  }
+
+  const parsed = ReviseInvoiceInput.safeParse(input);
+  if (!parsed.success) {
+    return {
+      error: 'validation_error',
+      reason: parsed.error.issues[0]?.message ?? 'Invalid input',
+    };
+  }
+  const { documentId, subtype, lineItems, discountPct, vatApplicable, reason } = parsed.data;
+
+  const rows = await db
+    .select({
+      id: documents.id,
+      orgId: documents.orgId,
+      projectId: documents.projectId,
+      status: documents.status,
+      type: documents.type,
+      currentInvoiceSubtype: documents.invoiceSubtype,
+      currentLineItems: documents.lineItems,
+      currentDiscountPct: documents.discountPct,
+      currentVatApplicable: documents.vatApplicable,
+      currentTotal: documents.total,
+      currentRevisionNumber: documents.revisionNumber,
+      currentRevisionLog: documents.revisionLogPayload,
+      documentNumber: documents.documentNumber,
+    })
+    .from(documents)
+    .where(and(eq(documents.id, documentId), isNull(documents.deletedAt)))
+    .limit(1);
+
+  if (rows.length === 0 || rows[0].orgId !== ctx.orgId) {
+    return { error: 'not_found', reason: 'document' };
+  }
+  const row = rows[0];
+  if (row.type !== 'invoice') return { error: 'conflict', reason: 'not_an_invoice' };
+  if (row.status !== 'sent') return { error: 'conflict', reason: 'not_sent' };
+
+  const prevSubtype =
+    (row.currentInvoiceSubtype as 'initial' | 'final' | null) ?? null;
+  const nextSubtype =
+    subtype !== undefined ? subtype : prevSubtype;
+  const nextLineItems =
+    lineItems !== undefined
+      ? (lineItems as LineItem[])
+      : (row.currentLineItems as LineItem[]);
+  const nextDiscountPct =
+    discountPct !== undefined ? discountPct : Number(row.currentDiscountPct);
+  const nextVatApplicable =
+    vatApplicable !== undefined ? vatApplicable : row.currentVatApplicable;
+
+  // Final-subtype guard: if revising INTO 'final', the project must have an
+  // accepted quote (mirrors createInvoice / updateInvoiceDraft).
+  if (nextSubtype === 'final' && prevSubtype !== 'final') {
+    const acceptedTotal = await getProjectAcceptedQuoteTotal(row.projectId);
+    if (acceptedTotal === null) {
+      return { error: 'conflict', reason: 'no_accepted_quote' };
+    }
+  }
+
+  // Semantic diff — see lib/documents/revise-diff.ts. A no-op resave (same
+  // semantic content as the current row, possibly with re-serialised JSONB)
+  // rejects with conflict/no_changes rather than incrementing revision_number.
+  const diff = diffInvoiceFields(
+    {
+      lineItems: row.currentLineItems as LineItem[],
+      discountPct: Number(row.currentDiscountPct),
+      vatApplicable: row.currentVatApplicable,
+      invoiceSubtype: prevSubtype,
+    },
+    {
+      lineItems: nextLineItems,
+      discountPct: nextDiscountPct,
+      vatApplicable: nextVatApplicable,
+      invoiceSubtype: nextSubtype,
+    },
+  );
+  if (!diff.hasChanges) {
+    return { error: 'conflict', reason: 'no_changes' };
+  }
+
+  const totals = calculateTotals({
+    lineItems: nextLineItems,
+    discountPct: nextDiscountPct,
+    vatApplicable: nextVatApplicable,
+  });
+
+  const newRevisionNumber = Number(row.currentRevisionNumber) + 1;
+  const previousTotal = Number(row.currentTotal);
+  const revisionEntry = {
+    rev: newRevisionNumber,
+    previous_amount: previousTotal,
+    new_amount: totals.total,
+    fields_changed: diff.fieldsChanged,
+    reason,
+    revised_at: new Date().toISOString(),
+    revised_by: ctx.userId,
+  };
+  const existingLog = Array.isArray(row.currentRevisionLog)
+    ? (row.currentRevisionLog as unknown[])
+    : [];
+  const nextLog = [...existingLog, revisionEntry];
+
+  const projectRows = await db
+    .select({ projectNumber: projects.projectNumber })
+    .from(projects)
+    .where(eq(projects.id, row.projectId))
+    .limit(1);
+  const projectNumber = projectRows[0]?.projectNumber ?? '';
+
+  try {
+    await db.transaction(async (tx) => {
+      await tx
+        .update(documents)
+        .set({
+          invoiceSubtype: nextSubtype,
+          lineItems: nextLineItems,
+          discountPct: nextDiscountPct,
+          vatApplicable: nextVatApplicable,
+          subtotal: totals.subtotal,
+          vatAmount: totals.vatAmount,
+          total: totals.total,
+          revisionNumber: newRevisionNumber,
+          revisionLogPayload: nextLog,
+        })
+        .where(eq(documents.id, documentId));
+
+      await logActivityTx(tx, {
+        projectId: row.projectId,
+        actorType: 'user',
+        actorId: ctx.userId,
+        eventType: 'invoice.revised',
+        payload: {
+          projectId: row.projectId,
+          projectNumber,
+          documentId,
+          documentNumber: row.documentNumber,
+          revisionNumber: newRevisionNumber,
+          previousAmount: previousTotal,
+          newAmount: totals.total,
+          fieldsChanged: diff.fieldsChanged,
+          reason,
+        },
+        visibleToStakeholders: true,
+      });
+    });
+  } catch (e) {
+    const errReason = e instanceof Error ? e.message : String(e);
+    return { error: 'internal_error', reason: `revise_invoice:${errReason}` };
+  }
+
+  await logAudit({
+    orgId: ctx.orgId,
+    userId: ctx.userId,
+    action: 'update',
+    resourceType: 'document',
+    resourceId: documentId,
+    metadata: {
+      project_id: row.projectId,
+      revise: {
+        rev: newRevisionNumber,
+        previous_amount: previousTotal,
+        new_amount: totals.total,
+        fields_changed: diff.fieldsChanged,
+        reason,
+      },
+    },
+  });
+
+  // Note: no notification dispatch on revise this session. The activity row
+  // is the canonical record; future UX may opt in to a per-org "notify clients
+  // on invoice revision" toggle, at which point a dispatchQuoteOrInvoiceNotification
+  // call goes here.
+
+  revalidatePath(`/dashboard/projects/${row.projectId}`, 'layout');
+  return {
+    success: true,
+    data: { revisionNumber: newRevisionNumber, fieldsChanged: diff.fieldsChanged },
+  };
 }

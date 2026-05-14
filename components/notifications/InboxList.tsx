@@ -31,6 +31,10 @@ const EVENT_LABELS: Record<NotificationEventType, string> = {
   'milestone.completed': 'Milestone completed',
   'quote.sent': 'Quote sent',
   'quote.accepted': 'Quote accepted',
+  'invoice.sent': 'Invoice sent',
+  'invoice.revised': 'Invoice revised',
+  'payment.recorded': 'Payment recorded',
+  'payment.corrected': 'Payment corrected',
 };
 
 function renderSummary(
@@ -50,6 +54,14 @@ function renderSummary(
       return `${s(payload.stakeholderName, 'A stakeholder')} (${s(payload.stakeholderEmail, 'unknown email')}) joined ${s(payload.projectNumber, 'a project')}`;
     case 'milestone.scheduled':
       return `Milestone "${s(payload.label, 'a milestone')}" scheduled on ${s(payload.projectNumber, 'a project')}`;
+    case 'invoice.sent':
+      return `Invoice ${s(payload.documentNumber, '')} on ${s(payload.projectNumber, 'a project')} was sent`;
+    case 'invoice.revised':
+      return `Invoice ${s(payload.documentNumber, '')} on ${s(payload.projectNumber, 'a project')} was revised`;
+    case 'payment.recorded':
+      return `${s(payload.amountFormatted, 'A payment')} recorded on ${s(payload.projectNumber, 'a project')}`;
+    case 'payment.corrected':
+      return `Payment on ${s(payload.projectNumber, 'a project')} corrected: ${s(payload.previousAmountFormatted, '')} → ${s(payload.newAmountFormatted, '')}`;
     default:
       return EVENT_LABELS[eventType];
   }

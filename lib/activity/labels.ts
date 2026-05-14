@@ -23,6 +23,10 @@ const LABELS: Record<NotificationEventType, string> = {
   'milestone.completed': 'completed a milestone',
   'quote.sent': 'sent a quote',
   'quote.accepted': 'accepted a quote',
+  'invoice.sent': 'sent an invoice',
+  'invoice.revised': 'revised an invoice',
+  'payment.recorded': 'recorded a payment',
+  'payment.corrected': 'corrected a recorded payment',
 };
 
 export function activityLabel(eventType: NotificationEventType): string {
@@ -78,6 +82,27 @@ export function activitySummary(
       const sender = s(payload.senderName);
       if (snippet && sender) return `${sender}: "${snippet}"`;
       return snippet ?? null;
+    }
+    case 'invoice.sent': {
+      const doc = s(payload.documentNumber);
+      const subtype = s(payload.invoiceSubtype);
+      if (doc && subtype) return `${doc} (${subtype})`;
+      return doc ?? null;
+    }
+    case 'invoice.revised': {
+      const doc = s(payload.documentNumber);
+      const rev = s(payload.revisionNumber);
+      if (doc && rev) return `${doc} — revision ${rev}`;
+      return doc ?? null;
+    }
+    case 'payment.recorded': {
+      return s(payload.amountFormatted);
+    }
+    case 'payment.corrected': {
+      const from = s(payload.previousAmountFormatted);
+      const to = s(payload.newAmountFormatted);
+      if (from && to) return `${from} → ${to}`;
+      return null;
     }
     default:
       return null;
