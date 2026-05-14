@@ -50,6 +50,48 @@
 
 # Open Debt
 
+## DEBT-065 — Refunds not modelled (payments.amount > 0 CHECK precludes negative rows)
+**Added:** 15 May 2026 (Phase 2 Session 13)
+**Codebase:** SaaS
+**Severity:** Low
+**Type:** Deferred decision
+**Status:** Open
+
+**The debt:** `payments.amount` has a `CHECK (amount > 0)` constraint enforcing positive-only rows. Refunds — money returned to the client — cannot be expressed as a `payments` row. The `derivePaymentStatus` ladder includes no `refunded` state for this reason; the kickoff §4 table called out `refunded` as out of scope.
+
+**Why it exists:** The kickoff locked positive-only payments to keep the running-total SUM intuitive (no signed semantics) and the recordPayment validation simple. Clean refund modelling needs either (a) a separate `payment_refunds` table with its own audit log, or (b) a `refund_for_payment_id` self-FK + inverted-amount convention (rejected — breaks the `amount > 0` invariant).
+
+**Cost of leaving it:** Surveyors who issue a refund have to handle it as an off-portal bank entry — the project's running-total stays inflated unless they `correctPayment` the original row to a smaller value (which loses the audit story of "we received X then refunded Y"). For Phase 2 + 3 timescale this is acceptable; refunds are rare in surveyor practice. Becomes a real problem when (a) Stripe billing lands (Phase 6) and refunds-via-Stripe become a one-click flow, or (b) the financial model deferred to Phase 5+ needs to surface "net revenue per project" accurately.
+
+**Fix sketch:** New table `payment_refunds (id, payment_id FK, amount > 0, refunded_at, refunded_by, reason, created_at, deleted_at)`. RLS mirrors payments. `derivePaymentStatus` ladder grows a `refunded` branch when `SUM(refunds.amount) > 0` for the project. `getProjectPaymentSnapshot` aggregates refunds alongside payments. UI exposes "Record refund" alongside "Record payment". ~half-session of work; ships when (a) Stripe lands or (b) a user actually asks for refund modelling.
+
+**Trigger:** First customer requests refund tracking, OR Stripe billing lands.
+
+**Cross-references:** `db/migrations/0025_payments.sql` (the CHECK); `lib/documents/payment-status.ts` (the ladder; refunded branch absent); ARCHITECTURE-saas.md §12.P2.5; phase-2-kickoff.md §4 (refunds explicitly out of scope).
+
+---
+
+## DEBT-064 — Backfill notification_preferences for new Phase 2 event types
+**Added:** 15 May 2026 (Phase 2 Session 12 carryover, ARCHITECTURE-saas.md §35.12)
+**Codebase:** SaaS
+**Severity:** Medium
+**Type:** Operational
+**Status:** Resolved (15 May 2026)
+
+**The debt:** Session 11's per-identity notification_preferences seed runs only on identity create. Session 12 added `quote.sent` + `quote.accepted` event types but deferred dispatch wiring. If Session 13/14 wired `dispatchNotification` for those events without a backfill, existing identities would silently never receive the new notifications — `dispatchNotification` returns 0 inserts for unconfigured event types. Not a data leak, but operationally surprising.
+
+**Why it exists:** Session 12's scope was the schema + the four quote actions. Wiring dispatch (and therefore needing the backfill) was a Session 13 follow-up.
+
+**Cost of leaving it:** Existing surveyor / stakeholder identities would not receive in-app or email notifications for `quote.sent` / `quote.accepted` / `invoice.sent` / `invoice.revised` / `payment.recorded` / `payment.corrected`. New identities (created post-Session-11) get them via the per-identity seed.
+
+**Fix:** Session 13 shipped:
+- Migration `0027_backfill_notification_prefs_for_phase_2_events.sql` — idempotent `INSERT … SELECT … ON CONFLICT DO NOTHING` for all `users` (where `deleted_at IS NULL`) + all `clients` (with at least one `client_org_memberships` row, `deleted_at IS NULL`) × the 6 new event types × 4 channels. `in_app` + `email` enabled by default; `push` + `sms` disabled (matches `DEFAULT_ENABLED_CHANNELS`). Verified idempotent via `tests/actions/debt-064-backfill.test.ts`.
+- Dispatch wiring on `sendQuote` / `acceptQuote` (the Session 12 deferred work) + `sendInvoice` / `recordPayment` / `correctPayment` (Session 13 new). All call sites follow ADR-033 (post-commit, per-recipient try/catch → Sentry, never re-throws). `correctPayment` dispatches to org members only; the rest fan out to org + accepted financial-visible stakeholders. Verified via `tests/actions/debt-064-dispatch.test.ts`.
+
+**Cross-references:** Resolution branch `session-13-invoices-payments-status`; ARCHITECTURE-saas.md §35.13 + §12.P2.6; `actions/documents.ts:dispatchQuoteOrInvoiceNotification`; `actions/payments.ts:dispatchPaymentNotification`; `lib/notifications/seed-defaults.ts` (the per-identity seed that continues to cover new identities).
+
+---
+
 ## DEBT-063 — Invitation landing page doesn't guide new invitees to Sign up vs Sign in
 **Added:** 15 May 2026 (Phase F UX polish bundle — DEBT-038 verification walk)
 **Codebase:** SaaS

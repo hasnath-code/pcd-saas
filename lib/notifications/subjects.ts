@@ -146,6 +146,31 @@ export const NOTIFICATION_CONTENT: Record<
     ctaLabel: 'Open project',
     ctaPath: projectPath(p, 'org'),
   }),
+  // Phase 2 Session 13 — invoice + payment events.
+  'invoice.sent': (p) => ({
+    subject: `Invoice ${s(p.documentNumber, '')} sent`,
+    bodyText: `Invoice ${s(p.documentNumber, '')} on ${s(p.projectNumber, 'a project')} was sent to the client.`,
+    ctaLabel: 'Open project',
+    ctaPath: projectPath(p, 'org'),
+  }),
+  'invoice.revised': (p) => ({
+    subject: `Invoice ${s(p.documentNumber, '')} revised`,
+    bodyText: `Invoice ${s(p.documentNumber, '')} on ${s(p.projectNumber, 'a project')} was revised (revision ${s(p.revisionNumber, '')}).`,
+    ctaLabel: 'Open project',
+    ctaPath: projectPath(p, 'org'),
+  }),
+  'payment.recorded': (p) => ({
+    subject: `Payment recorded on ${s(p.projectNumber, 'a project')}`,
+    bodyText: `A payment of ${s(p.amountFormatted, '')} was recorded on ${s(p.projectNumber, 'a project')}.`,
+    ctaLabel: 'Open project',
+    ctaPath: projectPath(p, 'org'),
+  }),
+  'payment.corrected': (p) => ({
+    subject: `Payment corrected on ${s(p.projectNumber, 'a project')}`,
+    bodyText: `A recorded payment on ${s(p.projectNumber, 'a project')} was corrected from ${s(p.previousAmountFormatted, '')} to ${s(p.newAmountFormatted, '')}.`,
+    ctaLabel: 'Open project',
+    ctaPath: projectPath(p, 'org'),
+  }),
 };
 
 // Thin facade for callers that only need the subject string (audit logs,

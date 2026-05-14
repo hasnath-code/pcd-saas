@@ -1,9 +1,9 @@
 # PCD Portal SaaS — Architecture Reference
 
-**Version:** 0.17 (**Phase 2 Session 12 shipped** — quote lifecycle end-to-end on the `documents` schema. 2 new tables (`documents`, `document_tokens` via migrations 0023/0024). One unified table discriminated by `type` (`quote`/`invoice`/`receipt`); status enum (`draft`/`sent`/`superseded`/`void`); acceptance via `accepted_at IS NOT NULL` (boolean flip, not a status value). Four server actions: `createQuote` / `updateQuoteDraft` / `sendQuote` (post-commit client email per ADR-033) / `acceptQuote` (new token-authorized public-write pattern per ADR-034 — no `requireOrgUser`, pooler bypass, `publicDoc` rate-limit, idempotent). Helpers: `lib/documents/vat.ts` ports V2's `calculateTotals` with integer-pennies math + per-step rounding; `lib/documents/numbering.ts` allocates `{projectNumber}-Q{seq}` under a `SELECT FOR UPDATE` project lock. Public `/q/[token]` route lit up (Phase 1a placeholder deferred to here). Org-side `/dashboard/projects/[id]/quotes/{new,[quoteId]}` for create/edit/view. ADR-034 codifies the token-authorized public-write pattern.)
+**Version:** 0.18 (**Phase 2 Session 13 shipped** — invoice lifecycle + payments + derived payment-status axis + DEBT-064 closed. Migration 0025 `payments` (4 per-command RLS policies; SELECT mirrors `documents` financial-visibility gate). Migration 0026 additive columns on `documents` (`payment_id` FK, `invoice_subtype`, `revision_number`, `revision_log_payload`). Migration 0027 idempotent backfill of `notification_preferences` rows for existing identities × 6 new event types (closes DEBT-064). Four new server actions on `actions/documents.ts` (`createInvoice` / `updateInvoiceDraft` / `sendInvoice` / `reviseInvoice`) + two on `actions/payments.ts` (`recordPayment` / `correctPayment`). `sendQuote` and `acceptQuote` extended with post-commit `dispatchNotification` fan-out (the deferred Session 12 wiring). Pure helper `lib/documents/payment-status.ts:derivePaymentStatus` computes the 7-state axis on read (`no_quote → quote_sent → quote_accepted → initial_invoice_sent → partially_paid → paid_in_full → overpaid`). `lib/documents/revise-diff.ts` runs semantic comparison (no JSONB drift) — no-op revisions reject. Public `/i/[token]` route lit up. Decision: subtype=`initial` allowed without an accepted quote (deposit/mobilisation flow); subtype=`final` requires one. correctPayment dispatch is org-members-only.)
 **Last updated:** 15 May 2026
 **Maintainer:** Hasnath
-**Codebase status:** **Phase 2 Session 12 shipped** 15 May 2026. New surfaces: `/dashboard/projects/[id]/quotes/new`, `/dashboard/projects/[id]/quotes/[quoteId]` (org-side create/edit/view with editable drafts + send button + public-link surfacer); `/q/[token]` public quote view (token-only auth, `publicDoc` rate-limited, ADR-034 acceptance flow). New ADR (034) for token-authorized public writes. Test counts: RLS 221 → **238** (+17 documents + document_tokens cross-org + financial visibility), Actions 214 → **245** (+31: createQuote/updateQuoteDraft/sendQuote/acceptQuote + VAT helper + numbering helper). Cloud-smoke 14 unchanged. Schema-forever (Hard Rule 1) holds — additive only: two new tables, no changes to Phase 1a/1b/1c rows, RLS, actions, or tests. Phase 1c CLOSED status unchanged. Sessions 13–14 add the invoice + payment + receipt objects on the same `documents` table additively (e.g. `invoice_subtype` column, `payment_id` FK).
+**Codebase status:** **Phase 2 Session 13 shipped** 15 May 2026. New surfaces: `/dashboard/projects/[id]/invoices/new`, `/dashboard/projects/[id]/invoices/[invoiceId]` (org-side create/edit/view + send + revise dialog), Invoices + Payments cards on the project detail page (with the new `PaymentStatusBadge` rendered next to `ProjectStageBadge`), `/i/[token]` public invoice view (read-only, token-only auth, `publicDoc` rate-limited). DEBT-064 closed: backfill migration 0027 seeded existing identities, dispatch wired on `sendQuote` / `acceptQuote` / `sendInvoice` / `recordPayment` / `correctPayment`. Test counts: RLS 238 → **251** (+13 payments + invoice doc smoke), Actions 245 → **293** (+48 across invoices.test.ts, payments.test.ts, debt-064-dispatch.test.ts, payment-status.test.ts, debt-064-backfill.test.ts). Cloud-smoke 14 unchanged. Schema-forever (Hard Rule 1) holds — additive only: one new table (`payments`), four new defaulted columns on `documents`, no changes to existing rows, RLS, actions, or tests. Session 14 adds receipts + PDF generation + the "Coming Soon" financials placeholder on the same shape.
 **Production URL:** https://pcd-saas.vercel.app
 **Repo:** https://github.com/hasnath-code/pcd-saas
 
@@ -1575,7 +1575,7 @@ CREATE POLICY "project_activity_select" ON project_activity
 
 ## 12.P2. Schema — Phase 2 Tables
 
-Two tables added by Phase 2 Session 12 (migrations 0023/0024). `documents` is the unified table for quotes/invoices/receipts (one row per peer document object); `document_tokens` carries the public-route bearer token. Sessions 13–14 will add invoice-subtype + payment FK columns additively (Hard Rule 1).
+Three tables now ship in Phase 2: `documents` (S12), `document_tokens` (S12), `payments` (S13). Plus a Session 13 additive column pack on `documents` (`payment_id`, `invoice_subtype`, `revision_number`, `revision_log_payload`). Session 14 adds receipts on the same `documents` shape (no new table — receipts populate `payment_id` to point at the linked `payments` row).
 
 ### 12.P2.1 `documents`
 
@@ -1599,6 +1599,12 @@ CREATE TABLE documents (
   accepted_at timestamptz,
   accepted_by_name text,
   supersedes_document_id uuid REFERENCES documents(id) ON DELETE SET NULL,
+  -- Session 13 additive columns (migration 0026) ─────────────────────────
+  payment_id uuid REFERENCES payments(id) ON DELETE SET NULL,                  -- receipt-only; populated in S14
+  invoice_subtype text CHECK (invoice_subtype IS NULL OR invoice_subtype IN ('initial','final')),
+  revision_number int NOT NULL DEFAULT 0,
+  revision_log_payload jsonb NOT NULL DEFAULT '[]'::jsonb,
+  -- ─────────────────────────────────────────────────────────────────────
   created_by uuid NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
   created_at timestamptz NOT NULL DEFAULT now(),
   deleted_at timestamptz,
@@ -1608,7 +1614,13 @@ CREATE TABLE documents (
 
 CREATE INDEX idx_documents_project ON documents(project_id) WHERE deleted_at IS NULL;
 CREATE INDEX idx_documents_org ON documents(org_id) WHERE deleted_at IS NULL;
+CREATE INDEX idx_documents_payment_id ON documents(payment_id) WHERE deleted_at IS NULL AND payment_id IS NOT NULL;
 ```
+
+**Session 13 column invariants:**
+- `invoice_subtype` is set for `type='invoice'` rows (`'initial'` or `'final'`), NULL for quotes/receipts. **No CHECK enforces initial-before-final** — V2 doesn't, scope doesn't, and the surveyor practice (deposit / mobilisation only, no final invoice) is legitimate.
+- `revision_number` + `revision_log_payload` track `reviseInvoice` calls (V1 port). One entry appended per call: `{ rev, previous_amount, new_amount, fields_changed: string[], reason, revised_at, revised_by }`. The diff is **semantic** — `lib/documents/revise-diff.ts:diffInvoiceFields` compares line items as structs (per-position equality across `description / quantity / unitPrice / category`) so a no-op resave returns `{error:'conflict', reason:'no_changes'}` rather than logging a phantom revision.
+- `payment_id` is **receipt-only** (Session 14). The column lands in Session 13 because the FK target (`payments`) is created in 0025; splitting it across two migrations would be pointless. Quotes/invoices keep it NULL.
 
 **Key invariants:**
 - **One table discriminated by `type`.** Phase 2 ships `quote` only; Sessions 13–14 exercise `invoice` and `receipt` on the same shape.
@@ -1649,16 +1661,55 @@ All four gate on org-membership of the underlying document's project via the sub
 
 ### 12.P2.3 Helpers + actions
 
-- **`lib/documents/vat.ts:calculateTotals`** — pure-math VAT/discount/total computer. Integer-pennies internally, rounds per-line then discount then VAT separately. Used by the org-side form for live totals AND by `createQuote`/`updateQuoteDraft` server-side.
-- **`lib/documents/numbering.ts:allocateDocumentNumber`** — tx-bound, `SELECT FOR UPDATE` on projects row + count + format. Caller must INSERT the document inside the same tx; otherwise the next allocator sees the same count and reuses the sequence (the UNIQUE constraint catches it but is the belt, not the braces).
-- **`actions/documents.ts`** — `createQuote` / `updateQuoteDraft` / `sendQuote` / `acceptQuote`. The first three follow §20's `requireOrgUser` shape; `acceptQuote` follows ADR-034 (token-authorized public write, no `auth.uid()`). `sendQuote` dispatches the client email post-commit per ADR-033.
-- **`db/queries/documents.ts`** — `listQuotesForProject({ visibleOnly })`, `getDocumentById`, `getDocumentByToken`. Mirrors the DEBT-059 visibility-flag convention; portal-side caller doesn't exist this session, flag stays in the signature.
+- **`lib/documents/vat.ts:calculateTotals`** — pure-math VAT/discount/total computer. Integer-pennies internally, rounds per-line then discount then VAT separately. Used by the org-side form for live totals AND by every server-side create/update/revise path.
+- **`lib/documents/numbering.ts:allocateDocumentNumber`** — tx-bound, `SELECT FOR UPDATE` on projects row + count + format (`{projectNumber}-{Q|I|R}{sequence}`). Caller must INSERT the document inside the same tx; otherwise the next allocator sees the same count and reuses the sequence (the UNIQUE constraint catches it but is the belt, not the braces).
+- **`lib/documents/payment-status.ts:derivePaymentStatus`** *(Session 13)* — pure function over `{ hasAnyQuoteSent, acceptedQuoteTotal, hasInitialInvoiceSent, hasFinalInvoiceSent, paymentsTotal }`. Returns one of 7 labels (`no_quote → quote_sent → quote_accepted → initial_invoice_sent → partially_paid → paid_in_full → overpaid`). Computed on read every project-detail render — **nothing stored**. Payment target is the **accepted quote's `total`**, not the invoice sum. A 0.005-tolerance epsilon absorbs sub-penny float drift on the `paid_in_full` boundary. Refunds are out of scope (`payments.amount > 0` CHECK precludes negative rows — see DEBT-065).
+- **`lib/documents/revise-diff.ts:diffInvoiceFields`** *(Session 13)* — semantic comparator over invoice fields. Returns `{ fieldsChanged: string[], hasChanges: boolean }`. Line items compared positionally as structs (trim-equal description/category, 2dp-tolerance numeric quantity/unitPrice). A no-op resave returns `hasChanges: false`; `reviseInvoice` rejects with `{error:'conflict', reason:'no_changes'}` rather than logging a phantom revision.
+- **`actions/documents.ts`** — `createQuote` / `updateQuoteDraft` / `sendQuote` / `acceptQuote` (S12) + `createInvoice` / `updateInvoiceDraft` / `sendInvoice` / `reviseInvoice` (S13). All except `acceptQuote` follow §20's `requireOrgUser` shape. `acceptQuote` follows ADR-034 (token-authorized public write). `sendQuote` / `sendInvoice` dispatch the direct client Resend email post-commit per ADR-033; **all five wired actions** (`sendQuote` / `acceptQuote` / `sendInvoice` / `recordPayment` / `correctPayment`) also fan out via `dispatchNotification` to org members + accepted financial-visible stakeholders (except `correctPayment` which dispatches to org members ONLY — administrative event, per Q2 decision). `createInvoice` rejects `subtype='final'` without an accepted quote on the project (`{error:'conflict', reason:'no_accepted_quote'}`); `subtype='initial'` is allowed without one (deposit/mobilisation flow).
+- **`actions/payments.ts`** *(Session 13)* — `recordPayment` (insert + activity `visibleToStakeholders=true` + audit + post-commit dispatch to org + financial-visible stakeholders) and `correctPayment` (mutate `amount` in place + append `correction_log_payload` entry + activity `visibleToStakeholders=false` + audit + dispatch to org members only).
+- **`db/queries/documents.ts`** — `listQuotesForProject({ visibleOnly })`, `listInvoicesForProject({ visibleOnly })` *(S13)*, `getDocumentById`, `getDocumentByToken`. The base `DocumentRow` shape now includes `invoiceSubtype`, `revisionNumber`, `revisionLogPayload`, `paymentId` (defaulted on quote rows). `InvoiceRow` is a type alias.
+- **`db/queries/payments.ts`** *(Session 13)* — `getPaymentsForProject({ visibleOnly })` returns `{ rows, runningTotal }`. `getProjectPaymentSnapshot(projectId)` aggregates the four primitives the payment-status function needs in one helper, then derives the label. The project detail page calls this in its `Promise.all` block.
 
 ### 12.P2.4 Public routes
 
 - `/q/[token]` — live (Session 12). Token validation → `publicDoc` rate-limit → `getDocumentByToken` → render quote with AcceptForm (only when status='sent' and not yet accepted).
-- `/i/[token]` — Session 13 will populate.
+- `/i/[token]` — live (Session 13). Read-only invoice view. No AcceptForm (invoices aren't accepted; payments are org-side). Same UUID gate + rate-limit shape as `/q/`. Cross-type tokens 404 per ADR-034.
 - `/r/[token]` — Session 14 will populate.
+
+### 12.P2.5 `payments` *(Session 13)*
+
+```sql
+CREATE TABLE payments (
+  id uuid PRIMARY KEY,
+  org_id uuid NOT NULL REFERENCES organizations(id) ON DELETE RESTRICT,
+  project_id uuid NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  amount numeric(12,2) NOT NULL CHECK (amount > 0),
+  recorded_by uuid NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+  recorded_at timestamptz NOT NULL DEFAULT now(),
+  correction_log_payload jsonb NOT NULL DEFAULT '[]'::jsonb,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  deleted_at timestamptz
+);
+
+CREATE INDEX idx_payments_project ON payments(project_id) WHERE deleted_at IS NULL;
+CREATE INDEX idx_payments_org ON payments(org_id) WHERE deleted_at IS NULL;
+```
+
+**Key invariants:**
+- Each `recordPayment` call inserts one row. The running total for a project is `SUM(amount) WHERE deleted_at IS NULL` — never a stored field.
+- Payment target for the derived payment-status axis is the **accepted quote's `total`**, not the sum of invoice amounts. Invoices are independent slices of the contract value; the quote total is the contract.
+- `amount > 0` CHECK precludes negative rows. Refund modelling needs a separate shape (DEBT-065).
+- `correction_log_payload` is the UI-visible history of `amount` mutations performed by `correctPayment`. Each entry: `{ previous_amount, new_amount, corrected_at, corrected_by, reason }`. `audit_logs` is the system-of-record (Hard Rule 4); the JSON column is a denormalized read-side convenience.
+
+**RLS (migration 0025, four per-command policies — ADR-016):**
+- `payments_select`: `deleted_at IS NULL AND (org member of the project's org OR can_view_financials stakeholder)`. Mirrors `documents_select` exactly — the §14 financial-visibility gate applied to payments.
+- `payments_insert_org_members`: project_id in caller's org-project set AND `recorded_by` matches caller's `public.users.id` (closes the cross-user `recorded_by` hole).
+- `payments_update_org_members`: org members of the project's org (UPDATE required for amount corrections).
+- `payments_delete_org_admins`: hard-delete is admin-recovery only.
+
+### 12.P2.6 DEBT-064 backfill *(Session 13)*
+
+Migration 0027 idempotently seeds `notification_preferences` rows for all existing identities (users + clients-with-org-membership) × 6 new event types (`quote.sent`, `quote.accepted`, `invoice.sent`, `invoice.revised`, `payment.recorded`, `payment.corrected`) × 4 channels (`in_app` + `email` enabled by default; `push` + `sms` disabled). Two `INSERT … SELECT … ON CONFLICT DO NOTHING` blocks (one per identity type) hit the two existing UNIQUE constraints — re-running the migration is a verified no-op. New identities continue to get rows via `lib/notifications/seed-defaults.ts:seedNotificationDefaultsTx` at create time. Without this backfill, dispatch fan-out to existing identities would silently return 0 enabled-channels (operationally surprising; not a data leak).
 
 ---
 
@@ -3690,6 +3741,61 @@ Session 11 was the architecturally densest session in Phase 1c: 3 new tables, di
 ---
 
 **Last reviewed:** 15 May 2026 (Phase 2 Session 12 shipped — v0.16 → v0.17; 1 new ADR (034); 2 new tables; 4 new actions; 1 new public route lit up; +48 tests; new label for DEBT-064 pending if dispatch is wired in S13/S14)
+
+---
+
+## 35.13 Phase 2 Session 13 Carryover
+
+**Shipped 15 May 2026 — Phase 2 invoice + payment lifecycle.** One new domain table (`payments`), four additive columns on `documents`, a 6-event-type × 4-channel notification-prefs backfill that closes DEBT-064, and six new server actions (four invoice, two payment) on top of dispatch wiring for the two deferred Session 12 quote events. Schema-forever (Hard Rule 1) holds: nothing in Phase 1a/1b/1c was touched.
+
+### Build summary
+
+| Layer | Delivered |
+|---|---|
+| Schema | Migrations 0025 (`payments` + 4 per-command RLS), 0026 (additive cols on `documents`: `payment_id` FK, `invoice_subtype`, `revision_number`, `revision_log_payload`), 0027 (DEBT-064 backfill — idempotent INSERT … SELECT for 6 new event types × 4 channels across all existing users + clients). `payments.SELECT` mirrors `documents.SELECT` (the §14 financial-visibility gate). |
+| Pure helpers | `lib/documents/payment-status.ts:derivePaymentStatus` (7-state ladder, accepted-quote-total invariant, 0.005 paid-in-full tolerance). `lib/documents/revise-diff.ts:diffInvoiceFields` (semantic comparator — line items struct-equal in order, numeric tolerance, NO JSON.stringify). |
+| Notification vocab | `NOTIFICATION_EVENT_TYPES` += `invoice.sent`, `invoice.revised`, `payment.recorded`, `payment.corrected`. Matching entries in `lib/notifications/subjects.ts:NOTIFICATION_CONTENT`, `lib/activity/labels.ts:LABELS` + summary cases, `components/notifications/InboxList.tsx:EVENT_LABELS` + summary, `components/notifications/NotificationPreferencesMatrix.tsx:EVENT_LABELS`. All 4 exhaustive maps stayed compile-time-checked. |
+| Server actions | `actions/documents.ts`: `createInvoice` (Q1 — final rejects `no_accepted_quote`), `updateInvoiceDraft` (same guard if switching to final), `sendInvoice` (mint token + direct Resend client email + post-commit dispatch fan-out), `reviseInvoice` (semantic diff + no-op rejection + revision log append). `sendQuote` + `acceptQuote` extended with post-commit dispatch fan-out (DEBT-064 wiring). `actions/payments.ts` (new): `recordPayment` (visibleToStakeholders=true, dispatch to org + financial stakeholders), `correctPayment` (visibleToStakeholders=false, dispatch ORG MEMBERS ONLY per Q2). |
+| Read queries | `db/queries/documents.ts` += `listInvoicesForProject({ visibleOnly })`. `db/queries/payments.ts` (new) — `getPaymentsForProject({ visibleOnly })` (rows + runningTotal), `getProjectPaymentSnapshot(projectId)` (aggregates the four primitives + runs `derivePaymentStatus`). DocumentRow now carries `invoiceSubtype` / `revisionNumber` / `revisionLogPayload` / `paymentId` (defaulted for quote rows). |
+| Email | `lib/email/templates/invoice-sent.ts` mirrors `quote-sent.ts` — GBP-formatted, subtype-aware body, `/i/[token]` link. |
+| Frontend (org) | Project detail page now renders `<PaymentStatusBadge>` adjacent to `<ProjectStageBadge>` (two-axis status surfaced), plus new `<InvoicesSection>` + `<PaymentsSection>` cards. `/dashboard/projects/[id]/invoices/{new,[invoiceId]}` for create/edit/view/send/revise. `<RecordPaymentDialog>` + `<CorrectPaymentDialog>` (with mandatory reason field). |
+| Frontend (public) | `/i/[token]` — UUID gate, `publicDoc` rate-limit, type discriminator. Read-only; no AcceptForm. Cross-type tokens 404 per ADR-034. Middleware allowlist already included `/i/` from S12. |
+
+### Test deltas
+
+- **RLS:** 238 → **251** (+13). `tests/rls/payments.test.ts` (13 tests: full cross-org + soft-delete + anon + cross-user `recorded_by` denial + stakeholder financial-visibility positive/negative + INSERT/UPDATE denial + `amount > 0` CHECK).
+- **Actions:** 245 → **293** (+48):
+  - `tests/actions/invoices.test.ts` (16): createInvoice initial-happy, final-without-accepted-quote → conflict, final-WITH-accepted-quote → happy, cross-org, validation_error cases, updateInvoiceDraft happy + non-draft + non-invoice, sendInvoice happy (token + dispatch + Resend) + non-draft + not-an-invoice + email-failure isolation, reviseInvoice happy + no-op rejection + non-sent rejection + validation + final-subtype-without-accepted-quote.
+  - `tests/actions/payments.test.ts` (12): recordPayment happy + dispatch shape + running total + cross-org + validation + 2dp + isolation. correctPayment happy + no-op rejection + ORG-MEMBERS-ONLY dispatch shape + validation + not_found.
+  - `tests/actions/debt-064-dispatch.test.ts` (2): sendQuote + acceptQuote each dispatch the correct event type to org + financial-visible stakeholders.
+  - `tests/actions/payment-status.test.ts` (12): every state in the ladder + accepted-quote-total invariant + initial-invoice-deposit no-accepted-quote path.
+  - `tests/actions/debt-064-backfill.test.ts` (3): precondition (no prefs), post-backfill (24 rows per identity with correct defaults), re-run idempotency.
+- **Cloud-smoke:** 14/14 unchanged.
+
+### Notable decisions made in-session (folded into the four-decision table at plan time)
+
+1. **Q1 — invoice gate (hybrid).** `subtype='initial'` allowed without an accepted quote (deposit/mobilisation flow). `subtype='final'` requires one; reject with `{error:'conflict', reason:'no_accepted_quote'}`. Mirrors V2 practice; surveyors take deposits before formal acceptance.
+2. **Q2 — correctPayment dispatch.** Org members only. Not a half-wired event — `payment.corrected` is fully in the vocab and all four exhaustive maps; only the recipient fan-out at the call site narrows.
+3. **Q3 — payment activity visibility.** `payment.recorded` → `visibleToStakeholders=true` (the money arriving is part of the project narrative the client cares about); `payment.corrected` → `false` (administrative).
+4. **Q4 — revision_log entry shape.** `{ rev, previous_amount, new_amount, fields_changed: string[], reason, revised_at, revised_by }`. `fields_changed` is auto-derived via a **semantic diff** — `diffInvoiceFields` compares line items per-position as structs (trim-equal strings, 2dp-tolerance numerics) so a no-op resave registers 0 fields and the action rejects with `{error:'conflict', reason:'no_changes'}`. No false positives from JSONB key-order or numeric-stringification drift.
+
+### What was deliberately deferred (not gaps)
+
+- **Receipts + `/r/[token]`** — Session 14. `documents.payment_id` FK lands now to keep the schema migration count low; receipt rows populate it next session.
+- **PDF generation** — Session 14 (`@react-pdf/renderer`, stored as `project_files` `source='document_artifact'`).
+- **"Coming Soon" financials placeholder on the org project detail page** — Session 14 per scope §2.11.
+- **Refund modelling** — out of scope; DEBT-065 filed for the gap (payments.amount > 0 CHECK precludes negative rows; clean modelling needs a separate `payment_refunds` table).
+- **`invoice.revised` notification dispatch fan-out** — wired only as an activity event this session. The exhaustive maps + event-type vocab are ready; future UX session can opt in to a per-org "notify clients on revision" toggle without re-touching this file.
+- **Portal-side payment surface** — `getPaymentsForProject({ visibleOnly: true })` short-circuits to `[]` (mirrors DEBT-059 pattern). Session 14+ will wire a portal-side view that passes a stakeholder identity through.
+
+### Open carryover
+
+- **DEBT-065** (new — Low) — Refunds not modelled. `payments.amount > 0` CHECK is a deliberate design decision; refunds would need a separate `payment_refunds` shape or a `refund_for_payment_id` self-FK with an inverted-amount convention. No customer impact yet — surveyor practice handles a refund as an org-internal bank entry, not a portal action. Filed for visibility.
+- **DEBT-064** — CLOSED 15 May 2026 by migration 0027 + the dispatch wiring on `sendQuote` / `acceptQuote` / `sendInvoice` / `recordPayment` / `correctPayment`. Verified by `tests/actions/debt-064-backfill.test.ts` (idempotent re-run) and `tests/actions/debt-064-dispatch.test.ts` (recipient fan-out shape).
+
+---
+
+**Last reviewed:** 15 May 2026 (Phase 2 Session 13 shipped — v0.17 → v0.18; 0 new ADRs (composes ADR-033 + ADR-034); 1 new table (`payments`); 4 additive columns on `documents`; 6 new server actions; 1 new public route lit up (`/i/[token]`); +61 tests; DEBT-064 closed; DEBT-065 filed).
 
 ## End of document
 

@@ -51,6 +51,13 @@ export interface DocumentRow {
   acceptedAt: Date | null;
   acceptedByName: string | null;
   supersedesDocumentId: string | null;
+  // Phase 2 Session 13 additive columns. Always present in the row shape
+  // since the query columns include them; quote rows carry invoiceSubtype=null
+  // and revisionNumber=0 / revisionLogPayload=[].
+  invoiceSubtype: 'initial' | 'final' | null;
+  revisionNumber: number;
+  revisionLogPayload: unknown[];
+  paymentId: string | null;
   createdBy: string;
   createdByName: string | null;
   createdAt: Date;
@@ -75,6 +82,10 @@ const documentColumns = {
   acceptedAt: documents.acceptedAt,
   acceptedByName: documents.acceptedByName,
   supersedesDocumentId: documents.supersedesDocumentId,
+  invoiceSubtype: documents.invoiceSubtype,
+  revisionNumber: documents.revisionNumber,
+  revisionLogPayload: documents.revisionLogPayload,
+  paymentId: documents.paymentId,
   createdBy: documents.createdBy,
   createdByName: users.name,
   createdAt: documents.createdAt,
@@ -100,6 +111,13 @@ function toDocumentRow(r: Record<string, unknown>): DocumentRow {
     acceptedAt: (r.acceptedAt as Date | null) ?? null,
     acceptedByName: (r.acceptedByName as string | null) ?? null,
     supersedesDocumentId: (r.supersedesDocumentId as string | null) ?? null,
+    invoiceSubtype:
+      (r.invoiceSubtype as 'initial' | 'final' | null | undefined) ?? null,
+    revisionNumber: Number(r.revisionNumber ?? 0),
+    revisionLogPayload: Array.isArray(r.revisionLogPayload)
+      ? (r.revisionLogPayload as unknown[])
+      : [],
+    paymentId: (r.paymentId as string | null) ?? null,
     createdBy: r.createdBy as string,
     createdByName: (r.createdByName as string | null) ?? null,
     createdAt: r.createdAt as Date,
@@ -135,6 +153,39 @@ export async function listQuotesForProject(opts: {
       and(
         eq(documents.projectId, opts.projectId),
         eq(documents.type, 'quote'),
+        isNull(documents.deletedAt),
+      ),
+    )
+    .orderBy(desc(documents.createdAt));
+
+  return rows.map((r) => toDocumentRow(r as Record<string, unknown>));
+}
+
+/**
+ * Phase 2 Session 13 — list invoices for a project, newest first. Mirrors
+ * listQuotesForProject. The DocumentRow shape already carries
+ * invoiceSubtype / revisionNumber / revisionLogPayload (additive Session 13
+ * columns); InvoiceRow is just a semantic alias for callers that want to be
+ * explicit about the doc type.
+ */
+export type InvoiceRow = DocumentRow;
+
+export async function listInvoicesForProject(opts: {
+  projectId: string;
+  visibleOnly: boolean;
+}): Promise<InvoiceRow[]> {
+  if (opts.visibleOnly) {
+    return [];
+  }
+
+  const rows = await db
+    .select(documentColumns)
+    .from(documents)
+    .leftJoin(users, eq(users.id, documents.createdBy))
+    .where(
+      and(
+        eq(documents.projectId, opts.projectId),
+        eq(documents.type, 'invoice'),
         isNull(documents.deletedAt),
       ),
     )

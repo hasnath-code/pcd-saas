@@ -14,6 +14,7 @@ import {
   uuid,
 } from 'drizzle-orm/pg-core';
 import { organizations } from './organizations';
+import { payments } from './payments';
 import { projects } from './projects';
 import { users } from './users';
 
@@ -99,6 +100,28 @@ export const documents = pgTable(
       (): AnyPgColumn => documents.id,
       { onDelete: 'set null' },
     ),
+    // Phase 2 Session 13 — additive columns (migration 0026). All nullable
+    // or defaulted so existing quote rows from Session 12 are unaffected.
+    //
+    // paymentId is receipt-only (Session 14 populates). The column lands
+    // this session because the FK target (payments) is created in 0025 —
+    // splitting it across two migrations achieves nothing.
+    //
+    // invoiceSubtype is set for invoice rows ('initial' | 'final'), NULL
+    // for quotes/receipts. No CHECK forces initial-before-final ordering.
+    //
+    // revisionNumber + revisionLogPayload track invoice revisions via
+    // reviseInvoice (V1 port). One entry appended per revise call:
+    //   { rev, previous_amount, new_amount, fields_changed, reason,
+    //     revised_at, revised_by }
+    paymentId: uuid('payment_id').references(() => payments.id, {
+      onDelete: 'set null',
+    }),
+    invoiceSubtype: text('invoice_subtype'),
+    revisionNumber: integer('revision_number').notNull().default(0),
+    revisionLogPayload: jsonb('revision_log_payload')
+      .notNull()
+      .default(sql`'[]'::jsonb`),
     createdBy: uuid('created_by')
       .notNull()
       .references(() => users.id, { onDelete: 'restrict' }),
@@ -125,6 +148,10 @@ export const documents = pgTable(
       'documents_amounts_non_negative',
       sql`subtotal >= 0 AND vat_amount >= 0 AND total >= 0`,
     ),
+    check(
+      'documents_invoice_subtype_check',
+      sql`invoice_subtype IS NULL OR invoice_subtype IN ('initial', 'final')`,
+    ),
     unique('documents_project_type_sequence_uniq').on(
       table.projectId,
       table.type,
@@ -136,5 +163,8 @@ export const documents = pgTable(
     index('idx_documents_org')
       .on(table.orgId)
       .where(sql`deleted_at IS NULL`),
+    index('idx_documents_payment_id')
+      .on(table.paymentId)
+      .where(sql`deleted_at IS NULL AND payment_id IS NOT NULL`),
   ],
 );

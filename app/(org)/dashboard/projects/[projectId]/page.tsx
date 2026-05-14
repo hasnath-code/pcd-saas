@@ -33,6 +33,10 @@ import { FileList } from '@/components/files/FileList';
 import { FileUploadZone } from '@/components/files/FileUploadZone';
 import { ActivityTimeline } from '@/components/activity/ActivityTimeline';
 import { QuotesSection } from '@/components/quotes/QuotesSection';
+import { InvoicesSection } from '@/components/invoices/InvoicesSection';
+import { PaymentsSection } from '@/components/payments/PaymentsSection';
+import { PaymentStatusBadge } from '@/components/projects/PaymentStatusBadge';
+import { getProjectPaymentSnapshot } from '@/db/queries/payments';
 
 export default async function ProjectDetailPage({
   params,
@@ -51,12 +55,15 @@ export default async function ProjectDetailPage({
   const project = await getProjectByIdForOrg(projectId, ctx.orgId);
   if (!project) notFound();
 
-  const [stakeholders, pendingInvites, files] = await Promise.all([
+  const [stakeholders, pendingInvites, files, paymentSnapshot] = await Promise.all([
     listStakeholdersForProject(projectId, ctx.orgId),
     listStakeholderInvitationsForProject(projectId, ctx.orgId),
     // Org-side: see all files. Pooler bypasses RLS, but org members are
     // entitled to both visibility classes — so visibleOnly: false (DEBT-059).
     listFilesForProject({ projectId, visibleOnly: false }),
+    // Phase 2 §4 — derived payment-status axis. Composes the accepted quote
+    // total + invoice subtypes-sent + payments SUM into a single label.
+    getProjectPaymentSnapshot(projectId),
   ]);
 
   const canDelete = ctx.role === 'owner' || ctx.role === 'admin';
@@ -76,12 +83,14 @@ export default async function ProjectDetailPage({
           </p>
           <h1 className="text-3xl font-semibold">{project.projectNumber}</h1>
           <p className="text-sm text-muted-foreground">{project.siteAddress}</p>
-          <div>
+          <div className="flex flex-wrap items-center gap-2">
             <ProjectStageBadge
               name={project.stageName}
               color={project.stageColor}
               isTerminal={project.stageIsTerminal}
             />
+            <span className="text-sm text-muted-foreground">·</span>
+            <PaymentStatusBadge status={paymentSnapshot.status} />
           </div>
         </div>
         {canDelete && (
@@ -223,6 +232,10 @@ export default async function ProjectDetailPage({
       </Card>
 
       <QuotesSection projectId={project.id} />
+
+      <InvoicesSection projectId={project.id} />
+
+      <PaymentsSection projectId={project.id} />
 
       <ActivityTimeline projectId={project.id} viewer="org" />
     </main>

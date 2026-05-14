@@ -36,6 +36,10 @@ const EVENT_LABELS: Record<NotificationEventType, string> = {
   'milestone.completed': 'Milestone completed',
   'quote.sent': 'Quote sent',
   'quote.accepted': 'Quote accepted',
+  'invoice.sent': 'Invoice sent',
+  'invoice.revised': 'Invoice revised',
+  'payment.recorded': 'Payment recorded',
+  'payment.corrected': 'Payment corrected',
 };
 
 const CHANNEL_LABELS: Record<NotificationChannel, string> = {
