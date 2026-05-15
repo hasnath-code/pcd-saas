@@ -61,11 +61,11 @@
 
 **Why it exists:** Session 11 designed the activity timeline gate as a per-row `visible_to_stakeholders` boolean (write-time decision) rather than a per-stakeholder per-event-type matrix. It works for the binary "is this stakeholder-relevant?" axis but doesn't model "is this stakeholder-relevant *for this stakeholder profile*?". Phase 2 Sessions 12–14 added 8 financial event types to the vocabulary and logged them with `visible_to_stakeholders: true` (correct for financial stakeholders); the gap is the read-time filter for non-financial stakeholders.
 
-**Cost of leaving it:** A `progress_only` or `documents_only` stakeholder reading the project timeline learns the rough size of payments and the existence of invoices/quotes — info their visibility profile says they shouldn't see. Mild leak (no exact line items, no PDF access) but contradicts the explicit per-stakeholder visibility contract. Becomes more visible after Phase 3 client-portal polish surfaces the timeline more prominently.
+**Cost of leaving it:** A `progress_only` or `documents_only` stakeholder reading the project timeline learns the rough size of payments and the existence of invoices/quotes — info their visibility profile says they shouldn't see. Mild leak (no exact line items, no PDF access) but contradicts the explicit per-stakeholder visibility contract. Becomes more visible after the pre-launch UX polish sprint surfaces the timeline more prominently.
 
 **Fix sketch:** Add a `FINANCIAL_EVENT_TYPES` set in `lib/notifications/events.ts` listing the 8 financial events. In `db/queries/project-activity.ts:listProjectActivity`, when the caller is a stakeholder (already known via the `visibleOnly` flag), look up the caller's `can_view_financials` flag for the project and add `WHERE event_type NOT IN (...)` when false. Mirror the pattern in `db/queries/documents.ts:hasStakeholderFinancialAccess`. ~30 LOC + 2 tests (positive + negative).
 
-**Trigger:** Before Phase 3 client-portal polish, OR when a customer notices.
+**Trigger:** Before the pre-launch UX polish sprint, OR when a customer notices.
 
 **Cross-references:** ARCHITECTURE-saas.md §14 (visibility model), §12.7 (project_activity), §12.P2.9 (Session 14 portal financial visibility — this DEBT is the read-time complement of the section-rendering gate); `db/queries/project-activity.ts:listProjectActivity`; `lib/activity/log.ts:logActivityTx`; recordPayment / sendQuote / acceptQuote / sendInvoice / reviseInvoice activity-row writes.
 
@@ -82,7 +82,7 @@
 
 **Why it exists:** The kickoff locked positive-only payments to keep the running-total SUM intuitive (no signed semantics) and the recordPayment validation simple. Clean refund modelling needs either (a) a separate `payment_refunds` table with its own audit log, or (b) a `refund_for_payment_id` self-FK + inverted-amount convention (rejected — breaks the `amount > 0` invariant).
 
-**Cost of leaving it:** Surveyors who issue a refund have to handle it as an off-portal bank entry — the project's running-total stays inflated unless they `correctPayment` the original row to a smaller value (which loses the audit story of "we received X then refunded Y"). For Phase 2 + 3 timescale this is acceptable; refunds are rare in surveyor practice. Becomes a real problem when (a) Stripe billing lands (Phase 6) and refunds-via-Stripe become a one-click flow, or (b) the financial model deferred to Phase 5+ needs to surface "net revenue per project" accurately.
+**Cost of leaving it:** Surveyors who issue a refund have to handle it as an off-portal bank entry — the project's running-total stays inflated unless they `correctPayment` the original row to a smaller value (which loses the audit story of "we received X then refunded Y"). For the pre-Stripe timescale this is acceptable; refunds are rare in surveyor practice. Becomes a real problem when (a) Stripe billing lands (Phase 5) and refunds-via-Stripe become a one-click flow, or (b) the financial model deferred to Phase 4+ needs to surface "net revenue per project" accurately.
 
 **Fix sketch:** New table `payment_refunds (id, payment_id FK, amount > 0, refunded_at, refunded_by, reason, created_at, deleted_at)`. RLS mirrors payments. `derivePaymentStatus` ladder grows a `refunded` branch when `SUM(refunds.amount) > 0` for the project. `getProjectPaymentSnapshot` aggregates refunds alongside payments. UI exposes "Record refund" alongside "Record payment". ~half-session of work; ships when (a) Stripe lands or (b) a user actually asks for refund modelling.
 
@@ -208,7 +208,7 @@
 
 **Why it exists:** Root cause uncharacterized — could be (a) Realtime container config in the local OrbStack stack, (b) a JWT/auth-context bridging issue in the local Realtime worker, (c) a Supabase Realtime CLI version drift. Cloud Realtime status during Phase F was inconclusive (the polling fallback masks the difference if Realtime ever fired faster than 30s).
 
-**Cost of leaving it:** Inbox UX has up to 30s lag on new notifications even when the publication and RLS are correctly wired. Polling fallback in `hooks/use-notifications.ts` handles it but burns DB cycles every 30s × every open notifications page. Not blocking — Phase F passed all 19 checks with polling alone. Worsens proportionally as more Realtime-dependent features land (presence indicators, typing dots in Phase 3+).
+**Cost of leaving it:** Inbox UX has up to 30s lag on new notifications even when the publication and RLS are correctly wired. Polling fallback in `hooks/use-notifications.ts` handles it but burns DB cycles every 30s × every open notifications page. Not blocking — Phase F passed all 19 checks with polling alone. Worsens proportionally as more Realtime-dependent features land (presence indicators, typing dots — post-launch+).
 
 **Fix sketch:** Same investigation path as DEBT-029. Suspected causes documented in DEBT-029's "Why it exists" section. The reproducer `scripts/realtime-smoke-notifications.mjs` is in the repo; pair with the existing `tests/rls/notifications.test.ts` for subscription-side RLS validation. 30-60 min diagnosis once budget is allocated.
 
@@ -370,7 +370,7 @@
 
 **Cost of leaving it:**
 - **Security/product:** silent org creation as a side effect of sign-in. Stakeholders accidentally gain owner-level powers in tenancies that shouldn't exist.
-- **Billable usage potential:** every stakeholder signing in spawns a new "Solo Free" org row. If billing ever ties to org count (Phase 6 Stripe), this is a leak.
+- **Billable usage potential:** every stakeholder signing in spawns a new "Solo Free" org row. If billing ever ties to org count (Phase 5 Stripe), this is a leak.
 - **Data integrity:** the auto-spawned orgs have no real billing intent, no settings, no business identity — they're orphan tenancies that pollute `organizations` and any analytics/admin reports.
 - **User confusion:** the user thinks "I just signed in to view my portal" but ends up in a dashboard for an org they didn't create. UX at minimum, trust-violating at worst.
 
@@ -647,7 +647,7 @@ Likely also need to audit `actions/orgs.ts createOrganization` for any callers t
 
 **Fix sketch:** Add an `autoJoinOneToOneConversationsTx(tx, { userId, orgId })` helper called inside the `users` insert path (`actions/orgs.ts createOrganization`, `actions/team.ts acceptTeamInvitation` if it exists, `actions/users.ts` invite-accept paths). Looks up all one_to_one conversations in the org and inserts a participant row for the new user. Idempotent via UNIQUE constraint.
 
-**Trigger:** When customer or QA flags it, or as part of the Phase 4+ team-management UX polish session.
+**Trigger:** When customer or QA flags it, or as part of the Phase 3+ team-management UX polish session.
 
 **Cross-references:** Decision 9.1A, actions/conversations.ts autoCreateOneToOneConversationTx
 
@@ -902,13 +902,13 @@ Likely also need to audit `actions/orgs.ts createOrganization` for any callers t
 
 **The debt:** Pricing is decided (Solo Free / Studio £22/u/mo / Practice £38/u/mo / Enterprise £55+/u/mo) but the Stripe model isn't (subscription per seat? metered usage? hybrid?).
 
-**Why it exists:** Stripe integration is Phase 6 work; premature now.
+**Why it exists:** Stripe integration is Phase 5 work; premature now.
 
 **Cost of leaving it:** Delays commercial launch when we get there.
 
-**Fix sketch:** Phase 6 kickoff session — pick subscription per seat (simplest, matches surveyor industry mental model). Wire Stripe Checkout for self-serve signups. UK VAT handled by Stripe Tax.
+**Fix sketch:** Phase 5 kickoff session — pick subscription per seat (simplest, matches surveyor industry mental model). Wire Stripe Checkout for self-serve signups. UK VAT handled by Stripe Tax.
 
-**Trigger:** Phase 6 kickoff.
+**Trigger:** Phase 5 kickoff.
 
 ---
 
@@ -919,15 +919,15 @@ Likely also need to audit `actions/orgs.ts createOrganization` for any callers t
 **Type:** Deferred decision
 **Status:** Open
 
-**The debt:** Phase 4 paid plans include SMS notifications. Provider not chosen (Twilio? MessageBird? Vonage? Sinch?).
+**The debt:** Phase 3 paid plans include SMS notifications. Provider not chosen (Twilio? MessageBird? Vonage? Sinch?).
 
-**Why it exists:** Phase 4 is far away; pricing varies enough that decision should be informed by actual customer demand patterns.
+**Why it exists:** Phase 3 is far away; pricing varies enough that decision should be informed by actual customer demand patterns.
 
-**Cost of leaving it:** Phase 4 kickoff has to make this decision under time pressure.
+**Cost of leaving it:** Phase 3 kickoff has to make this decision under time pressure.
 
-**Fix sketch:** Phase 4 prep session (between Phase 3 and Phase 4) — comparison spreadsheet, pick one. Twilio is default-good; MessageBird often cheaper for UK; Vonage has UK enterprise focus.
+**Fix sketch:** Phase 3 prep session — comparison spreadsheet, pick one. Twilio is default-good; MessageBird often cheaper for UK; Vonage has UK enterprise focus.
 
-**Trigger:** Phase 4 kickoff (architect-lifecycle phase).
+**Trigger:** Phase 3 kickoff (architect-lifecycle phase).
 
 ---
 
@@ -938,15 +938,15 @@ Likely also need to audit `actions/orgs.ts createOrganization` for any callers t
 **Type:** Deferred decision
 **Status:** Open
 
-**The debt:** Phase 4 paid plans include push notifications. Implementation choice pending: web push (VAPID + service worker) or wait for native app?
+**The debt:** Phase 3 paid plans include push notifications. Implementation choice pending: web push (VAPID + service worker) or wait for native app?
 
 **Why it exists:** Web push works in browser without app; native app adds substantial scope.
 
-**Cost of leaving it:** Phase 4 kickoff blocks on this.
+**Cost of leaving it:** Phase 3 kickoff blocks on this.
 
-**Fix sketch:** Phase 4 prep session. Web push is reasonable starting point — works in Chrome/Edge/Firefox/Safari (Safari only since iOS 16.4+). Native app can wait.
+**Fix sketch:** Phase 3 prep session. Web push is reasonable starting point — works in Chrome/Edge/Firefox/Safari (Safari only since iOS 16.4+). Native app can wait.
 
-**Trigger:** Phase 4 kickoff.
+**Trigger:** Phase 3 kickoff.
 
 ---
 
@@ -961,7 +961,7 @@ Likely also need to audit `actions/orgs.ts createOrganization` for any callers t
 1. Vercel Hobby → Vercel Pro (commercial use disallowed on Hobby)
 2. Resend domain verification — currently using `onboarding@resend.dev` which deliverability-wise is fine for testing but unprofessional for customer emails
 3. Separate Upstash Redis for prod (currently using one workspace for dev + intent-prod; need separate)
-4. Stripe IP allowlist update (Phase 6 only — Stripe webhooks need stable receiving)
+4. Stripe IP allowlist update (Phase 5 only — Stripe webhooks need stable receiving)
 5. Point `portal.plancraftdaily.co.uk` (owned via Hostinger) at Vercel
 6. Repo private + GitHub Team subscription (~$4/user/mo — currently public for branch-protection-on-Free, see ADR-018)
 
@@ -984,15 +984,15 @@ Likely also need to audit `actions/orgs.ts createOrganization` for any callers t
 **Type:** Deferred decision
 **Status:** Open
 
-**The debt:** Custom email domains for orgs (Phase 5+ Practice tier feature). DNS verification flow undecided: DKIM only? Full SPF + DKIM + DMARC? Self-serve or assisted?
+**The debt:** Custom email domains for orgs (Phase 4+ Practice tier feature). DNS verification flow undecided: DKIM only? Full SPF + DKIM + DMARC? Self-serve or assisted?
 
-**Why it exists:** Phase 5 is far; DNS UX is fiddly.
+**Why it exists:** Phase 4 is far; DNS UX is fiddly.
 
-**Cost of leaving it:** Phase 5 has to invent this.
+**Cost of leaving it:** Phase 4 has to invent this.
 
-**Fix sketch:** Phase 5 prep. Resend already supports custom domains via DKIM/SPF — leverage their flow. Self-serve initially; add concierge support if customers struggle.
+**Fix sketch:** Phase 4 prep. Resend already supports custom domains via DKIM/SPF — leverage their flow. Self-serve initially; add concierge support if customers struggle.
 
-**Trigger:** Phase 5 kickoff.
+**Trigger:** Phase 4 kickoff.
 
 ---
 
@@ -1320,14 +1320,43 @@ For quick lookup of what needs to happen at each upcoming milestone:
 - DEBT-024: Resend paid tier (external-recipient unblock)
 - DEBT-025: Sentry user/org scope context
 
-## Phase 4 prep (architect lifecycle)
+## Pre-launch UX polish sprint
+
+_Scoped separately from the numbered phase tracker; canonical scope: ARCHITECTURE-saas.md §35.DECISION-PHASE-3-RENUMBER._
+
+**Genuinely-missing portal functionality** (§35.14 deferrals — no DEBT IDs)
+- Portal-side invoice / receipt detail pages (portal section-card rows currently dead-end)
+- In-portal authenticated PDF download (currently only via public `/i/[token]` `/r/[token]`)
+
+**Open DEBTs with pre-launch or polish triggers**
+- DEBT-066: Activity-timeline financial leak for non-financial stakeholders
+- DEBT-063: Invitation landing page Sign up vs Sign in
+- DEBT-031: Unread badge in conversation nav
+- DEBT-055: Conversations nav badge inflation
+- DEBT-029: Realtime subscription not auto-updating message UI
+- DEBT-058: Notifications Realtime delivery
+- DEBT-035: File restore UI surface
+- DEBT-041: `/select-context` for dual-context users
+- DEBT-048: Team-internal conversations UI
+
+**Defense-in-depth**
+- DEBT-060: `getConversationDetail` pooler-bypass
+- DEBT-061: `listMessagesForConversation` pooler-bypass
+
+**First-pass UX work not in DEBT**
+- Mobile responsive sweep (stakeholders skew mobile-heavy)
+- Empty states for 0-project / 0-message stakeholders
+- Stakeholder settings/profile surface (no portal equivalent of org `/settings`)
+- Copy/comms pass on empty states + error toasts + emails
+
+## Phase 3 prep (architect lifecycle)
 - DEBT-007: Push notification implementation
 - DEBT-008: SMS provider choice
 
-## Phase 5 prep (custom domains)
+## Phase 4 prep (custom domains)
 - DEBT-005: DKIM/SPF/DMARC scope
 
-## Phase 6 prep (billing)
+## Phase 5 prep (billing)
 - DEBT-009: Stripe billing model
 
 ## Post-Phase 1c (after 30-day dogfood)
