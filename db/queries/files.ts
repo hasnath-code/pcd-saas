@@ -1,5 +1,5 @@
 import 'server-only';
-import { and, desc, eq, isNull } from 'drizzle-orm';
+import { and, desc, eq, isNull, ne } from 'drizzle-orm';
 import { db } from '@/db';
 import { clients, projectFiles, projects, users } from '@/db/schema';
 
@@ -53,6 +53,17 @@ export type ProjectFileRow = {
 //
 // Decision 10.5: ordered by created_at DESC (most recent first). Matches
 // the ConversationsInbox pattern and what users expect from a file feed.
+//
+// Phase 2 Session 14 Phase F fix 2: ALWAYS exclude `source='document_artifact'`
+// rows. Generated PDFs (quote/invoice/receipt artifacts created by
+// generateDocumentPdf) are stored in project_files with this source value
+// + a source_document_id FK back to the documents row, but they aren't
+// drawings/files in the user-facing sense — they're shared via the
+// document_tokens link, downloaded via the per-document Download PDF
+// affordance, and shouldn't appear in the org-side or portal-side Files
+// list (where they'd confuse: 'why is "PCD-2026-001-R1.pdf" in my drawings?').
+// If a future surface needs to surface artifacts, opt in via a new flag —
+// no caller wants them today.
 export async function listFilesForProject(opts: {
   projectId: string;
   /** When true, filter rows to visibility='org_and_stakeholders'. */
@@ -62,10 +73,12 @@ export async function listFilesForProject(opts: {
     ? and(
         eq(projectFiles.projectId, opts.projectId),
         eq(projectFiles.visibility, 'org_and_stakeholders'),
+        ne(projectFiles.source, 'document_artifact'),
         isNull(projectFiles.deletedAt),
       )
     : and(
         eq(projectFiles.projectId, opts.projectId),
+        ne(projectFiles.source, 'document_artifact'),
         isNull(projectFiles.deletedAt),
       );
 
