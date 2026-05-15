@@ -1,9 +1,9 @@
 # PCD Portal SaaS — Architecture Reference
 
-**Version:** 0.19 (**Phase 2 Session 14 shipped — Phase 2 CLOSED.** Receipts (auto-created in `recordPayment` as `documents` rows of type='receipt' linked via `payment_id`), reviseReceipt (recipient-field revision-log mechanism), `@react-pdf/renderer` server-side PDF generation for all three document types stored as `project_files` rows with `source='document_artifact'`, `/r/[token]` public route, portal-side financial visibility wired (was a `[]` short-circuit), Coming Soon profitability card, end-to-end polish pass. Migration 0028 adds two additive nullable columns: `documents.recipient_name` (receipt-only "addressed to") + `project_files.source_document_id` (FK to documents, with partial index for cheap find-or-create lookup of cached PDFs). One new ADR? No — the PDF subsystem composes ADR-033 (post-commit dispatch) + ADR-034 (token-authorized public writes via `generateDocumentPdfFromToken`); no new pattern emerged. Test counts: RLS 251 → **254** (+3 receipt RLS coverage), Actions 293 → **321** (+28 across receipts.test.ts, document-pdf.test.ts, portal-financial-visibility.test.ts). Phase 1c is closed since 14 May; Phase 2 is closed today.)
-**Last updated:** 15 May 2026
+**Version:** 0.20 (Phase 3 strategy decision shipped 16 May 2026 — docs-only renumber. Original Phase 3 ("Client portal — stakeholder-facing UI") collapsed: /portal/* shipped early via Phase 1b/1c and lit up further by S14. Renumbered 4→3 (Architect lifecycle), 5→4 (Native kanban + public docs + upsells), 6→5 (Stripe billing + plan switching + polish). Pre-launch UX polish sprint scoped separately, NOT a numbered phase. ~25 textual `Phase N` references swept across §2 / §6 / §10 / §13 / §15 / §16 / §17 / §18 / §19 / §24 / §31 / §34 / §35. Stale `(client)/` route group reference in §6 replaced with the real `portal/` entry. New §35.DECISION-PHASE-3-RENUMBER carryover entry modelled on the §35.HOTFIX / §35.MINI pattern. No code / schema / test / migration changes. v0.19 → v0.20.)
+**Last updated:** 16 May 2026
 **Maintainer:** Hasnath
-**Codebase status:** **Phase 2 Session 14 shipped — Phase 2 CLOSED** 15 May 2026. New surfaces: `/dashboard/projects/[id]/receipts/[receiptId]` (org-side receipt detail with revise-recipient + Download PDF), `/r/[token]` public receipt view (read-only, token-gated, Download PDF), Receipts + Profitability ("Coming Soon") cards on the project detail page (Coming Soon org-side ONLY per kickoff §2.11), Download PDF buttons on quote/invoice/receipt org-side detail pages and on `/q/[token]` `/i/[token]` `/r/[token]` public pages. Portal `/portal/projects/[id]` financial sections lit up (Quotes / Invoices / Payments / Receipts read-only, gated on `can_view_financials` — was the S13 short-circuit-to-`[]`). PaymentsSection renders R{n} link to receipt detail (bidirectional payment↔receipt UI link); ReceiptsSection has its own card. Schema-forever (Hard Rule 1) holds — additive only: two nullable columns on existing tables, no new tables, no changes to existing rows, RLS, actions, or tests. **Phase 2 ends here.** Phase 3 strategy decision next (Phase 3 as originally scoped is largely already shipped via 1b/1c — see §35.14 close-out note).
+**Codebase status:** **Phase 2 Session 14 shipped — Phase 2 CLOSED** 15 May 2026. New surfaces: `/dashboard/projects/[id]/receipts/[receiptId]` (org-side receipt detail with revise-recipient + Download PDF), `/r/[token]` public receipt view (read-only, token-gated, Download PDF), Receipts + Profitability ("Coming Soon") cards on the project detail page (Coming Soon org-side ONLY per kickoff §2.11), Download PDF buttons on quote/invoice/receipt org-side detail pages and on `/q/[token]` `/i/[token]` `/r/[token]` public pages. Portal `/portal/projects/[id]` financial sections lit up (Quotes / Invoices / Payments / Receipts read-only, gated on `can_view_financials` — was the S13 short-circuit-to-`[]`). PaymentsSection renders R{n} link to receipt detail (bidirectional payment↔receipt UI link); ReceiptsSection has its own card. Schema-forever (Hard Rule 1) holds — additive only: two nullable columns on existing tables, no new tables, no changes to existing rows, RLS, actions, or tests. **Phase 2 ends here.** **Phase 3 strategy resolved 16 May 2026** — see §35.DECISION-PHASE-3-RENUMBER. Original Phase 3 framing collapsed (portal shipped early via 1b/1c/2); renumbered: 4→3 (Architect lifecycle), 5→4 (Native kanban + upsells), 6→5 (Stripe billing + polish). Pre-launch UX polish sprint scoped separately, not a numbered phase. Next: pre-launch sprint scope doc + new Phase 3 (Architect lifecycle) kickoff.
 **Production URL:** https://pcd-saas.vercel.app
 **Repo:** https://github.com/hasnath-code/pcd-saas
 
@@ -46,10 +46,11 @@ Each project has multiple **stakeholders** (clients, collaborators, observers) w
 | 1b | **✓ Complete** (S5 + S6 + S7 + S8 shipped) | Project core: workflows, clients, projects, stakeholders |
 | 1c | **✓ Complete** (S9 + S10 + S11 shipped 14 May 2026) | Communication: conversations, files, notifications, activity |
 | 2 | **✓ Complete** (S12 + S13 + S14 shipped 15 May 2026) | Surveyor lifecycle (quote/invoice/receipt) ported from Apps Script + PDF generation + portal financial visibility |
-| 3 | Pending | Client portal (stakeholder-facing UI) |
-| 4 | Pending | Architect lifecycle (RIBA stages, drawing packages) |
-| 5 | Pending | Native kanban, public docs, upsells |
-| 6 | Pending | Stripe billing, plan switching, polish |
+| 3 | Pending | Architect lifecycle (RIBA stages, drawing packages) |
+| 4 | Pending | Native kanban, public docs, upsells |
+| 5 | Pending | Stripe billing, plan switching, polish |
+
+**Pre-launch UX polish sprint** is scoped separately from numbered phases — runs between Phase 2 close and Phase 3 kickoff. Phases are product-shaped bodies of work; polish doesn't anchor a phase. Sprint scope and operational pre-launch items (retention worker, data export, Resend prod domain, Upstash prod split, migration of Hasnath's existing 10 projects) tracked outside the phase tracker. See §35.DECISION-PHASE-3-RENUMBER.
 
 ---
 
@@ -69,8 +70,8 @@ Each project has multiple **stakeholders** (clients, collaborators, observers) w
 | UI framework | shadcn/ui + Tailwind | latest | Radix primitives under the hood |
 | Form validation | Zod | latest | Shared between client and server actions |
 | ORM | Drizzle | latest | Type-safe, SQL-close; not Prisma |
-| Billing | Stripe | latest | Phase 6 |
-| SMS (later) | Twilio | latest | Phase 4+, gated behind paid plans |
+| Billing | Stripe | latest | Phase 5 |
+| SMS (later) | Twilio | latest | Phase 3+, gated behind paid plans |
 
 **Why Drizzle over Prisma:** Drizzle's schema is closer to actual SQL, plays well with Supabase's RLS-first model, and doesn't need a separate generation step that fights with Supabase migrations. Prisma's RLS support is awkward.
 
@@ -233,8 +234,9 @@ pcd-saas/
 │   │   ├── projects/
 │   │   ├── settings/
 │   │   └── team/
-│   ├── (client)/                     # Stakeholder portal (Phase 3)
-│   │   └── projects/
+│   ├── portal/                       # Stakeholder portal (live since Phase 1b; conversations/files/notifications added Phase 1c; financial surfaces added Phase 2)
+│   │   ├── projects/
+│   │   └── conversations/
 │   ├── api/
 │   │   └── webhooks/
 │   │       └── [source]/             # Generic webhook ingestion
@@ -275,8 +277,8 @@ pcd-saas/
 │   ├── webhooks/
 │   │   ├── verify.ts                 # Per-source signature verification
 │   │   ├── resend.ts                 # Resend processor
-│   │   ├── stripe.ts                 # Phase 6
-│   │   └── twilio.ts                 # Phase 4+
+│   │   ├── stripe.ts                 # Phase 5
+│   │   └── twilio.ts                 # Phase 3+
 │   ├── email/
 │   │   ├── resend-client.ts
 │   │   └── templates/
@@ -648,7 +650,7 @@ CREATE TABLE plans (
 ALTER TABLE plans DISABLE ROW LEVEL SECURITY;
 ```
 
-**Seed data (Phase 1a — placeholder feature_flags, real values set in Phase 6):**
+**Seed data (Phase 1a — placeholder feature_flags, real values set in Phase 5):**
 ```sql
 -- Surveyor plans
 INSERT INTO plans (org_type_id, slug, name, price_monthly_pence, feature_flags) VALUES
@@ -1910,7 +1912,7 @@ Each stakeholder-accessible table checks the relevant flag in its policy. Exampl
 
 ### Activity timeline visibility model (Session 11)
 
-`project_activity` differs from the other stakeholder-accessible tables: visibility is gated by a per-ROW boolean (`visible_to_stakeholders`), not a per-stakeholder profile flag. The writing server action decides at log time whether the event should surface to stakeholders. Defaults locked in by Phase 6:
+`project_activity` differs from the other stakeholder-accessible tables: visibility is gated by a per-ROW boolean (`visible_to_stakeholders`), not a per-stakeholder profile flag. The writing server action decides at log time whether the event should surface to stakeholders. Defaults locked in by Phase 5:
 
 - `project.stage_changed` → `true` (stakeholders always see stage transitions)
 - `file.uploaded` → mirrors `project_files.visibility` (`true` only when `org_and_stakeholders`)
@@ -1941,7 +1943,7 @@ This way the profile is a documentation aid, not a constraint.
 
 ## 15. Webhook Ingestion Pattern
 
-Generic, idempotent, used by Resend (1a), Stripe (Phase 6), Twilio (Phase 4+).
+Generic, idempotent, used by Resend (1a), Stripe (Phase 5), Twilio (Phase 3+).
 
 ### Route shape
 
@@ -2014,8 +2016,8 @@ lib/webhooks/
   ├── verify.ts           # verifyWebhookSignature(source, body, sig)
   ├── extract.ts          # extractEventId, extractEventType per source
   ├── resend.ts           # processResendEvent(payload) — populates email_events
-  ├── stripe.ts           # Phase 6
-  └── twilio.ts           # Phase 4+
+  ├── stripe.ts           # Phase 5
+  └── twilio.ts           # Phase 3+
 ```
 
 ### Resend processor (Phase 1a)
@@ -2072,7 +2074,7 @@ Resend wiring for Phase 1a.
 ### From-address strategy
 
 - **Default:** `noreply@<APP_DOMAIN>` (e.g. `noreply@pcdportal.com`)
-- **Phase 5+:** if org has `custom_email_verified_at IS NOT NULL`, send as `<configured>@<custom_email_domain>` with proper SPF/DKIM/DMARC
+- **Phase 4+:** if org has `custom_email_verified_at IS NOT NULL`, send as `<configured>@<custom_email_domain>` with proper SPF/DKIM/DMARC
 
 Phase 1a only ships the default. The columns exist (`organizations.custom_email_domain`, `organizations.custom_email_verified_at`) but no verification logic yet.
 
@@ -2172,7 +2174,7 @@ Extensible via additive migrations on the `notifications.event_type` CHECK (or k
 ### Channels
 
 Phase 1c implements: `in_app`, `email`.
-Phase 4+ adds: `push`, `sms`.
+Phase 3+ adds: `push`, `sms`.
 
 The schema supports all four from day one (CHECK constraint includes them); only the dispatcher is incrementally expanded.
 
@@ -2209,7 +2211,7 @@ export async function dispatchNotification(opts: {
   //      on Resend exception (and Sentry breadcrumb).
   //    - push / sms: insert + immediately stamp failed_at = NOW(),
   //      failure_reason = 'channel_not_implemented'. Schema supports them;
-  //      dispatcher rejects until Phase 4+.
+  //      dispatcher rejects until Phase 3+.
 }
 ```
 
@@ -2297,7 +2299,7 @@ Phase 1c quotas (Session 10 / ADR-029 — supersedes the original placeholder by
 
 Both caps are stored in `plans.feature_flags` JSONB and resolved via `lib/features.ts` `checkFeature(orgId, 'upload_file', { sizeBytes })` — a compound check evaluating per-file cap + a single `SUM(size_bytes)` query across `project_files JOIN projects ON org_id = ?` (filtered to non-deleted rows on both sides). Both must pass for the upload to be permitted. The same compound check is invoked by `confirmUpload` to close the create→confirm race window — if a concurrent upload pushed the org over between createUploadUrl and confirmUpload, the orphan storage object is deleted and a `quota_exceeded` error is returned.
 
-Migration to a cached counter on `organizations` (eliminating the SUM scan) is deferred until EXPLAIN ANALYZE on real data shows the SUM dominating upload latency — pre-launch perf pass at the earliest. Phase 6 will make quotas enforceable against real billing state.
+Migration to a cached counter on `organizations` (eliminating the SUM scan) is deferred until EXPLAIN ANALYZE on real data shows the SUM dominating upload latency — pre-launch perf pass at the earliest. Phase 5 will make quotas enforceable against real billing state.
 
 ---
 
@@ -2312,7 +2314,7 @@ Supabase Realtime for live updates.
 | `conversation:<id>` | Conversation participants | New messages, edits, typing indicators |
 | `project:<id>:activity` | Org members + stakeholders (filtered by visibility) | Activity log entries |
 | `notifications:<recipientId>` | Single recipient | New in-app notifications |
-| `org:<id>:presence` | Org members | Who's online (Phase 3+) |
+| `org:<id>:presence` | Org members | Who's online (Post-launch+ — after polish sprint, if requested) |
 
 ### Subscription authorization
 
@@ -2695,7 +2697,7 @@ Upstash Redis sliding-window limits.
 | `/login`, `/api/magic-link` | 10/min per IP | `auth:<ip>` |
 | Server actions on writes | 300/min per user | `action:<userId>` |
 
-Stripe IPs (Phase 6) get whitelisted — Stripe's retry behavior with 429s is messy.
+Stripe IPs (Phase 5) get whitelisted — Stripe's retry behavior with 429s is messy.
 
 ### Helper
 
@@ -3061,7 +3063,7 @@ This makes filtering errors per-org trivial in the Sentry dashboard.
 
 ### Performance
 
-Sentry tracing is **off** in Phase 1 (cost). Phase 6 enables sampled tracing for hot paths.
+Sentry tracing is **off** in Phase 1 (cost). Phase 5 enables sampled tracing for hot paths.
 
 ---
 
@@ -3136,7 +3138,7 @@ Four sessions. Each session has a "done" criterion. Don't move to the next sessi
 - [x] `actions/orgs.ts`: `createOrganization` (`updateOrg` / `softDeleteOrg` / `getOrgWithPlan` deferred — `getMyOrg` query helper added in `db/queries/orgs.ts` instead)
 - [x] `actions/users.ts`: `inviteTeamMember`, `acceptInvitation`, `removeUserFromOrg` (`updateRole` deferred to Phase 1b polish)
 - [x] `actions/settings.ts`: `updateCompanyDetails`, `updateBankDetails`, `updateDefaultTerms` + `getOrgSettings` query helper
-- [x] Settings page UI: company details, bank info, terms (branding deferred to Phase 5)
+- [x] Settings page UI: company details, bank info, terms (branding deferred to Phase 4)
 - [x] Team invitations UI: list, invite form, role select, pending state
 - [x] Magic link invitation acceptance flow: token validation, account creation, redirect to dashboard
 - [x] Dashboard placeholder: org name, settings + team links
@@ -3163,8 +3165,8 @@ Four sessions. Each session has a "done" criterion. Don't move to the next sessi
 - [x] `lib/email/send.ts`: real `sendEmail()` helper using Resend SDK (replaces Session 3 stub)
 - [x] Migration 0004: REVOKE anon GRANTs on `webhook_events` + `email_events` (closes local-vs-cloud GRANT divergence Session 3 surfaced; tightens RLS test predicate)
 - [x] Migration 0005: `outbound_emails` table (10th Phase 1a table per §16, deferred from S2)
-- [ ] Email templates (React Email): `auth-magic-link`, `team-invitation` *(deferred — S3 ships plain HTML `team-invitation.ts`; React Email migration is Phase 5 polish)*
-- [ ] Update Supabase Auth to use Resend for confirmation emails (custom SMTP) *(deferred to Phase 5 — Supabase's default SMTP works for Phase 1a internal use; custom SMTP requires verified domain)*
+- [ ] Email templates (React Email): `auth-magic-link`, `team-invitation` *(deferred — S3 ships plain HTML `team-invitation.ts`; React Email migration is Phase 4 polish)*
+- [ ] Update Supabase Auth to use Resend for confirmation emails (custom SMTP) *(deferred to Phase 4 — Supabase's default SMTP works for Phase 1a internal use; custom SMTP requires verified domain)*
 - [x] `lib/ratelimit.ts`: Upstash wrapper with limiters for webhook (100/min), publicDoc (30/min), auth (10/min), invite (20/hr)
 - [x] Rate limiting wired on webhook route + signIn/signUp/sendMagicLink + inviteTeamMember
 - [ ] Public token-gated route placeholders: `/q/[token]`, `/i/[token]`, `/r/[token]` (Section 25) *(deferred to Phase 2 — limiter `publicDoc` is ready; no consumer until then)*
@@ -3373,16 +3375,16 @@ Each tied to a concrete decide-by milestone.
 |---|---|---|
 | Retention worker schedule (90 days for messages? 365 for documents?) | Pre-launch (before first paying customer) | First customer onboarded |
 | Data export format (JSON dump? PDF report? CSV per resource?) | Pre-launch | First GDPR data request received OR 30 days before public launch |
-| Custom email domain DNS verification flow (DKIM/SPF/DMARC checks) | Phase 5 start | First Practice/Enterprise tier signup |
-| Push notification implementation (Web Push API vs OneSignal vs Pushwoosh) | Phase 4 start | First customer requests push |
-| SMS provider choice (Twilio confirmed, but verify Vonage/MessageBird pricing for UK) | Phase 4 start | Same trigger as above |
-| Realtime presence indicator (who's online in conversation) | Phase 3 mid | After client portal launch, if requested by users |
+| Custom email domain DNS verification flow (DKIM/SPF/DMARC checks) | Phase 4 start | First Practice/Enterprise tier signup |
+| Push notification implementation (Web Push API vs OneSignal vs Pushwoosh) | Phase 3 start | First customer requests push |
+| SMS provider choice (Twilio confirmed, but verify Vonage/MessageBird pricing for UK) | Phase 3 start | Same trigger as above |
+| Realtime presence indicator (who's online in conversation) | Post-launch — after polish sprint | If requested by users post-launch |
 | ~~Document generation backend~~ — **RESOLVED Session 14 (15 May 2026):** `@react-pdf/renderer` v4. Pure JS, no native deps, runs on Vercel serverless without configuration. Stored as `project_files` rows with `source='document_artifact'` + `source_document_id`. One parameterised template covers quote/invoice/receipt; cache invalidation soft-deletes on revise/correct. Two callable surfaces: `generateDocumentPdf` (org-side) + `generateDocumentPdfFromToken` (public, ADR-034). See §12.P2.8. | ~~Phase 2 mid~~ | n/a |
-| Workflow stage automation (auto-advance on payment, etc.) | Phase 5 | After native kanban ships and users request automation |
-| OAuth providers beyond email (Google, Microsoft) | Phase 6 mid | Customer demand or enterprise sales requirement |
+| Workflow stage automation (auto-advance on payment, etc.) | Phase 4 | After native kanban ships and users request automation |
+| OAuth providers beyond email (Google, Microsoft) | Phase 5 mid | Customer demand or enterprise sales requirement |
 | Audit log retention period (7 years UK default, configurable per plan?) | Pre-launch | Same as retention worker decision |
-| Multi-org user — same auth identity owning two separate orgs (e.g. surveyor side AND architect side) | Phase 6 | When the dual_org_type plan flag is implemented |
-| Inngest vs Trigger.dev for async job queue (notifications fan-out, retention worker, large file processing) | Phase 4 start | When notification volume exceeds 100/day OR push notifications are introduced |
+| Multi-org user — same auth identity owning two separate orgs (e.g. surveyor side AND architect side) | Phase 5 | When the dual_org_type plan flag is implemented |
+| Inngest vs Trigger.dev for async job queue (notifications fan-out, retention worker, large file processing) | Phase 3 start | When notification volume exceeds 100/day OR push notifications are introduced |
 
 ---
 
@@ -3910,7 +3912,7 @@ Session 11 was the architecturally densest session in Phase 1c: 3 new tables, di
 
 ### Open carryover
 
-- **Phase 3 strategy decision.** Per phase-2-scope.md §6 + the §35.6 Session 6 carryover: Phase 3 was originally defined as "build the stakeholder UI — it doesn't exist yet" — but `/portal/*` already substantially exists (1b shipped the basics, 1c added messages + files + notifications + activity, 14 added the financial sections). Phase 3 as originally scoped is largely hollow; recommend collapsing it into a pre-launch UX polish pass + renumbering 4/5/6. Decide before kicking off Phase 3.
+- ~~**Phase 3 strategy decision.**~~ **Resolved 16 May 2026** — see §35.DECISION-PHASE-3-RENUMBER. Original Phase 3 framing collapsed (portal shipped early via 1b/1c/2); renumbered 4→3 (Architect lifecycle), 5→4 (Native kanban + upsells), 6→5 (Stripe + polish); pre-launch UX polish sprint scoped separately, not a numbered phase.
 - **Hasnath's existing 10 projects migration** (descoped from Phase 1c — see §35.11 row 14 / Phase 1c exit criteria). Independent of Phase 2 shape; can run any time before launch.
 - **DEBT-066** is the next free debt id. Session 14 filed no new DEBT entries — every deferred item above is captured here in the carryover or already has an existing ID.
 
@@ -3939,14 +3941,57 @@ Phase 2 shipped over three sequential sessions (S12 / S13 / S14) on 15 May 2026,
 - **DEBT entries:** DEBT-064 closed (S13). DEBT-065 filed (refund modelling — Low). 0 net new debts in S14.
 - **Phase tracker:** 1 + 2 → ✓ Complete.
 
-Pre-launch operational items (not Phase-bound): retention worker schedule, data-export format, Resend production domain verification, Upstash Redis production split, the migration of Hasnath's existing 10 projects, the Phase 3 scope decision.
+Pre-launch operational items (not Phase-bound): retention worker schedule, data-export format, Resend production domain verification, Upstash Redis production split, the migration of Hasnath's existing 10 projects. (The Phase 3 scope decision item is resolved — see §35.DECISION-PHASE-3-RENUMBER below.)
 
 ---
 
 **Last reviewed:** 15 May 2026 (Phase 2 Session 14 shipped — v0.18 → v0.19; **Phase 2 CLOSED**; 0 new ADRs; 0 new tables; 2 additive columns (1 on `documents`, 1 on `project_files`); 3 new server actions (`reviseReceipt` + 2 PDF); 1 new public route lit up (`/r/[token]`); 5 new components; 1 new lib subsystem (`lib/pdf/`); +31 tests). **Phase F walk fixes (post-shipped):** `revalidatePath` normalized to dynamic-segment pattern across 14 callsites (Fix 1, commit `632fd3d`); `listFilesForProject` excludes `document_artifact` rows (Fix 2, commit `131c7b5`); DEBT-066 filed for the activity-timeline financial leak (commit `b5e043b`). Tests stayed green.
 
+---
+
+## 35.DECISION-PHASE-3-RENUMBER — Phase 3 strategy resolved (16 May 2026)
+
+Between Phase 2 close and what was originally "Phase 3 kickoff," the Phase 3 strategy carryover from §35.14 was resolved. The original framing — *Phase 3 = Client portal (stakeholder-facing UI)* — was hollow: `/portal/*` already substantially exists. Phase 1b shipped the basics; Phase 1c added messages + files + notifications + activity; Session 14 added the financial sections gated on `can_view_financials`. The flag was raised in `phase-2-scope.md` §6 and the §35.6 Session 6 carryover; this entry closes it.
+
+**Decision:** Collapse the original Phase 3 framing. Renumber:
+
+| Old | New | Description |
+|---|---|---|
+| Phase 4 | **Phase 3** | Architect lifecycle (RIBA stages, drawing packages) |
+| Phase 5 | **Phase 4** | Native kanban, public docs, upsells |
+| Phase 6 | **Phase 5** | Stripe billing, plan switching, polish |
+
+**Pre-launch UX polish sprint scoped separately** — not a numbered phase, runs between Phase 2 close and the new Phase 3 kickoff. Phases are product-shaped bodies of work; polish doesn't anchor a phase. Sprint scope candidates:
+
+- **Genuinely-missing portal functionality** from §35.14 deferrals: portal-side invoice / receipt detail pages (clicking a row in the portal's section cards currently goes nowhere — public `/i/[token]` and `/r/[token]` are the only detail surface); in-portal authenticated PDF download (currently only via public token pages).
+- **Open DEBTs with pre-launch or polish triggers:** DEBT-066 (activity-timeline financial leak — flagged in §35.14 specifically with trigger "before Phase 3 client-portal polish"); DEBT-063 (invitation landing UX for first-time invitees); DEBT-031 + DEBT-055 (badge UX); DEBT-029 + DEBT-058 (Realtime not auto-updating); DEBT-035 (file restore UI); DEBT-041 (`/select-context` for dual-context users); DEBT-048 (team-internal conversations UI).
+- **Defense-in-depth:** DEBT-060 + DEBT-061 (pooler-bypass on portal conversation queries — caller-enforced participation gates).
+- **First-pass UX work not in DEBT:** mobile responsive sweep (stakeholders skew mobile-heavy), empty states for 0-project / 0-message stakeholders, stakeholder settings/profile surface (the org has `/settings`; the portal currently has no equivalent), copy/comms pass on empty states + error toasts + emails.
+
+**Pre-launch operational items remain non-phase-bound** (carried from §35.14 close-out): retention worker schedule, data-export format, Resend production domain verification, Upstash Redis production split, migration of Hasnath's existing 10 projects. Polish-sprint candidates by adjacency, but separate scope from UX polish itself.
+
+**Schema-frozen across the polish sprint** (Hard Rule 1 holds): additive-only or zero-schema. A polish task that wants a new column is a signal it's not polish — escalate to a feature scope discussion.
+
+**Cleanup landed in the same edit:**
+
+- §6 Project Layout: replaced the stale `(client)/` route group reference (never existed in the codebase — portal shipped at `app/portal/*`) with the real `portal/` entry; comment updated to reflect Phase 1b → 1c → 2 surface area.
+- All textual `Phase N` references throughout the doc renumbered to match the new tracker (§2 stack table, §6 project layout comments, §10 / §13 / §15 / §16 / §17 / §18 / §19 / §24 phase callouts, §31 deferred items, §34 deferred decisions table, §35 carryover phase-pulls).
+- One special case at §19: the realtime presence channel note was rephrased from `(Phase 3+)` (which had meant "after client portal launch") to `(Post-launch+ — after polish sprint, if requested)` to preserve the original semantic anchor, which now lives post-polish-sprint rather than in any numbered phase.
+- Parallel rephrasing at §34 row "Realtime presence indicator": `Decide by = Phase 3 mid` → `Post-launch — after polish sprint`; trigger `After client portal launch, if requested by users` → `If requested by users post-launch`. Same dead-anchor logic as §19; the row's semantic anchor moves out of the numbered tracker.
+
+**No ADR filed.** This is a roadmap-shape decision, not an architectural pattern. ADRs 031–034 are technical pattern locks; the Phase 3 renumber doesn't fit that category. Future Claude can reference §35.DECISION-PHASE-3-RENUMBER directly.
+
+**No DEBT entries filed.** Every implication is either resolved (the decision itself) or already tracked under existing DEBT IDs (the polish-sprint inventory above).
+
+**Follow-up before pre-launch sprint kickoff:**
+
+- Draft `pre-launch-sprint-scope.md` modelled on `phase-2-scope.md` (locked decisions, deferred items, session-count estimate).
+- Audit `DEBT-LOG.md` for trigger-string drift: triggers referencing "Phase 3 client-portal polish" should be reworded to "pre-launch UX polish sprint" (DEBT-066 is the explicit known case; sweep for others).
+
+---
+
 ## End of document
 
 
-**Next review:** Phase 3 strategy decision before kickoff. Schema sections frozen — additive-only thereafter (Hard Rule 1).
+**Next review:** Pre-launch UX polish sprint scope doc (per §35.DECISION-PHASE-3-RENUMBER), and/or kickoff of the new Phase 3 (Architect lifecycle). Schema sections frozen — additive-only thereafter (Hard Rule 1).
 
