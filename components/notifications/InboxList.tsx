@@ -35,6 +35,8 @@ const EVENT_LABELS: Record<NotificationEventType, string> = {
   'invoice.revised': 'Invoice revised',
   'payment.recorded': 'Payment recorded',
   'payment.corrected': 'Payment corrected',
+  'receipt.generated': 'Receipt issued',
+  'receipt.revised': 'Receipt revised',
 };
 
 function renderSummary(
@@ -62,6 +64,10 @@ function renderSummary(
       return `${s(payload.amountFormatted, 'A payment')} recorded on ${s(payload.projectNumber, 'a project')}`;
     case 'payment.corrected':
       return `Payment on ${s(payload.projectNumber, 'a project')} corrected: ${s(payload.previousAmountFormatted, '')} → ${s(payload.newAmountFormatted, '')}`;
+    case 'receipt.generated':
+      return `Receipt ${s(payload.receiptNumber, '')} for ${s(payload.amountFormatted, '')} issued on ${s(payload.projectNumber, 'a project')}`;
+    case 'receipt.revised':
+      return `Receipt ${s(payload.receiptNumber, '')} on ${s(payload.projectNumber, 'a project')} was revised`;
     default:
       return EVENT_LABELS[eventType];
   }

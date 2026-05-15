@@ -31,6 +31,7 @@ import { diffInvoiceFields } from '@/lib/documents/revise-diff';
 import { dispatchNotification } from '@/lib/notifications/dispatch';
 import { quoteSentEmail } from '@/lib/email/templates/quote-sent';
 import { invoiceSentEmail } from '@/lib/email/templates/invoice-sent';
+import { invalidateDocumentPdfCache } from '@/actions/document-pdf';
 
 // Phase 2 §2 — quote lifecycle server actions. createQuote / updateQuoteDraft
 // / sendQuote follow ARCHITECTURE-saas.md §20 (requireOrgUser + Zod + tx +
@@ -1321,9 +1322,188 @@ export async function reviseInvoice(
   // on invoice revision" toggle, at which point a dispatchQuoteOrInvoiceNotification
   // call goes here.
 
+  // Session 14: invalidate the cached PDF so the next download regenerates
+  // from the post-revise state. Soft-delete only, post-commit, best-effort.
+  try {
+    await invalidateDocumentPdfCache(documentId);
+  } catch (err) {
+    Sentry.captureException(err, {
+      tags: { scope: 'pdf_cache_invalidate', action: 'reviseInvoice' },
+      extra: { documentId },
+    });
+  }
+
   revalidatePath(`/dashboard/projects/${row.projectId}`, 'layout');
   return {
     success: true,
     data: { revisionNumber: newRevisionNumber, fieldsChanged: diff.fieldsChanged },
+  };
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// reviseReceipt — Phase 2 Session 14.
+//
+// Receipts have a narrower revise surface than invoices: the only mutable
+// field is `recipient_name`. Money values mirror the linked payment in
+// lockstep (correctPayment is the canonical path for changing an amount).
+//
+// Mirrors reviseInvoice's revision-log mechanism — one entry appended per
+// call: { rev, previous_amount, new_amount, fields_changed, reason,
+// revised_at, revised_by }. previous_amount/new_amount are unchanged for a
+// recipient-only revise; the "field changed" is `recipient_name`. Diff is
+// computed inline (no need for the full diffInvoiceFields machinery).
+//
+// Like reviseInvoice: status='sent' precondition. No-op rejection (same
+// recipient text) returns conflict/no_changes. PDF cache invalidated post-
+// commit.
+
+const ReviseReceiptInput = z.object({
+  documentId: z.string().uuid(),
+  recipientName: z.string().trim().min(1).max(200),
+  reason: z.string().trim().min(1).max(500),
+});
+
+export async function reviseReceipt(
+  input: unknown,
+): Promise<DocumentActionResult<{ revisionNumber: number; fieldsChanged: string[] }>> {
+  let ctx: Awaited<ReturnType<typeof requireOrgUser>>;
+  try {
+    ctx = await requireOrgUser();
+  } catch (e) {
+    if (e instanceof AuthError) return { error: e.code, reason: e.message };
+    throw e;
+  }
+
+  const parsed = ReviseReceiptInput.safeParse(input);
+  if (!parsed.success) {
+    return {
+      error: 'validation_error',
+      reason: parsed.error.issues[0]?.message ?? 'Invalid input',
+    };
+  }
+  const { documentId, recipientName, reason } = parsed.data;
+
+  const rows = await db
+    .select({
+      id: documents.id,
+      orgId: documents.orgId,
+      projectId: documents.projectId,
+      status: documents.status,
+      type: documents.type,
+      currentRecipientName: documents.recipientName,
+      currentTotal: documents.total,
+      currentRevisionNumber: documents.revisionNumber,
+      currentRevisionLog: documents.revisionLogPayload,
+      documentNumber: documents.documentNumber,
+    })
+    .from(documents)
+    .where(and(eq(documents.id, documentId), isNull(documents.deletedAt)))
+    .limit(1);
+
+  if (rows.length === 0 || rows[0].orgId !== ctx.orgId) {
+    return { error: 'not_found', reason: 'document' };
+  }
+  const row = rows[0];
+  if (row.type !== 'receipt') return { error: 'conflict', reason: 'not_a_receipt' };
+  if (row.status !== 'sent') return { error: 'conflict', reason: 'not_sent' };
+
+  const prevRecipient = row.currentRecipientName?.trim() ?? '';
+  const nextRecipient = recipientName.trim();
+  if (prevRecipient === nextRecipient) {
+    return { error: 'conflict', reason: 'no_changes' };
+  }
+
+  const newRevisionNumber = Number(row.currentRevisionNumber) + 1;
+  const previousTotal = Number(row.currentTotal);
+  const revisionEntry = {
+    rev: newRevisionNumber,
+    previous_amount: previousTotal,
+    new_amount: previousTotal,
+    fields_changed: ['recipientName'],
+    reason,
+    revised_at: new Date().toISOString(),
+    revised_by: ctx.userId,
+    previous_recipient_name: prevRecipient || null,
+    new_recipient_name: nextRecipient,
+  };
+  const existingLog = Array.isArray(row.currentRevisionLog)
+    ? (row.currentRevisionLog as unknown[])
+    : [];
+  const nextLog = [...existingLog, revisionEntry];
+
+  const projectRows = await db
+    .select({ projectNumber: projects.projectNumber })
+    .from(projects)
+    .where(eq(projects.id, row.projectId))
+    .limit(1);
+  const projectNumber = projectRows[0]?.projectNumber ?? '';
+
+  try {
+    await db.transaction(async (tx) => {
+      await tx
+        .update(documents)
+        .set({
+          recipientName: nextRecipient,
+          revisionNumber: newRevisionNumber,
+          revisionLogPayload: nextLog,
+        })
+        .where(eq(documents.id, documentId));
+
+      await logActivityTx(tx, {
+        projectId: row.projectId,
+        actorType: 'user',
+        actorId: ctx.userId,
+        eventType: 'receipt.revised',
+        payload: {
+          projectId: row.projectId,
+          projectNumber,
+          receiptId: documentId,
+          receiptNumber: row.documentNumber,
+          revisionNumber: newRevisionNumber,
+          fieldsChanged: ['recipientName'],
+          reason,
+        },
+        // Per Q3 pattern: org-internal change. The receipt's amount didn't
+        // change; only the recipient label. Leave portal timeline quiet.
+        visibleToStakeholders: false,
+      });
+    });
+  } catch (e) {
+    const errReason = e instanceof Error ? e.message : String(e);
+    return { error: 'internal_error', reason: `revise_receipt:${errReason}` };
+  }
+
+  await logAudit({
+    orgId: ctx.orgId,
+    userId: ctx.userId,
+    action: 'update',
+    resourceType: 'document',
+    resourceId: documentId,
+    metadata: {
+      project_id: row.projectId,
+      revise: {
+        rev: newRevisionNumber,
+        fields_changed: ['recipientName'],
+        previous_recipient_name: prevRecipient || null,
+        new_recipient_name: nextRecipient,
+        reason,
+      },
+    },
+  });
+
+  // Invalidate cached PDF so the next download reflects the new recipient.
+  try {
+    await invalidateDocumentPdfCache(documentId);
+  } catch (err) {
+    Sentry.captureException(err, {
+      tags: { scope: 'pdf_cache_invalidate', action: 'reviseReceipt' },
+      extra: { documentId },
+    });
+  }
+
+  revalidatePath(`/dashboard/projects/${row.projectId}`, 'layout');
+  return {
+    success: true,
+    data: { revisionNumber: newRevisionNumber, fieldsChanged: ['recipientName'] },
   };
 }

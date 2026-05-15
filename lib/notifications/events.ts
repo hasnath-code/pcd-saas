@@ -46,6 +46,15 @@ export const NOTIFICATION_EVENT_TYPES = [
   'invoice.revised',
   'payment.recorded',
   'payment.corrected',
+  // Phase 2 Session 14: receipt lifecycle. receipt.generated fires from
+  // recordPayment in the same tx as payment.recorded — the receipt is a
+  // distinct first-class artifact in the timeline, but no separate
+  // dispatchNotification fan-out (recipients + payload are the same as
+  // payment.recorded; a second fan-out would be notification spam).
+  // receipt.revised fires from reviseReceipt — activity-only, mirroring
+  // invoice.revised's no-dispatch policy.
+  'receipt.generated',
+  'receipt.revised',
 ] as const;
 
 export type NotificationEventType = (typeof NOTIFICATION_EVENT_TYPES)[number];

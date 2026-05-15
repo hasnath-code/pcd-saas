@@ -40,6 +40,8 @@ const EVENT_LABELS: Record<NotificationEventType, string> = {
   'invoice.revised': 'Invoice revised',
   'payment.recorded': 'Payment recorded',
   'payment.corrected': 'Payment corrected',
+  'receipt.generated': 'Receipt issued',
+  'receipt.revised': 'Receipt revised',
 };
 
 const CHANNEL_LABELS: Record<NotificationChannel, string> = {
