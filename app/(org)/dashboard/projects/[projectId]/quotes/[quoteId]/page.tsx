@@ -21,6 +21,7 @@ import {
 } from '@/components/ui/table';
 import { QuoteFormClient } from '@/components/quotes/QuoteFormClient';
 import { SendQuoteButton } from '@/components/quotes/SendQuoteButton';
+import { DownloadPdfButton } from '@/components/pdf/DownloadPdfButton';
 import { getAppUrl } from '@/lib/get-app-url';
 import { db } from '@/db';
 import { documentTokens } from '@/db/schema';
@@ -102,12 +103,17 @@ export default async function QuoteDetailPage({
             )}
           </div>
         </div>
-        {doc.status === 'draft' && (
-          <SendQuoteButton
-            documentId={doc.id}
-            documentNumber={doc.documentNumber}
-          />
-        )}
+        <div className="flex gap-2">
+          {doc.status === 'draft' && (
+            <SendQuoteButton
+              documentId={doc.id}
+              documentNumber={doc.documentNumber}
+            />
+          )}
+          {(doc.status === 'sent' || doc.status === 'superseded') && (
+            <DownloadPdfButton mode="document" documentId={doc.id} />
+          )}
+        </div>
       </div>
 
       {doc.acceptedAt && (

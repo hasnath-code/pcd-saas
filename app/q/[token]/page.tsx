@@ -19,6 +19,7 @@ import {
 import { getDocumentByToken } from '@/db/queries/documents';
 import { rateLimit } from '@/lib/ratelimit';
 import { AcceptQuoteForm } from '@/components/quotes/AcceptQuoteForm';
+import { DownloadPdfButton } from '@/components/pdf/DownloadPdfButton';
 
 // Phase 2 §2.9 + ADR-001 + ADR-034. Public token-gated quote view.
 // - Token-only auth surface — middleware skips /q/ paths.
@@ -153,6 +154,10 @@ export default async function PublicQuotePage({
           </div>
         </CardContent>
       </Card>
+
+      <div>
+        <DownloadPdfButton mode="token" token={token} label="Download quote PDF" />
+      </div>
 
       {!accepted && doc.status === 'sent' && (
         <Card>

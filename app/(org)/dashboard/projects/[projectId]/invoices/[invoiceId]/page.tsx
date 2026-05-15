@@ -22,6 +22,7 @@ import {
 import { InvoiceFormClient } from '@/components/invoices/InvoiceFormClient';
 import { SendInvoiceButton } from '@/components/invoices/SendInvoiceButton';
 import { ReviseInvoiceDialog } from '@/components/invoices/ReviseInvoiceDialog';
+import { DownloadPdfButton } from '@/components/pdf/DownloadPdfButton';
 import { getAppUrl } from '@/lib/get-app-url';
 import { db } from '@/db';
 import { documentTokens } from '@/db/schema';
@@ -123,6 +124,9 @@ export default async function InvoiceDetailPage({
                 vatApplicable: doc.vatApplicable,
               }}
             />
+          )}
+          {(doc.status === 'sent' || doc.status === 'superseded') && (
+            <DownloadPdfButton mode="document" documentId={doc.id} />
           )}
         </div>
       </div>

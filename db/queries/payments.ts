@@ -1,7 +1,13 @@
 import 'server-only';
 import { and, desc, eq, isNotNull, isNull, sum } from 'drizzle-orm';
 import { db } from '@/db';
-import { documents, payments, users } from '@/db/schema';
+import {
+  clients,
+  documents,
+  payments,
+  projectStakeholders,
+  users,
+} from '@/db/schema';
 import {
   derivePaymentStatus,
   type PaymentStatus,
@@ -9,15 +15,18 @@ import {
 
 // Phase 2 §2.3 / Session 13 — payments read surface.
 //
-// Server-side visibility filter (mirrors DEBT-059 / db/queries/files.ts):
+// Server-side visibility filter (mirrors DEBT-059 / db/queries/files.ts /
+// db/queries/documents.ts):
 // `db` is the Drizzle pooler client (postgres role) which BYPASSES RLS.
 // `visibleOnly` is REQUIRED on stakeholder-reachable queries — the policies
 // from 0025 are the DB-boundary gate when the query is routed through the
 // Supabase REST client, but org-side queries via the pooler must replicate
 // the gate explicitly. For payments the "visible to stakeholder" branch is
-// project_stakeholders.can_view_financials. When visibleOnly=true the query
-// short-circuits to [] until a portal-side caller is built (Session 14+);
-// org-side callers pass visibleOnly=false.
+// project_stakeholders.can_view_financials.
+//
+// Session 14: visibleOnly=true is wired. Caller must also pass
+// stakeholderAuthUserId; the query verifies financial-stakeholder access
+// before returning rows. Without auth user, returns []/0 (safe S13 default).
 
 export interface PaymentRow {
   id: string;
@@ -29,6 +38,11 @@ export interface PaymentRow {
   recordedAt: Date;
   correctionLogPayload: unknown[];
   createdAt: Date;
+  // Phase 2 Session 14: receipt is auto-created in the same tx as the
+  // payment. The bidirectional link (PaymentsSection rows show R{n};
+  // ReceiptsSection rows reference the payment) reads these fields.
+  receiptId: string | null;
+  receiptNumber: string | null;
 }
 
 function toPaymentRow(r: Record<string, unknown>): PaymentRow {
@@ -44,22 +58,65 @@ function toPaymentRow(r: Record<string, unknown>): PaymentRow {
       ? (r.correctionLogPayload as unknown[])
       : [],
     createdAt: r.createdAt as Date,
+    receiptId: (r.receiptId as string | null) ?? null,
+    receiptNumber: (r.receiptNumber as string | null) ?? null,
   };
 }
 
 /**
+ * Defense-in-depth: same shape as db/queries/documents.ts:hasStakeholderFinancialAccess
+ * — keep both call sites consistent. Returns true iff the auth user is an
+ * accepted stakeholder of the project with can_view_financials=true.
+ */
+async function hasStakeholderFinancialAccess(opts: {
+  projectId: string;
+  authUserId: string;
+}): Promise<boolean> {
+  const rows = await db
+    .select({ id: projectStakeholders.id })
+    .from(projectStakeholders)
+    .innerJoin(clients, eq(clients.id, projectStakeholders.clientId))
+    .where(
+      and(
+        eq(projectStakeholders.projectId, opts.projectId),
+        eq(clients.authUserId, opts.authUserId),
+        eq(projectStakeholders.canViewFinancials, true),
+        isNotNull(projectStakeholders.acceptedAt),
+        isNull(projectStakeholders.deletedAt),
+        isNull(clients.deletedAt),
+      ),
+    )
+    .limit(1);
+  return rows.length > 0;
+}
+
+/**
  * List payments for a project (newest first) + the running SUM. Soft-deleted
- * rows excluded from both. `visibleOnly=true` short-circuits to [] / 0 until
- * a portal-side caller is built.
+ * rows excluded from both.
+ *
+ * `visibleOnly=true` requires `stakeholderAuthUserId` for defense-in-depth
+ * gating. Without auth user → []/0 (safe S13 default). With auth user → real
+ * rows when financial-stakeholder access is granted, else []/0.
  */
 export async function getPaymentsForProject(opts: {
   projectId: string;
   visibleOnly: boolean;
+  stakeholderAuthUserId?: string;
 }): Promise<{ rows: PaymentRow[]; runningTotal: number }> {
   if (opts.visibleOnly) {
-    return { rows: [], runningTotal: 0 };
+    if (!opts.stakeholderAuthUserId) return { rows: [], runningTotal: 0 };
+    const ok = await hasStakeholderFinancialAccess({
+      projectId: opts.projectId,
+      authUserId: opts.stakeholderAuthUserId,
+    });
+    if (!ok) return { rows: [], runningTotal: 0 };
   }
 
+  // LEFT JOIN documents on (payment_id, type='receipt', not soft-deleted) to
+  // pick up the linked receipt. Receipts auto-created since Session 14 will
+  // always have a row; payments recorded before S14 (none in production yet
+  // — Phase 2 just shipped) have NULL receiptId/Number, which the UI
+  // tolerates as a missing-receipt state.
   const rows = await db
     .select({
       id: payments.id,
@@ -71,9 +128,19 @@ export async function getPaymentsForProject(opts: {
       recordedAt: payments.recordedAt,
       correctionLogPayload: payments.correctionLogPayload,
       createdAt: payments.createdAt,
+      receiptId: documents.id,
+      receiptNumber: documents.documentNumber,
     })
     .from(payments)
     .leftJoin(users, eq(users.id, payments.recordedBy))
+    .leftJoin(
+      documents,
+      and(
+        eq(documents.paymentId, payments.id),
+        eq(documents.type, 'receipt'),
+        isNull(documents.deletedAt),
+      ),
+    )
     .where(
       and(eq(payments.projectId, opts.projectId), isNull(payments.deletedAt)),
     )

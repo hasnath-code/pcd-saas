@@ -171,6 +171,23 @@ export const NOTIFICATION_CONTENT: Record<
     ctaLabel: 'Open project',
     ctaPath: projectPath(p, 'org'),
   }),
+  // Phase 2 Session 14 — receipt lifecycle. These two events live in the
+  // exhaustive maps so the type system stays sound, but neither has a
+  // dispatch fan-out (recipients overlap with payment.recorded / are
+  // org-internal for receipt.revised). The subjects are kept here in case a
+  // future UX wants to surface receipt events as notifications.
+  'receipt.generated': (p) => ({
+    subject: `Receipt ${s(p.receiptNumber, '')} issued`,
+    bodyText: `Receipt ${s(p.receiptNumber, '')} for ${s(p.amountFormatted, '')} was issued on ${s(p.projectNumber, 'a project')}.`,
+    ctaLabel: 'Open project',
+    ctaPath: projectPath(p, 'org'),
+  }),
+  'receipt.revised': (p) => ({
+    subject: `Receipt ${s(p.receiptNumber, '')} revised`,
+    bodyText: `Receipt ${s(p.receiptNumber, '')} on ${s(p.projectNumber, 'a project')} was revised (revision ${s(p.revisionNumber, '')}).`,
+    ctaLabel: 'Open project',
+    ctaPath: projectPath(p, 'org'),
+  }),
 };
 
 // Thin facade for callers that only need the subject string (audit logs,

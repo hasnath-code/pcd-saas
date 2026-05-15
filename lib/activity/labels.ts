@@ -27,6 +27,8 @@ const LABELS: Record<NotificationEventType, string> = {
   'invoice.revised': 'revised an invoice',
   'payment.recorded': 'recorded a payment',
   'payment.corrected': 'corrected a recorded payment',
+  'receipt.generated': 'issued a receipt',
+  'receipt.revised': 'revised a receipt',
 };
 
 export function activityLabel(eventType: NotificationEventType): string {
@@ -103,6 +105,18 @@ export function activitySummary(
       const to = s(payload.newAmountFormatted);
       if (from && to) return `${from} → ${to}`;
       return null;
+    }
+    case 'receipt.generated': {
+      const num = s(payload.receiptNumber);
+      const amt = s(payload.amountFormatted);
+      if (num && amt) return `${num} (${amt})`;
+      return num ?? null;
+    }
+    case 'receipt.revised': {
+      const num = s(payload.receiptNumber);
+      const rev = s(payload.revisionNumber);
+      if (num && rev) return `${num} — revision ${rev}`;
+      return num ?? null;
     }
     default:
       return null;

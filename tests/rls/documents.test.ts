@@ -346,3 +346,90 @@ describe('documents RLS — stakeholder financial visibility (§14 + §26 stub)'
     expect(check?.accepted_by_name).toBeNull();
   });
 });
+
+// Phase 2 Session 14 — receipt-type documents ride the same per-command
+// policies (migration 0023). The recipient_name additive column (0028)
+// reads/writes through the same gates. These tests prove the receipt path
+// behaves identically to the quote path under the existing policies; no
+// new policies were added for Session 14.
+describe('documents RLS — receipt-type rows + recipient_name (S14)', () => {
+  let f: WorkflowProjectFixture;
+  let receiptAId: string;
+  let receiptBId: string;
+
+  beforeAll(async () => {
+    f = await createWorkflowProjectFixture();
+    receiptAId = uuidv7();
+    receiptBId = uuidv7();
+    const { error } = await f.service.from('documents').insert([
+      {
+        id: receiptAId,
+        org_id: f.orgA.id,
+        project_id: f.extras.orgAProject.id,
+        type: 'receipt',
+        status: 'sent',
+        document_number: `${f.extras.orgAProject.projectNumber}-R1`,
+        sequence: 1,
+        line_items: [{ description: 'Payment received', quantity: 1, unitPrice: 100 }],
+        subtotal: 100,
+        total: 100,
+        recipient_name: 'Org A Recipient',
+        created_by: f.userA.userId,
+        sent_at: new Date().toISOString(),
+      },
+      {
+        id: receiptBId,
+        org_id: f.orgB.id,
+        project_id: f.extras.orgBProject.id,
+        type: 'receipt',
+        status: 'sent',
+        document_number: `${f.extras.orgBProject.projectNumber}-R1`,
+        sequence: 1,
+        line_items: [{ description: 'Payment received', quantity: 1, unitPrice: 200 }],
+        subtotal: 200,
+        total: 200,
+        recipient_name: 'Org B Recipient',
+        created_by: f.userB.userId,
+        sent_at: new Date().toISOString(),
+      },
+    ]);
+    if (error) throw new Error(`seed receipts: ${error.message}`);
+  });
+
+  afterAll(async () => {
+    await f.service.from('documents').delete().in('id', [receiptAId, receiptBId]);
+    await f.cleanup();
+  });
+
+  test('User A SELECT sees only Org A receipt (cross-org isolation on type=receipt)', async () => {
+    const c = await asUser(f.userA.email, f.userA.password);
+    await assertVisibleIds(
+      c,
+      'documents',
+      { column: 'id', values: [receiptAId, receiptBId] },
+      [receiptAId],
+      'org A receipt cross-org isolation',
+    );
+  });
+
+  test('Anonymous cannot SELECT any receipt row', async () => {
+    await assertVisibleIds(
+      asAnon(),
+      'documents',
+      { column: 'id', values: [receiptAId, receiptBId] },
+      [],
+      'anon SELECT blocked on receipts',
+    );
+  });
+
+  test('User A SELECT returns recipient_name on the receipt', async () => {
+    const c = await asUser(f.userA.email, f.userA.password);
+    const { data } = await c
+      .from('documents')
+      .select('id, recipient_name, type')
+      .eq('id', receiptAId)
+      .single();
+    expect(data?.type).toBe('receipt');
+    expect(data?.recipient_name).toBe('Org A Recipient');
+  });
+});

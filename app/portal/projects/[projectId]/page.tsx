@@ -14,19 +14,27 @@ import { ProjectStageBadge } from '@/components/projects/ProjectStageBadge';
 import { FileList } from '@/components/files/FileList';
 import { FileUploadZone } from '@/components/files/FileUploadZone';
 import { ActivityTimeline } from '@/components/activity/ActivityTimeline';
+import { QuotesSection } from '@/components/quotes/QuotesSection';
+import { InvoicesSection } from '@/components/invoices/InvoicesSection';
+import { PaymentsSection } from '@/components/payments/PaymentsSection';
+import { ReceiptsSection } from '@/components/receipts/ReceiptsSection';
 
 // Per-project portal view. Sections are gated on the caller's per-stakeholder
 // flag set (Phase 1b §14):
 //   - Always: project header (number, site, org, stage)
 //   - can_view_schedule → milestones list
-//   - can_view_drawings → "Files coming in Session 10" placeholder
-//   - can_message       → "Messages coming in Session 9" placeholder
-//   - can_view_financials → "Invoices coming in Phase 2" placeholder
+//   - can_view_drawings → files
+//   - can_message       → messages placeholder (real surface in /portal/conversations)
+//   - can_view_financials → quotes + invoices + payments + receipts (read-only)
 //
 // RLS gates the underlying data via auth_user_stakeholder_project_visibility +
 // project_milestones policies. The query in db/queries/portal-projects.ts
 // also short-circuits on the flag — so when can_view_schedule=false, the
 // milestones query isn't issued at all (avoids one round-trip per render).
+//
+// Session 14 wires the financial sections. Each section component now takes
+// viewer='stakeholder' + stakeholderAuthUserId; the query layer enforces the
+// can_view_financials gate as defense-in-depth via hasStakeholderFinancialAccess.
 export default async function PortalProjectDetailPage({
   params,
 }: {
@@ -149,14 +157,28 @@ export default async function PortalProjectDetailPage({
       )}
 
       {view.flags.canViewFinancials && (
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-base">Invoices &amp; quotes</CardTitle>
-            <CardDescription>
-              Coming in Phase 2 — billing visibility lands later.
-            </CardDescription>
-          </CardHeader>
-        </Card>
+        <>
+          <QuotesSection
+            projectId={projectId}
+            viewer="stakeholder"
+            stakeholderAuthUserId={ctx.authUserId}
+          />
+          <InvoicesSection
+            projectId={projectId}
+            viewer="stakeholder"
+            stakeholderAuthUserId={ctx.authUserId}
+          />
+          <PaymentsSection
+            projectId={projectId}
+            viewer="stakeholder"
+            stakeholderAuthUserId={ctx.authUserId}
+          />
+          <ReceiptsSection
+            projectId={projectId}
+            viewer="stakeholder"
+            stakeholderAuthUserId={ctx.authUserId}
+          />
+        </>
       )}
 
       <ActivityTimeline projectId={projectId} viewer="stakeholder" />

@@ -19,8 +19,11 @@ import {
 } from '@/components/ui/table';
 
 // Phase 2 Session 13 — Invoices card on the project detail page. Server
-// component; mirrors QuotesSection. Org-side caller passes visibleOnly=false
-// (org members see all of their org's invoices per the documents RLS).
+// component; mirrors QuotesSection.
+//
+// Session 14: viewer prop. Stakeholder mode hides the "Create invoice" CTA,
+// drops the per-row "Open" link (no portal-side detail page exists), and
+// shows total-only. Caller passes stakeholderAuthUserId for query-layer gating.
 
 function formatGBP(amount: number): string {
   return new Intl.NumberFormat('en-GB', {
@@ -48,8 +51,20 @@ function statusVariant(
   return 'secondary';
 }
 
-export async function InvoicesSection({ projectId }: { projectId: string }) {
-  const invoices = await listInvoicesForProject({ projectId, visibleOnly: false });
+export async function InvoicesSection({
+  projectId,
+  viewer = 'org',
+  stakeholderAuthUserId,
+}: {
+  projectId: string;
+  viewer?: 'org' | 'stakeholder';
+  stakeholderAuthUserId?: string;
+}) {
+  const invoices = await listInvoicesForProject({
+    projectId,
+    visibleOnly: viewer === 'stakeholder',
+    stakeholderAuthUserId,
+  });
 
   return (
     <Card>
@@ -57,20 +72,25 @@ export async function InvoicesSection({ projectId }: { projectId: string }) {
         <div>
           <CardTitle className="text-base">Invoices</CardTitle>
           <CardDescription>
-            Initial deposits and final invoices. Drafts are private until sent.
+            {viewer === 'org'
+              ? 'Initial deposits and final invoices. Drafts are private until sent.'
+              : 'Invoices issued by the team for this project.'}
           </CardDescription>
         </div>
-        <Button asChild size="sm" variant="outline">
-          <Link href={`/dashboard/projects/${projectId}/invoices/new`}>
-            Create invoice
-          </Link>
-        </Button>
+        {viewer === 'org' && (
+          <Button asChild size="sm" variant="outline">
+            <Link href={`/dashboard/projects/${projectId}/invoices/new`}>
+              Create invoice
+            </Link>
+          </Button>
+        )}
       </CardHeader>
       <CardContent>
         {invoices.length === 0 ? (
           <p className="text-sm text-muted-foreground">
-            No invoices yet. Create one to send the client a token-gated public
-            link.
+            {viewer === 'org'
+              ? 'No invoices yet. Create one to send the client a token-gated public link.'
+              : 'No invoices to show yet.'}
           </p>
         ) : (
           <Table>
@@ -80,7 +100,7 @@ export async function InvoicesSection({ projectId }: { projectId: string }) {
                 <TableHead>Type</TableHead>
                 <TableHead>Status</TableHead>
                 <TableHead>Total</TableHead>
-                <TableHead className="w-12" />
+                {viewer === 'org' && <TableHead className="w-12" />}
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -98,14 +118,16 @@ export async function InvoicesSection({ projectId }: { projectId: string }) {
                     </Badge>
                   </TableCell>
                   <TableCell>{formatGBP(inv.total)}</TableCell>
-                  <TableCell className="text-right">
-                    <Link
-                      className="text-sm hover:underline"
-                      href={`/dashboard/projects/${projectId}/invoices/${inv.id}`}
-                    >
-                      Open
-                    </Link>
-                  </TableCell>
+                  {viewer === 'org' && (
+                    <TableCell className="text-right">
+                      <Link
+                        className="text-sm hover:underline"
+                        href={`/dashboard/projects/${projectId}/invoices/${inv.id}`}
+                      >
+                        Open
+                      </Link>
+                    </TableCell>
+                  )}
                 </TableRow>
               ))}
             </TableBody>
