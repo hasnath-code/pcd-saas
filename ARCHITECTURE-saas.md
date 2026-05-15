@@ -3914,6 +3914,18 @@ Session 11 was the architecturally densest session in Phase 1c: 3 new tables, di
 - **Hasnath's existing 10 projects migration** (descoped from Phase 1c — see §35.11 row 14 / Phase 1c exit criteria). Independent of Phase 2 shape; can run any time before launch.
 - **DEBT-066** is the next free debt id. Session 14 filed no new DEBT entries — every deferred item above is captured here in the carryover or already has an existing ID.
 
+### Phase F walk findings + fixes
+
+Phase F walk on Session 14 surfaced three findings — two fixed on this branch before merge, one filed as DEBT-066 for follow-up.
+
+**Fix 1 — `revalidatePath` literal-path + 'layout' is unreliable in Next.js 15.** `recordPayment` and `reviseInvoice` weren't refreshing the project detail page on commit (user records a payment, sees £0 until reload; revising an invoice doesn't refresh the project page's invoice list/total). `correctPayment` and `reviseReceipt` happened to work — same source pattern, but `router.refresh()` alone was sufficient because they patched existing DOM rows the cached render already had. The new-row-required flows (record payment, revise invoice) need actual route-cache invalidation, which `revalidatePath(literalPath, 'layout')` does NOT reliably trigger. **Permanent rule:** Next.js 15 `revalidatePath` is unreliable with literal-path + 'layout'; canonical form is dynamic-segment `[projectId]` with 'layout'. Normalize at every call site. Future actions that revalidate project routes must use the dynamic-segment pattern from day one — `revalidatePath('/dashboard/projects/[projectId]', 'layout')`, not `revalidatePath(\`/dashboard/projects/${projectId}\`, 'layout')`. Resolved: 14 callsites in `actions/payments.ts` + `actions/documents.ts` normalized in commit `632fd3d`.
+
+**Fix 2 — Generated PDFs leaked into the org-side Files list.** `visibility='org_only'` on the cached `project_files` row was insufficient — `org_only` only hides from stakeholders, not org members. Per Plan decision 6, PDF artifacts (quote/invoice/receipt) are sharable via `document_tokens`, not via the file list. Resolved: `db/queries/files.ts:listFilesForProject` now ALWAYS excludes `source='document_artifact'` rows on both `visibleOnly` branches. The single-file `getDownloadUrl` and the find-or-create `generateDocumentPdf` flows are unaffected (both look up by id, not via list). Commit `131c7b5`.
+
+**DEBT-066 (filed, not fixed) — Activity timeline leaks financial event text to non-financial stakeholders.** Section cards correctly hide on `/portal/projects/[id]` when `can_view_financials=false`, but the Activity Timeline still surfaces "received £400.00, R1" / "invoice issued" etc. The per-row `visible_to_stakeholders` boolean (write-time decision) doesn't model "is this stakeholder-relevant *for this stakeholder profile*?". Medium severity, mild leak (no line items, no PDF access). Trigger: before Phase 3 client-portal polish, or when a customer notices. Fix sketch: `FINANCIAL_EVENT_TYPES` set + read-time filter in `listProjectActivity` for stakeholder callers without `can_view_financials`. Filed in DEBT-LOG.md commit `b5e043b`.
+
+Tests stayed green throughout (RLS 254, Actions 321, cloud-smoke 14, tsc clean, drizzle-kit clean, build clean) — Phase F walk was the validation; no new tests were added.
+
 ### Phase 2 close-out
 
 Phase 2 shipped over three sequential sessions (S12 / S13 / S14) on 15 May 2026, on time per the kickoff plan. Final state:
@@ -3931,7 +3943,7 @@ Pre-launch operational items (not Phase-bound): retention worker schedule, data-
 
 ---
 
-**Last reviewed:** 15 May 2026 (Phase 2 Session 14 shipped — v0.18 → v0.19; **Phase 2 CLOSED**; 0 new ADRs; 0 new tables; 2 additive columns (1 on `documents`, 1 on `project_files`); 3 new server actions (`reviseReceipt` + 2 PDF); 1 new public route lit up (`/r/[token]`); 5 new components; 1 new lib subsystem (`lib/pdf/`); +31 tests).
+**Last reviewed:** 15 May 2026 (Phase 2 Session 14 shipped — v0.18 → v0.19; **Phase 2 CLOSED**; 0 new ADRs; 0 new tables; 2 additive columns (1 on `documents`, 1 on `project_files`); 3 new server actions (`reviseReceipt` + 2 PDF); 1 new public route lit up (`/r/[token]`); 5 new components; 1 new lib subsystem (`lib/pdf/`); +31 tests). **Phase F walk fixes (post-shipped):** `revalidatePath` normalized to dynamic-segment pattern across 14 callsites (Fix 1, commit `632fd3d`); `listFilesForProject` excludes `document_artifact` rows (Fix 2, commit `131c7b5`); DEBT-066 filed for the activity-timeline financial leak (commit `b5e043b`). Tests stayed green.
 
 ## End of document
 
