@@ -24,7 +24,7 @@ import { logActivityTx } from '@/lib/activity/log';
 import { logAudit } from '@/lib/audit/log';
 import { dispatchNotification } from '@/lib/notifications/dispatch';
 import { allocateDocumentNumber } from '@/lib/documents/numbering';
-import { invalidateDocumentPdfCache } from '@/actions/document-pdf';
+import { invalidateDocumentPdfCache } from '@/lib/pdf/cache';
 
 // Phase 2 §2.3 / Session 13 — payment lifecycle server actions.
 //

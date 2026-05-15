@@ -31,7 +31,7 @@ import { diffInvoiceFields } from '@/lib/documents/revise-diff';
 import { dispatchNotification } from '@/lib/notifications/dispatch';
 import { quoteSentEmail } from '@/lib/email/templates/quote-sent';
 import { invoiceSentEmail } from '@/lib/email/templates/invoice-sent';
-import { invalidateDocumentPdfCache } from '@/actions/document-pdf';
+import { invalidateDocumentPdfCache } from '@/lib/pdf/cache';
 
 // Phase 2 §2 — quote lifecycle server actions. createQuote / updateQuoteDraft
 // / sendQuote follow ARCHITECTURE-saas.md §20 (requireOrgUser + Zod + tx +

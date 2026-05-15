@@ -24,6 +24,11 @@ import { renderDocumentPdf } from '@/lib/pdf/render';
 import type { DocumentPdfData } from '@/lib/pdf/document-template';
 import type { LineItem } from '@/lib/documents/vat';
 import { rateLimit } from '@/lib/ratelimit';
+import { invalidateDocumentPdfCache } from '@/lib/pdf/cache';
+
+// Re-export so existing callers (actions/payments.ts, actions/documents.ts
+// imported it from this module before Session 14 split it out) keep working.
+export { invalidateDocumentPdfCache };
 
 // Phase 2 Session 14 — generate-and-sign PDF for any documents row.
 //
@@ -476,20 +481,7 @@ async function pickDocumentCreator(documentId: string): Promise<string> {
   return rows[0].createdBy;
 }
 
-// ─── Cache invalidation helper ─────────────────────────────────────────────
-// Exported as a SQL operation usable inside a tx. Soft-deletes any cached
-// PDF rows for a document so the next generateDocumentPdf call regenerates
-// from the post-mutation state.
-export async function invalidateDocumentPdfCache(documentId: string): Promise<void> {
-  await db
-    .update(projectFiles)
-    .set({ deletedAt: new Date() })
-    .where(
-      and(
-        eq(projectFiles.sourceDocumentId, documentId),
-        eq(projectFiles.source, 'document_artifact'),
-        isNull(projectFiles.deletedAt),
-      ),
-    );
-}
+// invalidateDocumentPdfCache lives in @/lib/pdf/cache (decoupled from the
+// JSX template chain so callers don't pull @react-pdf/renderer into test
+// import graphs that don't need it).
 
