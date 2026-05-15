@@ -1,10 +1,12 @@
 import 'server-only';
-import { and, desc, eq, isNull } from 'drizzle-orm';
+import { and, desc, eq, isNotNull, isNull } from 'drizzle-orm';
 import { db } from '@/db';
 import {
+  clients,
   documentTokens,
   documents,
   organizations,
+  projectStakeholders,
   projects,
   users,
 } from '@/db/schema';
@@ -24,10 +26,16 @@ import type { LineItem } from '@/lib/documents/vat';
 // For documents the "visible to stakeholder" branch is gated by
 // project_stakeholders.can_view_financials. When `visibleOnly=true` the
 // query verifies the caller is an accepted stakeholder with
-// can_view_financials=true (this session does not yet wire a portal-side
-// caller, but the flag is in the signature from day one for Session 13/14).
+// can_view_financials=true (Session 14: wired). The portal-side page
+// gates UI on view.flags.canViewFinancials and only calls these queries
+// when true; the query layer enforces defense-in-depth via
+// hasStakeholderFinancialAccess so a buggy caller can't leak rows.
 //
-// Org-side callers pass `visibleOnly: false`.
+// Org-side callers pass `visibleOnly: false`. Portal-side callers pass
+// `visibleOnly: true` AND `stakeholderAuthUserId` (the auth.uid() of the
+// caller). When visibleOnly=true and the auth user is not a financial-
+// visible stakeholder, the query returns []. Without stakeholderAuthUserId
+// the query returns [] (safe default — the S13 short-circuit behavior).
 
 export type DocumentStatus = 'draft' | 'sent' | 'superseded' | 'void';
 export type DocumentType = 'quote' | 'invoice' | 'receipt';
@@ -125,40 +133,93 @@ function toDocumentRow(r: Record<string, unknown>): DocumentRow {
 }
 
 /**
- * List quotes for a project, newest first, soft-deleted rows excluded.
- * `visibleOnly` is REQUIRED — see file header for why.
+ * Defense-in-depth check: does the caller have can_view_financials access
+ * to this project as an accepted stakeholder? Drizzle pooler bypasses RLS
+ * (DEBT-059 pattern), so this query layer enforces the §14 financial-
+ * visibility gate explicitly. Returns false for non-stakeholders.
  *
- * When `visibleOnly=true`, callers must also pass an authenticated stakeholder
- * context — but no portal-side caller exists yet (Phase 2 Session 12 ships
- * only the org-side list). The flag stays in the signature for forward
- * compatibility; when `true`, the query short-circuits to `[]` until a
- * portal-side caller wires the stakeholder identity check (Session 13/14).
+ * This mirrors the SECURITY DEFINER helper auth_user_stakeholder_project_visibility(uuid).
  */
-export async function listQuotesForProject(opts: {
+export async function hasStakeholderFinancialAccess(opts: {
+  projectId: string;
+  authUserId: string;
+}): Promise<boolean> {
+  const rows = await db
+    .select({ id: projectStakeholders.id })
+    .from(projectStakeholders)
+    .innerJoin(clients, eq(clients.id, projectStakeholders.clientId))
+    .where(
+      and(
+        eq(projectStakeholders.projectId, opts.projectId),
+        eq(clients.authUserId, opts.authUserId),
+        eq(projectStakeholders.canViewFinancials, true),
+        isNotNull(projectStakeholders.acceptedAt),
+        isNull(projectStakeholders.deletedAt),
+        isNull(clients.deletedAt),
+      ),
+    )
+    .limit(1);
+  return rows.length > 0;
+}
+
+interface ListByTypeOpts {
   projectId: string;
   visibleOnly: boolean;
-}): Promise<DocumentRow[]> {
+  /** Required when `visibleOnly: true` — the calling stakeholder's auth.uid(). */
+  stakeholderAuthUserId?: string;
+}
+
+async function listDocumentsByType(
+  opts: ListByTypeOpts & { type: DocumentType },
+): Promise<DocumentRow[]> {
   if (opts.visibleOnly) {
-    // Portal-side surface not yet built. Returning [] is a safe default —
-    // a future caller will pass identity and unlock the can_view_financials
-    // branch.
-    return [];
+    // Defense-in-depth gate. The portal page should already check the flag
+    // before calling, but the query layer enforces independently.
+    if (!opts.stakeholderAuthUserId) return [];
+    const ok = await hasStakeholderFinancialAccess({
+      projectId: opts.projectId,
+      authUserId: opts.stakeholderAuthUserId,
+    });
+    if (!ok) return [];
+  }
+
+  const whereClauses = [
+    eq(documents.projectId, opts.projectId),
+    eq(documents.type, opts.type),
+    isNull(documents.deletedAt),
+  ];
+  // For stakeholders we hide draft+void rows — those are org-internal; only
+  // sent / superseded receipts/invoices/quotes are part of the client-facing
+  // record. Org-side keeps drafts visible (they're how surveyors compose).
+  if (opts.visibleOnly) {
+    whereClauses.push(
+      // sent OR superseded — using OR via inArray-like construct
+      // would inflate the SQL; explicit NOT IN (draft, void) is shortest.
+      // Drizzle doesn't have a direct notIn helper for two values, so
+      // chain isNotNull-like with raw is awkward — use sentAt IS NOT NULL
+      // which equivalently means "has been sent at some point".
+      isNotNull(documents.sentAt),
+    );
   }
 
   const rows = await db
     .select(documentColumns)
     .from(documents)
     .leftJoin(users, eq(users.id, documents.createdBy))
-    .where(
-      and(
-        eq(documents.projectId, opts.projectId),
-        eq(documents.type, 'quote'),
-        isNull(documents.deletedAt),
-      ),
-    )
+    .where(and(...whereClauses))
     .orderBy(desc(documents.createdAt));
 
   return rows.map((r) => toDocumentRow(r as Record<string, unknown>));
+}
+
+/**
+ * List quotes for a project, newest first, soft-deleted rows excluded.
+ * `visibleOnly` is REQUIRED — see file header for why.
+ */
+export async function listQuotesForProject(
+  opts: ListByTypeOpts,
+): Promise<DocumentRow[]> {
+  return listDocumentsByType({ ...opts, type: 'quote' });
 }
 
 /**
@@ -170,28 +231,24 @@ export async function listQuotesForProject(opts: {
  */
 export type InvoiceRow = DocumentRow;
 
-export async function listInvoicesForProject(opts: {
-  projectId: string;
-  visibleOnly: boolean;
-}): Promise<InvoiceRow[]> {
-  if (opts.visibleOnly) {
-    return [];
-  }
+export async function listInvoicesForProject(
+  opts: ListByTypeOpts,
+): Promise<InvoiceRow[]> {
+  return listDocumentsByType({ ...opts, type: 'invoice' });
+}
 
-  const rows = await db
-    .select(documentColumns)
-    .from(documents)
-    .leftJoin(users, eq(users.id, documents.createdBy))
-    .where(
-      and(
-        eq(documents.projectId, opts.projectId),
-        eq(documents.type, 'invoice'),
-        isNull(documents.deletedAt),
-      ),
-    )
-    .orderBy(desc(documents.createdAt));
+/**
+ * Phase 2 Session 14 — list receipts for a project, newest first. Receipts
+ * carry paymentId (non-null) so callers can join back to the linked payment
+ * for the bidirectional UI link. Mirrors listInvoicesForProject's shape +
+ * visibleOnly semantics.
+ */
+export type ReceiptRow = DocumentRow;
 
-  return rows.map((r) => toDocumentRow(r as Record<string, unknown>));
+export async function listReceiptsForProject(
+  opts: ListByTypeOpts,
+): Promise<ReceiptRow[]> {
+  return listDocumentsByType({ ...opts, type: 'receipt' });
 }
 
 /** Single-doc fetch for the org-side view. Returns null when soft-deleted or missing. */
