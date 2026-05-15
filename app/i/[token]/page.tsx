@@ -18,6 +18,7 @@ import {
 } from '@/components/ui/table';
 import { getDocumentByToken } from '@/db/queries/documents';
 import { rateLimit } from '@/lib/ratelimit';
+import { DownloadPdfButton } from '@/components/pdf/DownloadPdfButton';
 
 // Phase 2 Session 13 — public token-gated invoice view. Mirrors /q/[token]:
 // - Token-only auth surface — middleware skips /i/ paths.
@@ -170,6 +171,10 @@ export default async function PublicInvoicePage({
           </CardHeader>
         </Card>
       )}
+
+      <div>
+        <DownloadPdfButton mode="token" token={token} label="Download invoice PDF" />
+      </div>
     </main>
   );
 }

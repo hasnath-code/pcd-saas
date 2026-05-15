@@ -35,6 +35,8 @@ import { ActivityTimeline } from '@/components/activity/ActivityTimeline';
 import { QuotesSection } from '@/components/quotes/QuotesSection';
 import { InvoicesSection } from '@/components/invoices/InvoicesSection';
 import { PaymentsSection } from '@/components/payments/PaymentsSection';
+import { ReceiptsSection } from '@/components/receipts/ReceiptsSection';
+import { ProfitabilityComingSoon } from '@/components/projects/ProfitabilityComingSoon';
 import { PaymentStatusBadge } from '@/components/projects/PaymentStatusBadge';
 import { getProjectPaymentSnapshot } from '@/db/queries/payments';
 
@@ -236,6 +238,10 @@ export default async function ProjectDetailPage({
       <InvoicesSection projectId={project.id} />
 
       <PaymentsSection projectId={project.id} />
+
+      <ReceiptsSection projectId={project.id} />
+
+      <ProfitabilityComingSoon />
 
       <ActivityTimeline projectId={project.id} viewer="org" />
     </main>

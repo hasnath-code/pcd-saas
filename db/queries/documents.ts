@@ -66,6 +66,9 @@ export interface DocumentRow {
   revisionNumber: number;
   revisionLogPayload: unknown[];
   paymentId: string | null;
+  // Phase 2 Session 14 — receipt-only "addressed to" field. Quotes/invoices
+  // carry NULL.
+  recipientName: string | null;
   createdBy: string;
   createdByName: string | null;
   createdAt: Date;
@@ -94,6 +97,7 @@ const documentColumns = {
   revisionNumber: documents.revisionNumber,
   revisionLogPayload: documents.revisionLogPayload,
   paymentId: documents.paymentId,
+  recipientName: documents.recipientName,
   createdBy: documents.createdBy,
   createdByName: users.name,
   createdAt: documents.createdAt,
@@ -126,6 +130,7 @@ function toDocumentRow(r: Record<string, unknown>): DocumentRow {
       ? (r.revisionLogPayload as unknown[])
       : [],
     paymentId: (r.paymentId as string | null) ?? null,
+    recipientName: (r.recipientName as string | null) ?? null,
     createdBy: r.createdBy as string,
     createdByName: (r.createdByName as string | null) ?? null,
     createdAt: r.createdAt as Date,

@@ -48,8 +48,20 @@ function statusLabel(status: string, accepted: boolean): string {
   return status;
 }
 
-export async function QuotesSection({ projectId }: { projectId: string }) {
-  const quotes = await listQuotesForProject({ projectId, visibleOnly: false });
+export async function QuotesSection({
+  projectId,
+  viewer = 'org',
+  stakeholderAuthUserId,
+}: {
+  projectId: string;
+  viewer?: 'org' | 'stakeholder';
+  stakeholderAuthUserId?: string;
+}) {
+  const quotes = await listQuotesForProject({
+    projectId,
+    visibleOnly: viewer === 'stakeholder',
+    stakeholderAuthUserId,
+  });
 
   return (
     <Card>
@@ -57,20 +69,25 @@ export async function QuotesSection({ projectId }: { projectId: string }) {
         <div>
           <CardTitle className="text-base">Quotes</CardTitle>
           <CardDescription>
-            Quotes sent to this project&apos;s client. Drafts are private until sent.
+            {viewer === 'org'
+              ? 'Quotes sent to this project’s client. Drafts are private until sent.'
+              : 'Quotes issued by the team for this project.'}
           </CardDescription>
         </div>
-        <Button asChild size="sm" variant="outline">
-          <Link href={`/dashboard/projects/${projectId}/quotes/new`}>
-            Create quote
-          </Link>
-        </Button>
+        {viewer === 'org' && (
+          <Button asChild size="sm" variant="outline">
+            <Link href={`/dashboard/projects/${projectId}/quotes/new`}>
+              Create quote
+            </Link>
+          </Button>
+        )}
       </CardHeader>
       <CardContent>
         {quotes.length === 0 ? (
           <p className="text-sm text-muted-foreground">
-            No quotes yet. Create one to send the client a token-gated public
-            link.
+            {viewer === 'org'
+              ? 'No quotes yet. Create one to send the client a token-gated public link.'
+              : 'No quotes to show yet.'}
           </p>
         ) : (
           <Table>
@@ -79,7 +96,7 @@ export async function QuotesSection({ projectId }: { projectId: string }) {
                 <TableHead>Number</TableHead>
                 <TableHead>Status</TableHead>
                 <TableHead>Total</TableHead>
-                <TableHead className="w-12" />
+                {viewer === 'org' && <TableHead className="w-12" />}
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -94,14 +111,16 @@ export async function QuotesSection({ projectId }: { projectId: string }) {
                     </Badge>
                   </TableCell>
                   <TableCell>{formatGBP(q.total)}</TableCell>
-                  <TableCell className="text-right">
-                    <Link
-                      className="text-sm hover:underline"
-                      href={`/dashboard/projects/${projectId}/quotes/${q.id}`}
-                    >
-                      Open
-                    </Link>
-                  </TableCell>
+                  {viewer === 'org' && (
+                    <TableCell className="text-right">
+                      <Link
+                        className="text-sm hover:underline"
+                        href={`/dashboard/projects/${projectId}/quotes/${q.id}`}
+                      >
+                        Open
+                      </Link>
+                    </TableCell>
+                  )}
                 </TableRow>
               ))}
             </TableBody>

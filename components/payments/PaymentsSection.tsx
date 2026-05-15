@@ -1,3 +1,4 @@
+import Link from 'next/link';
 import { getPaymentsForProject } from '@/db/queries/payments';
 import {
   Card,
@@ -20,8 +21,15 @@ import { CorrectPaymentDialog } from './CorrectPaymentDialog';
 // Phase 2 Session 13 — Payments card on the project detail page. Server
 // component. Shows recorded payments, running total, and exposes
 // record-payment + per-row correct-payment affordances via client dialogs.
-// Org-side caller passes visibleOnly=false; portal-side caller (TBD Session 14)
-// will pass true and the query short-circuits to [].
+//
+// Session 14: viewer prop + bidirectional payment↔receipt link.
+//   - viewer='org' (default): shows record/correct affordances + R{n} link
+//     to org-side receipt detail page.
+//   - viewer='stakeholder': read-only, shows R{n} link to /r/[token] (TBD
+//     — for now stakeholder-side rows show R{n} as plain text since no
+//     token is available on the receipt-list query — the dedicated
+//     receipt-section card on the portal page surfaces full receipt info).
+//   stakeholderAuthUserId is forwarded to the query layer for defense-in-depth.
 
 function formatGBP(amount: number): string {
   return new Intl.NumberFormat('en-GB', {
@@ -30,10 +38,19 @@ function formatGBP(amount: number): string {
   }).format(amount);
 }
 
-export async function PaymentsSection({ projectId }: { projectId: string }) {
+export async function PaymentsSection({
+  projectId,
+  viewer = 'org',
+  stakeholderAuthUserId,
+}: {
+  projectId: string;
+  viewer?: 'org' | 'stakeholder';
+  stakeholderAuthUserId?: string;
+}) {
   const { rows, runningTotal } = await getPaymentsForProject({
     projectId,
-    visibleOnly: false,
+    visibleOnly: viewer === 'stakeholder',
+    stakeholderAuthUserId,
   });
 
   return (
@@ -46,7 +63,7 @@ export async function PaymentsSection({ projectId }: { projectId: string }) {
             <strong>{formatGBP(runningTotal)}</strong>
           </CardDescription>
         </div>
-        <RecordPaymentDialog projectId={projectId} />
+        {viewer === 'org' && <RecordPaymentDialog projectId={projectId} />}
       </CardHeader>
       <CardContent>
         {rows.length === 0 ? (
@@ -59,8 +76,9 @@ export async function PaymentsSection({ projectId }: { projectId: string }) {
               <TableRow>
                 <TableHead>Date</TableHead>
                 <TableHead>Amount</TableHead>
-                <TableHead>Recorded by</TableHead>
-                <TableHead className="w-32" />
+                <TableHead>Receipt</TableHead>
+                {viewer === 'org' && <TableHead>Recorded by</TableHead>}
+                {viewer === 'org' && <TableHead className="w-32" />}
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -81,13 +99,33 @@ export async function PaymentsSection({ projectId }: { projectId: string }) {
                         </span>
                       )}
                     </TableCell>
-                    <TableCell>{p.recordedByName ?? '—'}</TableCell>
-                    <TableCell className="text-right">
-                      <CorrectPaymentDialog
-                        paymentId={p.id}
-                        currentAmount={p.amount}
-                      />
+                    <TableCell>
+                      {p.receiptNumber && p.receiptId ? (
+                        viewer === 'org' ? (
+                          <Link
+                            className="text-sm hover:underline"
+                            href={`/dashboard/projects/${projectId}/receipts/${p.receiptId}`}
+                          >
+                            {p.receiptNumber}
+                          </Link>
+                        ) : (
+                          <span className="text-sm">{p.receiptNumber}</span>
+                        )
+                      ) : (
+                        <span className="text-xs text-muted-foreground">—</span>
+                      )}
                     </TableCell>
+                    {viewer === 'org' && (
+                      <TableCell>{p.recordedByName ?? '—'}</TableCell>
+                    )}
+                    {viewer === 'org' && (
+                      <TableCell className="text-right">
+                        <CorrectPaymentDialog
+                          paymentId={p.id}
+                          currentAmount={p.amount}
+                        />
+                      </TableCell>
+                    )}
                   </TableRow>
                 );
               })}

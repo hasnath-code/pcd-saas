@@ -38,6 +38,11 @@ export interface PaymentRow {
   recordedAt: Date;
   correctionLogPayload: unknown[];
   createdAt: Date;
+  // Phase 2 Session 14: receipt is auto-created in the same tx as the
+  // payment. The bidirectional link (PaymentsSection rows show R{n};
+  // ReceiptsSection rows reference the payment) reads these fields.
+  receiptId: string | null;
+  receiptNumber: string | null;
 }
 
 function toPaymentRow(r: Record<string, unknown>): PaymentRow {
@@ -53,6 +58,8 @@ function toPaymentRow(r: Record<string, unknown>): PaymentRow {
       ? (r.correctionLogPayload as unknown[])
       : [],
     createdAt: r.createdAt as Date,
+    receiptId: (r.receiptId as string | null) ?? null,
+    receiptNumber: (r.receiptNumber as string | null) ?? null,
   };
 }
 
@@ -105,6 +112,11 @@ export async function getPaymentsForProject(opts: {
     if (!ok) return { rows: [], runningTotal: 0 };
   }
 
+  // LEFT JOIN documents on (payment_id, type='receipt', not soft-deleted) to
+  // pick up the linked receipt. Receipts auto-created since Session 14 will
+  // always have a row; payments recorded before S14 (none in production yet
+  // — Phase 2 just shipped) have NULL receiptId/Number, which the UI
+  // tolerates as a missing-receipt state.
   const rows = await db
     .select({
       id: payments.id,
@@ -116,9 +128,19 @@ export async function getPaymentsForProject(opts: {
       recordedAt: payments.recordedAt,
       correctionLogPayload: payments.correctionLogPayload,
       createdAt: payments.createdAt,
+      receiptId: documents.id,
+      receiptNumber: documents.documentNumber,
     })
     .from(payments)
     .leftJoin(users, eq(users.id, payments.recordedBy))
+    .leftJoin(
+      documents,
+      and(
+        eq(documents.paymentId, payments.id),
+        eq(documents.type, 'receipt'),
+        isNull(documents.deletedAt),
+      ),
+    )
     .where(
       and(eq(payments.projectId, opts.projectId), isNull(payments.deletedAt)),
     )
