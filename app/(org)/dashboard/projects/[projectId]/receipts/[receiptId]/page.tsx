@@ -123,7 +123,7 @@ export default async function ReceiptDetailPage({
             )}
             {doc.sentAt && (
               <span className="text-sm text-muted-foreground">
-                Issued {doc.sentAt.toLocaleDateString('en-GB')}
+                Received {doc.sentAt.toLocaleDateString('en-GB')}
               </span>
             )}
           </div>

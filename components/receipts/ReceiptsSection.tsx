@@ -70,7 +70,7 @@ export async function ReceiptsSection({
             <TableHeader>
               <TableRow>
                 <TableHead>Number</TableHead>
-                <TableHead>Issued</TableHead>
+                <TableHead>Received</TableHead>
                 <TableHead>Recipient</TableHead>
                 <TableHead>Amount</TableHead>
                 <TableHead>Status</TableHead>

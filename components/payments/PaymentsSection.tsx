@@ -68,7 +68,9 @@ export async function PaymentsSection({
       <CardContent>
         {rows.length === 0 ? (
           <p className="text-sm text-muted-foreground">
-            No payments recorded yet.
+            {viewer === 'org'
+              ? 'No payments recorded yet.'
+              : 'No payments to show yet.'}
           </p>
         ) : (
           <Table>

@@ -99,7 +99,7 @@ export default async function PublicReceiptPage({
           )}
           {issuedAt && (
             <span className="text-sm text-muted-foreground">
-              Issued {issuedAt.toLocaleDateString('en-GB')}
+              Received {issuedAt.toLocaleDateString('en-GB')}
             </span>
           )}
         </div>
