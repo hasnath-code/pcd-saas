@@ -1,9 +1,9 @@
 # PCD Portal SaaS — Architecture Reference
 
-**Version:** 0.18 (**Phase 2 Session 13 shipped** — invoice lifecycle + payments + derived payment-status axis + DEBT-064 closed. Migration 0025 `payments` (4 per-command RLS policies; SELECT mirrors `documents` financial-visibility gate). Migration 0026 additive columns on `documents` (`payment_id` FK, `invoice_subtype`, `revision_number`, `revision_log_payload`). Migration 0027 idempotent backfill of `notification_preferences` rows for existing identities × 6 new event types (closes DEBT-064). Four new server actions on `actions/documents.ts` (`createInvoice` / `updateInvoiceDraft` / `sendInvoice` / `reviseInvoice`) + two on `actions/payments.ts` (`recordPayment` / `correctPayment`). `sendQuote` and `acceptQuote` extended with post-commit `dispatchNotification` fan-out (the deferred Session 12 wiring). Pure helper `lib/documents/payment-status.ts:derivePaymentStatus` computes the 7-state axis on read (`no_quote → quote_sent → quote_accepted → initial_invoice_sent → partially_paid → paid_in_full → overpaid`). `lib/documents/revise-diff.ts` runs semantic comparison (no JSONB drift) — no-op revisions reject. Public `/i/[token]` route lit up. Decision: subtype=`initial` allowed without an accepted quote (deposit/mobilisation flow); subtype=`final` requires one. correctPayment dispatch is org-members-only.)
+**Version:** 0.19 (**Phase 2 Session 14 shipped — Phase 2 CLOSED.** Receipts (auto-created in `recordPayment` as `documents` rows of type='receipt' linked via `payment_id`), reviseReceipt (recipient-field revision-log mechanism), `@react-pdf/renderer` server-side PDF generation for all three document types stored as `project_files` rows with `source='document_artifact'`, `/r/[token]` public route, portal-side financial visibility wired (was a `[]` short-circuit), Coming Soon profitability card, end-to-end polish pass. Migration 0028 adds two additive nullable columns: `documents.recipient_name` (receipt-only "addressed to") + `project_files.source_document_id` (FK to documents, with partial index for cheap find-or-create lookup of cached PDFs). One new ADR? No — the PDF subsystem composes ADR-033 (post-commit dispatch) + ADR-034 (token-authorized public writes via `generateDocumentPdfFromToken`); no new pattern emerged. Test counts: RLS 251 → **254** (+3 receipt RLS coverage), Actions 293 → **321** (+28 across receipts.test.ts, document-pdf.test.ts, portal-financial-visibility.test.ts). Phase 1c is closed since 14 May; Phase 2 is closed today.)
 **Last updated:** 15 May 2026
 **Maintainer:** Hasnath
-**Codebase status:** **Phase 2 Session 13 shipped** 15 May 2026. New surfaces: `/dashboard/projects/[id]/invoices/new`, `/dashboard/projects/[id]/invoices/[invoiceId]` (org-side create/edit/view + send + revise dialog), Invoices + Payments cards on the project detail page (with the new `PaymentStatusBadge` rendered next to `ProjectStageBadge`), `/i/[token]` public invoice view (read-only, token-only auth, `publicDoc` rate-limited). DEBT-064 closed: backfill migration 0027 seeded existing identities, dispatch wired on `sendQuote` / `acceptQuote` / `sendInvoice` / `recordPayment` / `correctPayment`. Test counts: RLS 238 → **251** (+13 payments + invoice doc smoke), Actions 245 → **293** (+48 across invoices.test.ts, payments.test.ts, debt-064-dispatch.test.ts, payment-status.test.ts, debt-064-backfill.test.ts). Cloud-smoke 14 unchanged. Schema-forever (Hard Rule 1) holds — additive only: one new table (`payments`), four new defaulted columns on `documents`, no changes to existing rows, RLS, actions, or tests. Session 14 adds receipts + PDF generation + the "Coming Soon" financials placeholder on the same shape.
+**Codebase status:** **Phase 2 Session 14 shipped — Phase 2 CLOSED** 15 May 2026. New surfaces: `/dashboard/projects/[id]/receipts/[receiptId]` (org-side receipt detail with revise-recipient + Download PDF), `/r/[token]` public receipt view (read-only, token-gated, Download PDF), Receipts + Profitability ("Coming Soon") cards on the project detail page (Coming Soon org-side ONLY per kickoff §2.11), Download PDF buttons on quote/invoice/receipt org-side detail pages and on `/q/[token]` `/i/[token]` `/r/[token]` public pages. Portal `/portal/projects/[id]` financial sections lit up (Quotes / Invoices / Payments / Receipts read-only, gated on `can_view_financials` — was the S13 short-circuit-to-`[]`). PaymentsSection renders R{n} link to receipt detail (bidirectional payment↔receipt UI link); ReceiptsSection has its own card. Schema-forever (Hard Rule 1) holds — additive only: two nullable columns on existing tables, no new tables, no changes to existing rows, RLS, actions, or tests. **Phase 2 ends here.** Phase 3 strategy decision next (Phase 3 as originally scoped is largely already shipped via 1b/1c — see §35.14 close-out note).
 **Production URL:** https://pcd-saas.vercel.app
 **Repo:** https://github.com/hasnath-code/pcd-saas
 
@@ -44,8 +44,8 @@ Each project has multiple **stakeholders** (clients, collaborators, observers) w
 |---|---|---|
 | 1a | **✓ Complete** (S1 + S2 + S3 + S4 shipped) | Foundation: auth, multi-tenancy, RLS, settings, webhooks, email |
 | 1b | **✓ Complete** (S5 + S6 + S7 + S8 shipped) | Project core: workflows, clients, projects, stakeholders |
-| 1c | **In progress** (S9 shipped — conversations + messages) | Communication: conversations, files, notifications, activity |
-| 2 | Pending | Surveyor lifecycle (quote/invoice/receipt) ported from Apps Script |
+| 1c | **✓ Complete** (S9 + S10 + S11 shipped 14 May 2026) | Communication: conversations, files, notifications, activity |
+| 2 | **✓ Complete** (S12 + S13 + S14 shipped 15 May 2026) | Surveyor lifecycle (quote/invoice/receipt) ported from Apps Script + PDF generation + portal financial visibility |
 | 3 | Pending | Client portal (stakeholder-facing UI) |
 | 4 | Pending | Architect lifecycle (RIBA stages, drawing packages) |
 | 5 | Pending | Native kanban, public docs, upsells |
@@ -1575,7 +1575,11 @@ CREATE POLICY "project_activity_select" ON project_activity
 
 ## 12.P2. Schema — Phase 2 Tables
 
-Three tables now ship in Phase 2: `documents` (S12), `document_tokens` (S12), `payments` (S13). Plus a Session 13 additive column pack on `documents` (`payment_id`, `invoice_subtype`, `revision_number`, `revision_log_payload`). Session 14 adds receipts on the same `documents` shape (no new table — receipts populate `payment_id` to point at the linked `payments` row).
+Three tables ship in Phase 2: `documents` (S12), `document_tokens` (S12), `payments` (S13). Plus additive columns:
+- Session 13 (migration 0026): `payment_id`, `invoice_subtype`, `revision_number`, `revision_log_payload` on `documents`.
+- Session 14 (migration 0028): `recipient_name` on `documents` (receipt-only "addressed to") + `source_document_id` FK on `project_files` (lookup for cached PDF artifacts).
+
+**Receipts** ride the existing `documents` shape — no new table. Each receipt is a `documents` row with `type='receipt'`, `payment_id` pointing at the linked `payments` row, and `recipient_name` snapshotted from the project's primary client. **PDFs** are stored as `project_files` rows with `source='document_artifact'` (existing enum value) + `source_document_id` (Session 14 FK) — no parallel file system. **Portal-side financial visibility** uses the same `db/queries/{documents,payments}.ts` functions with the `visibleOnly: true` branch + `stakeholderAuthUserId` for query-layer defense-in-depth (DEBT-059 / DEBT-R006 pattern).
 
 ### 12.P2.1 `documents`
 
@@ -1604,6 +1608,8 @@ CREATE TABLE documents (
   invoice_subtype text CHECK (invoice_subtype IS NULL OR invoice_subtype IN ('initial','final')),
   revision_number int NOT NULL DEFAULT 0,
   revision_log_payload jsonb NOT NULL DEFAULT '[]'::jsonb,
+  -- Session 14 additive column (migration 0028) ────────────────────────
+  recipient_name text,                                                          -- receipt-only "addressed to" field; revisable via reviseReceipt
   -- ─────────────────────────────────────────────────────────────────────
   created_by uuid NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
   created_at timestamptz NOT NULL DEFAULT now(),
@@ -1619,8 +1625,12 @@ CREATE INDEX idx_documents_payment_id ON documents(payment_id) WHERE deleted_at 
 
 **Session 13 column invariants:**
 - `invoice_subtype` is set for `type='invoice'` rows (`'initial'` or `'final'`), NULL for quotes/receipts. **No CHECK enforces initial-before-final** — V2 doesn't, scope doesn't, and the surveyor practice (deposit / mobilisation only, no final invoice) is legitimate.
-- `revision_number` + `revision_log_payload` track `reviseInvoice` calls (V1 port). One entry appended per call: `{ rev, previous_amount, new_amount, fields_changed: string[], reason, revised_at, revised_by }`. The diff is **semantic** — `lib/documents/revise-diff.ts:diffInvoiceFields` compares line items as structs (per-position equality across `description / quantity / unitPrice / category`) so a no-op resave returns `{error:'conflict', reason:'no_changes'}` rather than logging a phantom revision.
-- `payment_id` is **receipt-only** (Session 14). The column lands in Session 13 because the FK target (`payments`) is created in 0025; splitting it across two migrations would be pointless. Quotes/invoices keep it NULL.
+- `revision_number` + `revision_log_payload` track revise calls. For invoices, `reviseInvoice` (V1 port) appends one entry per call: `{ rev, previous_amount, new_amount, fields_changed: string[], reason, revised_at, revised_by }`. The diff is **semantic** — `lib/documents/revise-diff.ts:diffInvoiceFields` compares line items as structs (per-position equality across `description / quantity / unitPrice / category`) so a no-op resave returns `{error:'conflict', reason:'no_changes'}` rather than logging a phantom revision. For receipts (Session 14), `reviseReceipt` appends an entry with the same shape plus `previous_recipient_name` / `new_recipient_name` (recipient-only field); a no-op recipient resave also returns `conflict/no_changes`.
+- `payment_id` is **receipt-only** (Session 14 populates). The column lands in Session 13 because the FK target (`payments`) is created in 0025; splitting it across two migrations would be pointless. Quotes/invoices keep it NULL.
+
+**Session 14 column invariants:**
+- `recipient_name` is **receipt-only** in current use. Snapshotted from the project's primary client at `recordPayment` time (same client lookup shape as `sendInvoice` uses for the email recipient). Revisable independently via `reviseReceipt` so the surveyor can correct a recipient name without touching the underlying clients row. Quotes/invoices keep it NULL — the column is universal but only receipts populate it.
+- The **receipt-payment consistency model** is "snapshot kept in lockstep" (Session 14 Plan Q2): receipts populate `subtotal=amount, vat_amount=0, total=amount, line_items=[{description: 'Payment received', quantity: 1, unitPrice: amount}]` at creation; `correctPayment` updates these in the same tx that mutates `payments.amount`. Both rows always agree, so the receipt PDF/page renders straight from the documents row with no JOIN. Cached PDFs (project_files rows with `source='document_artifact' AND source_document_id=receipt.id`) are soft-deleted post-commit so the next download regenerates from the corrected total.
 
 **Key invariants:**
 - **One table discriminated by `type`.** Phase 2 ships `quote` only; Sessions 13–14 exercise `invoice` and `receipt` on the same shape.
@@ -1665,16 +1675,18 @@ All four gate on org-membership of the underlying document's project via the sub
 - **`lib/documents/numbering.ts:allocateDocumentNumber`** — tx-bound, `SELECT FOR UPDATE` on projects row + count + format (`{projectNumber}-{Q|I|R}{sequence}`). Caller must INSERT the document inside the same tx; otherwise the next allocator sees the same count and reuses the sequence (the UNIQUE constraint catches it but is the belt, not the braces).
 - **`lib/documents/payment-status.ts:derivePaymentStatus`** *(Session 13)* — pure function over `{ hasAnyQuoteSent, acceptedQuoteTotal, hasInitialInvoiceSent, hasFinalInvoiceSent, paymentsTotal }`. Returns one of 7 labels (`no_quote → quote_sent → quote_accepted → initial_invoice_sent → partially_paid → paid_in_full → overpaid`). Computed on read every project-detail render — **nothing stored**. Payment target is the **accepted quote's `total`**, not the invoice sum. A 0.005-tolerance epsilon absorbs sub-penny float drift on the `paid_in_full` boundary. Refunds are out of scope (`payments.amount > 0` CHECK precludes negative rows — see DEBT-065).
 - **`lib/documents/revise-diff.ts:diffInvoiceFields`** *(Session 13)* — semantic comparator over invoice fields. Returns `{ fieldsChanged: string[], hasChanges: boolean }`. Line items compared positionally as structs (trim-equal description/category, 2dp-tolerance numeric quantity/unitPrice). A no-op resave returns `hasChanges: false`; `reviseInvoice` rejects with `{error:'conflict', reason:'no_changes'}` rather than logging a phantom revision.
-- **`actions/documents.ts`** — `createQuote` / `updateQuoteDraft` / `sendQuote` / `acceptQuote` (S12) + `createInvoice` / `updateInvoiceDraft` / `sendInvoice` / `reviseInvoice` (S13). All except `acceptQuote` follow §20's `requireOrgUser` shape. `acceptQuote` follows ADR-034 (token-authorized public write). `sendQuote` / `sendInvoice` dispatch the direct client Resend email post-commit per ADR-033; **all five wired actions** (`sendQuote` / `acceptQuote` / `sendInvoice` / `recordPayment` / `correctPayment`) also fan out via `dispatchNotification` to org members + accepted financial-visible stakeholders (except `correctPayment` which dispatches to org members ONLY — administrative event, per Q2 decision). `createInvoice` rejects `subtype='final'` without an accepted quote on the project (`{error:'conflict', reason:'no_accepted_quote'}`); `subtype='initial'` is allowed without one (deposit/mobilisation flow).
-- **`actions/payments.ts`** *(Session 13)* — `recordPayment` (insert + activity `visibleToStakeholders=true` + audit + post-commit dispatch to org + financial-visible stakeholders) and `correctPayment` (mutate `amount` in place + append `correction_log_payload` entry + activity `visibleToStakeholders=false` + audit + dispatch to org members only).
-- **`db/queries/documents.ts`** — `listQuotesForProject({ visibleOnly })`, `listInvoicesForProject({ visibleOnly })` *(S13)*, `getDocumentById`, `getDocumentByToken`. The base `DocumentRow` shape now includes `invoiceSubtype`, `revisionNumber`, `revisionLogPayload`, `paymentId` (defaulted on quote rows). `InvoiceRow` is a type alias.
-- **`db/queries/payments.ts`** *(Session 13)* — `getPaymentsForProject({ visibleOnly })` returns `{ rows, runningTotal }`. `getProjectPaymentSnapshot(projectId)` aggregates the four primitives the payment-status function needs in one helper, then derives the label. The project detail page calls this in its `Promise.all` block.
+- **`actions/documents.ts`** — `createQuote` / `updateQuoteDraft` / `sendQuote` / `acceptQuote` (S12) + `createInvoice` / `updateInvoiceDraft` / `sendInvoice` / `reviseInvoice` (S13) + `reviseReceipt` (S14). All except `acceptQuote` follow §20's `requireOrgUser` shape. `acceptQuote` follows ADR-034 (token-authorized public write). `sendQuote` / `sendInvoice` dispatch the direct client Resend email post-commit per ADR-033; **all five S13-wired actions** (`sendQuote` / `acceptQuote` / `sendInvoice` / `recordPayment` / `correctPayment`) also fan out via `dispatchNotification` to org members + accepted financial-visible stakeholders (except `correctPayment` which dispatches to org members ONLY — administrative event, per Q2 decision). `createInvoice` rejects `subtype='final'` without an accepted quote on the project (`{error:'conflict', reason:'no_accepted_quote'}`); `subtype='initial'` is allowed without one (deposit/mobilisation flow). `reviseReceipt` (S14) edits `recipient_name` only — money mirrors the linked payment via `correctPayment` — and appends a revision-log entry; status='sent' precondition; activity row is `visibleToStakeholders=false` (recipient relabel is org-internal); cached PDF invalidated post-commit.
+- **`actions/payments.ts`** *(Session 13 + 14)* — `recordPayment` (insert payment + auto-create receipt as `documents` row of type='receipt' linked via payment_id + mint receipt's `document_tokens` row + activity rows for both `payment.recorded` AND `receipt.generated` (both `visibleToStakeholders=true`) + audit both rows + post-commit dispatch to org + financial-visible stakeholders for `payment.recorded` only — receipt.generated is activity-only since recipients overlap and a second fan-out would be notification spam). `correctPayment` (mutate `amount` in place + append `correction_log_payload` entry + UPDATE the linked receipt's `subtotal/total/lineItems` in the same tx (Session 14 lockstep) + activity `visibleToStakeholders=false` + audit + dispatch to org members only + post-commit invalidate the receipt's cached PDF).
+- **`actions/document-pdf.ts`** *(Session 14)* — `generateDocumentPdf({documentId})` (org-side, requireOrgUser) + `generateDocumentPdfFromToken({token})` (public-side, ADR-034 envelope: rate-limited, no auth, cross-type 404). Find-or-create model: looks up `project_files` rows WHERE `source_document_id=docId AND source='document_artifact' AND deleted_at IS NULL` (single index probe via 0028's partial index); if found, signs a fresh 1-hour download URL; if not, renders the PDF buffer via `lib/pdf/render`, uploads to `org-files` bucket at `org/{orgId}/projects/{projectId}/documents/{fileId}.pdf` (mirrors `actions/files.ts:buildStoragePath`), inserts a `project_files` row with `source='document_artifact'` + `source_document_id` + `visibility='org_only'` (PDF artifacts aren't drawings — they're shared via the document_tokens link, not via the stakeholder file list), and signs the URL. Re-export `invalidateDocumentPdfCache` for back-compat with the original Plan reference.
+- **`lib/pdf/{document-template.tsx,render.ts,cache.ts}`** *(Session 14)* — One parameterised React-PDF template covering quote/invoice/receipt (per-type variation is conditional inside the template — Quote shows acceptance block when accepted; Invoice shows subtype label + revision count; Receipt shows PAID stamp + recipient + payment-recorded date). `render.ts:renderDocumentPdf` returns a Node Buffer for upload. `cache.ts:invalidateDocumentPdfCache` is a leaf module (no @react-pdf imports) so action callers (`reviseInvoice` / `reviseReceipt` / `correctPayment`) can soft-delete cached PDFs without pulling the renderer into their import graphs.
+- **`db/queries/documents.ts`** — `listQuotesForProject({ visibleOnly, stakeholderAuthUserId? })`, `listInvoicesForProject(...)` *(S13)*, `listReceiptsForProject(...)` *(S14)*, `getDocumentById`, `getDocumentByToken`, `hasStakeholderFinancialAccess({ projectId, authUserId })` *(S14)*. The base `DocumentRow` shape now includes `invoiceSubtype`, `revisionNumber`, `revisionLogPayload`, `paymentId`, `recipientName` (defaulted on quote/invoice rows). `InvoiceRow` and `ReceiptRow` are semantic aliases. The list queries' `visibleOnly: true` branch verifies `stakeholderAuthUserId` has `can_view_financials=true` access via `hasStakeholderFinancialAccess` and returns `[]` otherwise (DEBT-059 / DEBT-R006 defense-in-depth pattern); they also filter to `sentAt IS NOT NULL` rows for stakeholder callers (drafts are org-internal).
+- **`db/queries/payments.ts`** *(Session 13 + 14)* — `getPaymentsForProject({ visibleOnly, stakeholderAuthUserId? })` returns `{ rows, runningTotal }`. Same `visibleOnly: true` defense-in-depth as the document queries. `PaymentRow` now carries `receiptId` and `receiptNumber` populated by a LEFT JOIN on `documents.payment_id`; the bidirectional payment↔receipt UI link reads these. `getProjectPaymentSnapshot(projectId)` aggregates the four primitives the payment-status function needs in one helper, then derives the label. The project detail page calls this in its `Promise.all` block.
 
 ### 12.P2.4 Public routes
 
-- `/q/[token]` — live (Session 12). Token validation → `publicDoc` rate-limit → `getDocumentByToken` → render quote with AcceptForm (only when status='sent' and not yet accepted).
-- `/i/[token]` — live (Session 13). Read-only invoice view. No AcceptForm (invoices aren't accepted; payments are org-side). Same UUID gate + rate-limit shape as `/q/`. Cross-type tokens 404 per ADR-034.
-- `/r/[token]` — Session 14 will populate.
+- `/q/[token]` — live (Session 12). Token validation → `publicDoc` rate-limit → `getDocumentByToken` → render quote with AcceptForm (only when status='sent' and not yet accepted). Session 14: `DownloadPdfButton` (token mode) added.
+- `/i/[token]` — live (Session 13). Read-only invoice view. No AcceptForm (invoices aren't accepted; payments are org-side). Same UUID gate + rate-limit shape as `/q/`. Cross-type tokens 404 per ADR-034. Session 14: `DownloadPdfButton` added.
+- `/r/[token]` — live (Session 14). Read-only receipt view. PAID badge, recipient name (when set), single-line totals, `DownloadPdfButton`. Same UUID gate + `publicDoc` rate-limit + cross-type 404 shape as `/q/` and `/i/`. No token-authorized writes from this page (receipts record what happened, not what's about to).
 
 ### 12.P2.5 `payments` *(Session 13)*
 
@@ -1710,6 +1722,57 @@ CREATE INDEX idx_payments_org ON payments(org_id) WHERE deleted_at IS NULL;
 ### 12.P2.6 DEBT-064 backfill *(Session 13)*
 
 Migration 0027 idempotently seeds `notification_preferences` rows for all existing identities (users + clients-with-org-membership) × 6 new event types (`quote.sent`, `quote.accepted`, `invoice.sent`, `invoice.revised`, `payment.recorded`, `payment.corrected`) × 4 channels (`in_app` + `email` enabled by default; `push` + `sms` disabled). Two `INSERT … SELECT … ON CONFLICT DO NOTHING` blocks (one per identity type) hit the two existing UNIQUE constraints — re-running the migration is a verified no-op. New identities continue to get rows via `lib/notifications/seed-defaults.ts:seedNotificationDefaultsTx` at create time. Without this backfill, dispatch fan-out to existing identities would silently return 0 enabled-channels (operationally surprising; not a data leak).
+
+### 12.P2.7 Receipts *(Session 14)*
+
+**No new table.** Receipts are `documents` rows with `type='receipt'`, populating the `payment_id` FK that S13 added. The full receipt shape:
+- `type='receipt'`, `status='sent'` (auto-created in the sent state — there's no draft receipt; the payment IS the trigger).
+- `document_number` allocated by `lib/documents/numbering.ts:allocateDocumentNumber` as `{projectNumber}-R{seq}`. The same `SELECT FOR UPDATE` lock works inside `recordPayment`'s tx.
+- `payment_id` set to the just-inserted payment's id; `documents_payment_id_payments_id_fk` makes this an explicit referential link.
+- `recipient_name` snapshotted from the project's primary client at creation time. Revisable via `reviseReceipt` (see §12.P2.3).
+- `subtotal/total = payment.amount`, `vat_amount = 0`, `discount_pct = 0`, `vat_applicable = false`, `line_items = [{description: 'Payment received', quantity: 1, unitPrice: payment.amount, category: 'payment'}]`. The lockstep maintained by `correctPayment` keeps these in sync with the underlying payment.
+- A `document_tokens` row is also minted in the same tx (random uuid v4, `document_type='receipt'`).
+
+**Receipt invariant:** exactly one non-soft-deleted receipt per payment. Enforced operationally — `recordPayment` is the only path that creates a receipt, and it creates one receipt atomically with the payment. Tested in `tests/actions/receipts.test.ts`.
+
+### 12.P2.8 PDF generation subsystem *(Session 14)*
+
+**Library:** `@react-pdf/renderer` v4. Pure JS, no native deps, runs on Vercel serverless out of the box (no special configuration needed). Resolves the §34 "Document generation backend" deferred decision.
+
+**Template:** one parameterised React-PDF component (`lib/pdf/document-template.tsx:DocumentPdfTemplate`) covering all three document types. Per-type variation lives as conditional renders inside the template:
+- Quote: shows acceptance block when `acceptedAt` is set (with `acceptedByName` + date).
+- Invoice: shows `{Initial|Final}` subtype label; revision count if `revisionNumber > 0`.
+- Receipt: shows PAID stamp; "Received from {recipient_name}"; payment-recorded date in the header.
+
+**Render path:** `lib/pdf/render.ts:renderDocumentPdf(data) → { buffer, sizeBytes, mimeType }`. Uses React-PDF's `renderToBuffer` to collect chunks into a Node Buffer.
+
+**Storage:** PDFs are stored as `project_files` rows with `source='document_artifact'` (existing enum) + `source_document_id` (S14 FK) + `visibility='org_only'` (artifact, not a drawing). Storage path: `org/{orgId}/projects/{projectId}/documents/{fileId}.pdf` — mirrors `actions/files.ts:buildStoragePath`.
+
+**Lookup + caching:** `actions/document-pdf.ts:generateDocumentPdf` uses a find-or-create model. The 0028 partial index `idx_project_files_source_document_id WHERE deleted_at IS NULL AND source_document_id IS NOT NULL` makes the lookup a single index probe.
+
+**Cache invalidation:** `lib/pdf/cache.ts:invalidateDocumentPdfCache(documentId)` soft-deletes any active cached PDF rows. Called post-commit by `reviseInvoice`, `reviseReceipt`, and `correctPayment` so the next `generateDocumentPdf` regenerates from the post-mutation state.
+
+**Two callable surfaces:**
+- `generateDocumentPdf({documentId})` — org-side, `requireOrgUser`, scopes documentId to ctx.orgId.
+- `generateDocumentPdfFromToken({token})` — public-side, no auth, `publicDoc` rate-limited (keyed by `pdf:{token}`), resolves the document via `document_tokens`, applies the same draft/void status guards as the public read pages. Token-context audit row carries `metadata.via='public_token'` (matches `acceptQuote`'s ADR-034 pattern).
+
+Both return `{ downloadUrl, filename, mimeType, expiresInSeconds }` with a 1-hour signed URL (matches `actions/files.ts:DOWNLOAD_TTL_SECONDS`).
+
+### 12.P2.9 Portal-side financial visibility *(Session 14)*
+
+**Defense-in-depth helper:** `db/queries/documents.ts:hasStakeholderFinancialAccess({ projectId, authUserId })` mirrors the SECURITY DEFINER `auth_user_stakeholder_project_visibility(uuid)`. Drizzle pooler bypasses RLS (DEBT-059 / DEBT-R006 pattern), so this query layer enforces the §14 financial-visibility gate explicitly. Returns true iff the auth user is an accepted stakeholder of the project with `can_view_financials=true`.
+
+**`visibleOnly: true` branches** (Session 14 wired — was a S13 short-circuit-to-`[]`):
+- `listQuotesForProject({ visibleOnly: true, stakeholderAuthUserId })` → real rows when access granted, `[]` otherwise. Also filters to `sentAt IS NOT NULL` rows for stakeholder callers (drafts are org-internal).
+- `listInvoicesForProject({ visibleOnly: true, stakeholderAuthUserId })` → same shape.
+- `listReceiptsForProject({ visibleOnly: true, stakeholderAuthUserId })` → same shape.
+- `getPaymentsForProject({ visibleOnly: true, stakeholderAuthUserId })` → `{ rows, runningTotal }` when access granted, `{ rows: [], runningTotal: 0 }` otherwise.
+
+Without `stakeholderAuthUserId` the queries also return `[]` / 0 — preserves the safe S13 default for any caller that hasn't been migrated.
+
+**Portal page:** `/portal/projects/[id]/page.tsx` renders `<QuotesSection viewer="stakeholder" stakeholderAuthUserId={ctx.authUserId} />`, `<InvoicesSection ... />`, `<PaymentsSection ... />`, `<ReceiptsSection ... />` only when `view.flags.canViewFinancials === true`. Each section's stakeholder mode hides write affordances (Create / Record / Correct / Revise / Open), making the surface read-only.
+
+**Coming Soon profitability:** `components/projects/ProfitabilityComingSoon.tsx` renders an org-side ONLY card on `/dashboard/projects/[id]` (after PaymentsSection / ReceiptsSection, before ActivityTimeline). Per kickoff §2.11: never rendered under `/portal`. The placeholder signals "this view is queued, not abandoned" to the in-house team and serves as the self-imposed contract that the Phase 2 schema leaves a clean seam for the deferred financial model (income breakdown / expenses / profit / people / AW snapshot — phase-2-scope.md §3.1).
 
 ---
 
@@ -3314,7 +3377,7 @@ Each tied to a concrete decide-by milestone.
 | Push notification implementation (Web Push API vs OneSignal vs Pushwoosh) | Phase 4 start | First customer requests push |
 | SMS provider choice (Twilio confirmed, but verify Vonage/MessageBird pricing for UK) | Phase 4 start | Same trigger as above |
 | Realtime presence indicator (who's online in conversation) | Phase 3 mid | After client portal launch, if requested by users |
-| Document generation backend (current: HTML render to PDF; alternatives: server-side Chromium, third-party like DocRaptor) | Phase 2 mid | When quote PDF generation is being built |
+| ~~Document generation backend~~ — **RESOLVED Session 14 (15 May 2026):** `@react-pdf/renderer` v4. Pure JS, no native deps, runs on Vercel serverless without configuration. Stored as `project_files` rows with `source='document_artifact'` + `source_document_id`. One parameterised template covers quote/invoice/receipt; cache invalidation soft-deletes on revise/correct. Two callable surfaces: `generateDocumentPdf` (org-side) + `generateDocumentPdfFromToken` (public, ADR-034). See §12.P2.8. | ~~Phase 2 mid~~ | n/a |
 | Workflow stage automation (auto-advance on payment, etc.) | Phase 5 | After native kanban ships and users request automation |
 | OAuth providers beyond email (Google, Microsoft) | Phase 6 mid | Customer demand or enterprise sales requirement |
 | Audit log retention period (7 years UK default, configurable per plan?) | Pre-launch | Same as retention worker decision |
@@ -3797,8 +3860,81 @@ Session 11 was the architecturally densest session in Phase 1c: 3 new tables, di
 
 **Last reviewed:** 15 May 2026 (Phase 2 Session 13 shipped — v0.17 → v0.18; 0 new ADRs (composes ADR-033 + ADR-034); 1 new table (`payments`); 4 additive columns on `documents`; 6 new server actions; 1 new public route lit up (`/i/[token]`); +61 tests; DEBT-064 closed; DEBT-065 filed).
 
+---
+
+## 35.14 Phase 2 Session 14 Carryover — Phase 2 CLOSED
+
+**Shipped 15 May 2026 — Phase 2 ends here.** Receipts as first-class `documents` rows linked to payments, server-side PDF generation for all three document types via `@react-pdf/renderer`, the `/r/[token]` public route, the portal-side financial visibility surface (was a S13 short-circuit), the org-side "Coming Soon" Profitability card, and an end-to-end polish pass. Schema-forever (Hard Rule 1) holds — additive only: two nullable columns on existing tables, no new tables, no changes to Sessions 12–13 columns / actions / RLS / tests.
+
+### Build summary
+
+| Layer | Delivered |
+|---|---|
+| Schema | Migration 0028 — two additive nullable columns: `documents.recipient_name` (receipt-only "addressed to") + `project_files.source_document_id` FK (cached PDF lookup) with partial index `WHERE deleted_at IS NULL AND source_document_id IS NOT NULL`. No RLS changes — both columns ride existing policies. |
+| PDF subsystem | `@react-pdf/renderer` v4 added. `lib/pdf/document-template.tsx` (one parameterised template, type-aware via conditional renders) + `lib/pdf/render.ts` (renderToBuffer wrapper) + `lib/pdf/cache.ts` (leaf module — `invalidateDocumentPdfCache`, decoupled from the JSX import chain so action callers don't pull the renderer transitively). |
+| Server actions | `actions/document-pdf.ts` (new): `generateDocumentPdf` (org-side) + `generateDocumentPdfFromToken` (public, ADR-034 envelope) + `invalidateDocumentPdfCache` re-export. `actions/payments.ts:recordPayment` now mints the receipt + token in the same tx as the payments row + activity rows for both `payment.recorded` and `receipt.generated`. `actions/payments.ts:correctPayment` now updates the linked receipt's `subtotal/total/lineItems` in the same tx + invalidates cached PDF post-commit. `actions/documents.ts:reviseReceipt` (new) — recipient-only revise with the standard revision-log mechanism. `actions/documents.ts:reviseInvoice` extended with post-commit PDF cache invalidation. |
+| Read queries | `db/queries/documents.ts` — `listReceiptsForProject` (new); `listQuotesForProject` / `listInvoicesForProject` / `listReceiptsForProject` share a `listDocumentsByType` helper with the real `visibleOnly: true` defense-in-depth branch via `hasStakeholderFinancialAccess` (mirrors the SECURITY DEFINER `auth_user_stakeholder_project_visibility`). `db/queries/payments.ts:getPaymentsForProject` same shape. PaymentRow gains `receiptId/Number` via LEFT JOIN on `documents.payment_id`. DocumentRow gains `recipientName`. |
+| Notification vocab | `NOTIFICATION_EVENT_TYPES` += `receipt.generated`, `receipt.revised`. Both wired into all 4 exhaustive maps (`subjects.ts`, `lib/activity/labels.ts`, `InboxList.tsx`, `NotificationPreferencesMatrix.tsx`). Neither has dispatch fan-out (recipients overlap with `payment.recorded` for `generated`; `revised` is org-internal). |
+| Frontend (org) | `/dashboard/projects/[projectId]/receipts/[receiptId]` — receipt detail page with revise-recipient + Download PDF + linked-payment card (bidirectional UI link). `components/receipts/{ReceiptsSection,ReviseReceiptDialog}.tsx`. `components/projects/ProfitabilityComingSoon.tsx`. `components/pdf/DownloadPdfButton.tsx`. Section components extended with `viewer: 'org' \| 'stakeholder'` prop + `stakeholderAuthUserId?` for portal use. |
+| Frontend (public) | `/r/[token]` — read-only receipt view, mirrors `/i/[token]` shape: UUID gate, publicDoc rate-limit, cross-type 404. PAID badge, recipient (when set), single-line totals, Download PDF. Download PDF added to `/q/[token]` and `/i/[token]` too. |
+| Frontend (portal) | `/portal/projects/[projectId]` — replaced the "Coming in Phase 2" placeholder card with real `<QuotesSection / InvoicesSection / PaymentsSection / ReceiptsSection viewer="stakeholder" />` rendered when `view.flags.canViewFinancials === true`. Stakeholder mode hides write affordances; queries enforce defense-in-depth via `stakeholderAuthUserId`. |
+
+### Test deltas
+
+- **RLS:** 251 → **254** (+3). `tests/rls/documents.test.ts` extended with receipt-type cross-org isolation + anon SELECT block + `recipient_name` fetchability.
+- **Actions:** 293 → **321** (+28):
+  - `tests/actions/receipts.test.ts` — receipt auto-creation invariant (one-per-payment, payment_id linked, document_number allocated, recipient_name snapshot, token minted), `correctPayment` keeps linked receipt total in lockstep, `reviseReceipt` happy + no-op + cross-type + cross-org, validation errors.
+  - `tests/actions/document-pdf.test.ts` — `generateDocumentPdf` produces correct project_files row, second call returns cached row (idempotent), cross-org rejection, `generateDocumentPdfFromToken` finds-or-creates by token, `invalidateDocumentPdfCache` + `reviseReceipt` soft-delete cached PDF (next call regenerates).
+  - `tests/actions/portal-financial-visibility.test.ts` — `hasStakeholderFinancialAccess` true/false matrix (financial / progress-only / cross-org); `listInvoicesForProject` / `listReceiptsForProject` / `getPaymentsForProject` each return real rows for financial-stakeholders and []/0 otherwise.
+- **Cloud-smoke:** 14/14 unchanged.
+
+### Notable decisions made in-session (not in scope doc)
+
+1. **Receipt creation model = inside `recordPayment`'s tx** (Plan Q1). One payment, one receipt, atomic. No separate `createReceipt` action — that would invite invariant-violating receipts.
+2. **Receipt-payment consistency = snapshot kept in lockstep** (Plan Q2). At creation, receipt's `subtotal/total = payment.amount`. At correction, the same tx updates both rows. Receipt PDF/page renders straight from the documents row with no JOIN.
+3. **PDF template structure = one parameterised template** (Plan Q3). Per-type variation is conditional inside the template (Quote acceptance block; Invoice subtype + revision badge; Receipt PAID + recipient).
+4. **Migration scope = two additive nullable columns** (Plan Q4). `documents.recipient_name` for receipt revisability + `project_files.source_document_id` FK for cached PDF lookup. Reasoning surfaced in plan (alternatives = column-name overload OR storage-path scan; both worse).
+5. **`receipt.generated` activity event added** to the timeline alongside `payment.recorded` (the receipt is a distinct first-class artifact). **No notification dispatch** — recipients overlap with `payment.recorded` and a second fan-out would be spam.
+6. **Receipt PDF visibility = `'org_only'`.** PDFs are sharable via the document_tokens link; they shouldn't appear in the stakeholder file list (where they'd confuse — these aren't drawings).
+7. **PDF cache invalidation = soft-delete, post-commit, best-effort.** `reviseInvoice` / `reviseReceipt` / `correctPayment` invalidate. The next `generateDocumentPdf` regenerates from the post-mutation state. Storage object stays for the retention worker.
+8. **Vitest JSX handling.** Vitest 4 uses oxc and doesn't auto-transform JSX. Solved by isolating `invalidateDocumentPdfCache` into a leaf `lib/pdf/cache.ts` (no @react-pdf imports) so action modules don't pull the JSX template through their import graph. Cleaner than configuring oxc.
+9. **Portal financial-visibility wiring.** The `visibleOnly: true` branch now does real defense-in-depth via `hasStakeholderFinancialAccess` (a query helper that mirrors the SECURITY DEFINER gate). Stakeholder callers see drafts/void rows filtered out (`sentAt IS NOT NULL`) — drafts are org-internal compose state.
+10. **Bidirectional payment↔receipt UI link.** PaymentRow gains `receiptId/Number` via LEFT JOIN on `documents.payment_id`. PaymentsSection rows render R{n} as a link to the org-side receipt detail page; receipt detail page shows a "Linked payment" card. The user reads either side without hunting.
+
+### What was deliberately deferred (not gaps)
+
+- **Portal-side detail pages for invoices / receipts.** Stakeholders see lists in the section cards; clicking a row in a stakeholder's portal goes nowhere. The public `/i/` and `/r/` token-gated pages are the existing detail surface; the portal section's Download PDF affordance is enough for now. A future UX session could add `/portal/projects/[id]/invoices/[id]` etc.
+- **Stakeholder PDF download from portal sections.** The portal sections show read-only lists; they don't expose a per-row Download PDF. Stakeholders downloading a PDF go via the public `/i/[token]` or `/r/[token]` page (which has the button). Adding portal-side per-row download would require either a new token-context or an authenticated download surface — out of scope.
+- **Refund modelling.** DEBT-065 (S13) still open. `payments.amount > 0` CHECK precludes negative rows; refunds need a separate shape. No customer impact yet.
+- **PDF rendering of the revision history.** The receipt PDF doesn't include the recipient revision log; the revise log lives on the org-side detail page only. Future polish.
+
+### Open carryover
+
+- **Phase 3 strategy decision.** Per phase-2-scope.md §6 + the §35.6 Session 6 carryover: Phase 3 was originally defined as "build the stakeholder UI — it doesn't exist yet" — but `/portal/*` already substantially exists (1b shipped the basics, 1c added messages + files + notifications + activity, 14 added the financial sections). Phase 3 as originally scoped is largely hollow; recommend collapsing it into a pre-launch UX polish pass + renumbering 4/5/6. Decide before kicking off Phase 3.
+- **Hasnath's existing 10 projects migration** (descoped from Phase 1c — see §35.11 row 14 / Phase 1c exit criteria). Independent of Phase 2 shape; can run any time before launch.
+- **DEBT-066** is the next free debt id. Session 14 filed no new DEBT entries — every deferred item above is captured here in the carryover or already has an existing ID.
+
+### Phase 2 close-out
+
+Phase 2 shipped over three sequential sessions (S12 / S13 / S14) on 15 May 2026, on time per the kickoff plan. Final state:
+
+- **Schema:** 6 migrations (0023–0028). 3 new tables (`documents`, `document_tokens`, `payments`); 6 additive columns on `documents` (4 in S13, 1 in S14, plus `payment_id` already in S13's column pack); 1 additive column on `project_files` (S14). 0 changes to Phase 1a/1b/1c rows.
+- **RLS:** 4 per-command policies on each new table (12 new policies); 0 changes to Phase 1a/1b/1c policies. Stakeholder financial-visibility gate (`can_view_financials`) propagated through `documents` SELECT + `payments` SELECT + the `hasStakeholderFinancialAccess` query-layer helper.
+- **Server actions:** 11 new (`createQuote`, `updateQuoteDraft`, `sendQuote`, `acceptQuote`, `createInvoice`, `updateInvoiceDraft`, `sendInvoice`, `reviseInvoice`, `recordPayment`, `correctPayment`, `reviseReceipt`) + 2 PDF (`generateDocumentPdf`, `generateDocumentPdfFromToken`).
+- **Public routes:** 3 (`/q/[token]`, `/i/[token]`, `/r/[token]`).
+- **ADRs:** 1 new (ADR-034, token-authorized public writes — S12). PDF subsystem composes ADR-033 + ADR-034 without a new pattern.
+- **Tests:** RLS 221 → 254 (+33); Actions 198 → 321 (+123); cloud-smoke 14 unchanged.
+- **DEBT entries:** DEBT-064 closed (S13). DEBT-065 filed (refund modelling — Low). 0 net new debts in S14.
+- **Phase tracker:** 1 + 2 → ✓ Complete.
+
+Pre-launch operational items (not Phase-bound): retention worker schedule, data-export format, Resend production domain verification, Upstash Redis production split, the migration of Hasnath's existing 10 projects, the Phase 3 scope decision.
+
+---
+
+**Last reviewed:** 15 May 2026 (Phase 2 Session 14 shipped — v0.18 → v0.19; **Phase 2 CLOSED**; 0 new ADRs; 0 new tables; 2 additive columns (1 on `documents`, 1 on `project_files`); 3 new server actions (`reviseReceipt` + 2 PDF); 1 new public route lit up (`/r/[token]`); 5 new components; 1 new lib subsystem (`lib/pdf/`); +31 tests).
+
 ## End of document
 
 
-**Next review:** at end of each Phase 1 session, append a new §35.N Session N Carryover subsection. After Phase 1c, freeze schema sections and start Phase 2 spec doc.
+**Next review:** Phase 3 strategy decision before kickoff. Schema sections frozen — additive-only thereafter (Hard Rule 1).
 
