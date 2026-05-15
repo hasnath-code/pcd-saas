@@ -1,5 +1,6 @@
 import { sql } from 'drizzle-orm';
 import {
+  type AnyPgColumn,
   bigint,
   check,
   index,
@@ -8,6 +9,7 @@ import {
   timestamp,
   uuid,
 } from 'drizzle-orm/pg-core';
+import { documents } from './documents';
 import { projects } from './projects';
 
 // Phase 1c §12.4. A file uploaded to a project. uploaded_by_type/_id is the
@@ -51,6 +53,15 @@ export const projectFiles = pgTable(
     source: text('source').notNull(),
     visibility: text('visibility').notNull().default('org_and_stakeholders'),
     thumbnailPath: text('thumbnail_path'),
+    // Phase 2 Session 14 — additive nullable FK (migration 0028).
+    // Populated only on rows with source='document_artifact' (PDFs generated
+    // from a documents row by lib/pdf). Lookup is "find the cached PDF for
+    // doc X" via the partial index below. Existing surveyor_upload /
+    // client_upload rows take NULL.
+    sourceDocumentId: uuid('source_document_id').references(
+      (): AnyPgColumn => documents.id,
+      { onDelete: 'set null' },
+    ),
     createdAt: timestamp('created_at', { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -73,5 +84,8 @@ export const projectFiles = pgTable(
     index('idx_project_files_project')
       .on(table.projectId)
       .where(sql`deleted_at IS NULL`),
+    index('idx_project_files_source_document_id')
+      .on(table.sourceDocumentId)
+      .where(sql`deleted_at IS NULL AND source_document_id IS NOT NULL`),
   ],
 );

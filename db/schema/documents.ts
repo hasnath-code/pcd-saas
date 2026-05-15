@@ -122,6 +122,11 @@ export const documents = pgTable(
     revisionLogPayload: jsonb('revision_log_payload')
       .notNull()
       .default(sql`'[]'::jsonb`),
+    // Phase 2 Session 14 — additive nullable column (migration 0028).
+    // Receipt-only "addressed to" field, snapshotted from the project's
+    // primary client at recordPayment time and revisable via reviseReceipt.
+    // Quotes/invoices keep this NULL.
+    recipientName: text('recipient_name'),
     createdBy: uuid('created_by')
       .notNull()
       .references(() => users.id, { onDelete: 'restrict' }),
