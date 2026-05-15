@@ -50,6 +50,27 @@
 
 # Open Debt
 
+## DEBT-066 — Activity timeline leaks financial event text to non-financial stakeholders
+**Added:** 15 May 2026 by Phase 2 Session 14 Phase F walk
+**Codebase:** SaaS
+**Severity:** Medium
+**Type:** Stakeholder data-visibility leak (mild)
+**Status:** Open
+
+**The debt:** When a stakeholder has `can_view_financials = false`, the financial section cards (Quotes / Invoices / Payments / Receipts) are correctly removed from the DOM on `/portal/projects/[id]`, but the Activity Timeline on the same page still surfaces strings like "received £400.00, R1" / "invoice / quote / payment / receipt issued". Activity rows for `payment.recorded`, `quote.sent`, `quote.accepted`, `invoice.sent`, `invoice.revised`, `receipt.generated` are written with `visibleToStakeholders: true` because they're part of the project narrative for *financial* stakeholders, but the per-stakeholder financial flag is not consulted at timeline-render time.
+
+**Why it exists:** Session 11 designed the activity timeline gate as a per-row `visible_to_stakeholders` boolean (write-time decision) rather than a per-stakeholder per-event-type matrix. It works for the binary "is this stakeholder-relevant?" axis but doesn't model "is this stakeholder-relevant *for this stakeholder profile*?". Phase 2 Sessions 12–14 added 8 financial event types to the vocabulary and logged them with `visible_to_stakeholders: true` (correct for financial stakeholders); the gap is the read-time filter for non-financial stakeholders.
+
+**Cost of leaving it:** A `progress_only` or `documents_only` stakeholder reading the project timeline learns the rough size of payments and the existence of invoices/quotes — info their visibility profile says they shouldn't see. Mild leak (no exact line items, no PDF access) but contradicts the explicit per-stakeholder visibility contract. Becomes more visible after Phase 3 client-portal polish surfaces the timeline more prominently.
+
+**Fix sketch:** Add a `FINANCIAL_EVENT_TYPES` set in `lib/notifications/events.ts` listing the 8 financial events. In `db/queries/project-activity.ts:listProjectActivity`, when the caller is a stakeholder (already known via the `visibleOnly` flag), look up the caller's `can_view_financials` flag for the project and add `WHERE event_type NOT IN (...)` when false. Mirror the pattern in `db/queries/documents.ts:hasStakeholderFinancialAccess`. ~30 LOC + 2 tests (positive + negative).
+
+**Trigger:** Before Phase 3 client-portal polish, OR when a customer notices.
+
+**Cross-references:** ARCHITECTURE-saas.md §14 (visibility model), §12.7 (project_activity), §12.P2.9 (Session 14 portal financial visibility — this DEBT is the read-time complement of the section-rendering gate); `db/queries/project-activity.ts:listProjectActivity`; `lib/activity/log.ts:logActivityTx`; recordPayment / sendQuote / acceptQuote / sendInvoice / reviseInvoice activity-row writes.
+
+---
+
 ## DEBT-065 — Refunds not modelled (payments.amount > 0 CHECK precludes negative rows)
 **Added:** 15 May 2026 (Phase 2 Session 13)
 **Codebase:** SaaS
