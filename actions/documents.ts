@@ -162,7 +162,7 @@ export async function createQuote(
     },
   });
 
-  revalidatePath(`/dashboard/projects/${projectId}`, 'layout');
+  revalidatePath('/dashboard/projects/[projectId]', 'layout');
   return { success: true, data: { documentId, documentNumber } };
 }
 
@@ -255,7 +255,7 @@ export async function updateQuoteDraft(
     },
   });
 
-  revalidatePath(`/dashboard/projects/${row.projectId}`, 'layout');
+  revalidatePath('/dashboard/projects/[projectId]', 'layout');
   return { success: true };
 }
 
@@ -430,7 +430,7 @@ export async function sendQuote(
     },
   });
 
-  revalidatePath(`/dashboard/projects/${doc.projectId}`, 'layout');
+  revalidatePath('/dashboard/projects/[projectId]', 'layout');
   return { success: true, data: { token: mintedToken } };
 }
 
@@ -581,8 +581,9 @@ export async function acceptQuote(
     },
   });
 
-  revalidatePath(`/dashboard/projects/${doc.projectId}`, 'layout');
-  revalidatePath(`/q/${token}`, 'page');
+  revalidatePath('/dashboard/projects/[projectId]', 'layout');
+  // Next.js 15 canonical pattern: dynamic-segment, not literal-path.
+  revalidatePath('/q/[token]', 'page');
   return { success: true, data: { documentId, alreadyAccepted: false } };
 }
 
@@ -836,7 +837,7 @@ export async function createInvoice(
     },
   });
 
-  revalidatePath(`/dashboard/projects/${projectId}`, 'layout');
+  revalidatePath('/dashboard/projects/[projectId]', 'layout');
   return { success: true, data: { documentId, documentNumber } };
 }
 
@@ -950,7 +951,7 @@ export async function updateInvoiceDraft(
     },
   });
 
-  revalidatePath(`/dashboard/projects/${row.projectId}`, 'layout');
+  revalidatePath('/dashboard/projects/[projectId]', 'layout');
   return { success: true };
 }
 
@@ -1126,7 +1127,7 @@ export async function sendInvoice(
     },
   });
 
-  revalidatePath(`/dashboard/projects/${doc.projectId}`, 'layout');
+  revalidatePath('/dashboard/projects/[projectId]', 'layout');
   return { success: true, data: { token: mintedToken } };
 }
 
@@ -1333,7 +1334,7 @@ export async function reviseInvoice(
     });
   }
 
-  revalidatePath(`/dashboard/projects/${row.projectId}`, 'layout');
+  revalidatePath('/dashboard/projects/[projectId]', 'layout');
   return {
     success: true,
     data: { revisionNumber: newRevisionNumber, fieldsChanged: diff.fieldsChanged },
@@ -1501,7 +1502,7 @@ export async function reviseReceipt(
     });
   }
 
-  revalidatePath(`/dashboard/projects/${row.projectId}`, 'layout');
+  revalidatePath('/dashboard/projects/[projectId]', 'layout');
   return {
     success: true,
     data: { revisionNumber: newRevisionNumber, fieldsChanged: ['recipientName'] },

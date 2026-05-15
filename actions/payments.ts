@@ -292,8 +292,11 @@ export async function recordPayment(
     },
   });
 
-  revalidatePath(`/dashboard/projects/${projectId}`, 'layout');
-  revalidatePath(`/portal/projects/${projectId}`, 'layout');
+  // Next.js 15 canonical pattern: dynamic-segment with 'layout' (NOT
+  // literal-path with 'layout' — the latter is undocumented and unreliable;
+  // it failed silently for recordPayment in Phase F walk).
+  revalidatePath('/dashboard/projects/[projectId]', 'layout');
+  revalidatePath('/portal/projects/[projectId]', 'layout');
   return { success: true, data: { paymentId, receiptId } };
 }
 
@@ -485,8 +488,8 @@ export async function correctPayment(
     },
   });
 
-  revalidatePath(`/dashboard/projects/${row.projectId}`, 'layout');
-  revalidatePath(`/portal/projects/${row.projectId}`, 'layout');
+  revalidatePath('/dashboard/projects/[projectId]', 'layout');
+  revalidatePath('/portal/projects/[projectId]', 'layout');
   return { success: true };
 }
 
