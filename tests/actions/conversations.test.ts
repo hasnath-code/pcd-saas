@@ -30,6 +30,7 @@ import {
 } from '@/actions/conversations';
 import {
   getConversationDetail,
+  listConversationsForOrgUser,
   listMessagesForConversation,
 } from '@/db/queries/conversations';
 import * as auth from '@/lib/auth/requireAuth';
@@ -416,5 +417,58 @@ describe('listMessagesForConversation — viewer gate (DEBT-061)', () => {
       clientId,
     });
     expect(blocked).toEqual([]);
+  });
+});
+
+// ─── listConversationsForOrgUser — unread count gate (DEBT-067) ───────────────
+// The org inbox returns every conversation in the org (transparency model) via
+// a LEFT JOIN on conversation_participants. For a conversation the caller does
+// NOT participate in, the join yields a NULL row, so the unreadCount subquery's
+// `last_read_at IS NULL` branch counted every message. The fix gates the
+// subquery on `conversation_participants.id IS NOT NULL`.
+
+describe('listConversationsForOrgUser — unread count for non-participant conversations (DEBT-067)', () => {
+  let f: ConversationsFixture;
+  // An Org A conversation userA does NOT participate in, carrying one message
+  // from another identity. Transparency returns it in userA's inbox; its
+  // unread count must be 0 because userA is not a participant.
+  const nonParticipantConvId = uuidv7();
+  const messageId = uuidv7();
+
+  beforeAll(async () => {
+    f = await createConversationFixture();
+    await f.service.from('conversations').insert({
+      id: nonParticipantConvId,
+      org_id: f.orgA.id,
+      type: 'general',
+      name: 'Org A — userA is not a participant',
+      created_by: f.userA.userId,
+    });
+    // Sender is the org-A client, not userA: a userA-sent message is excluded
+    // from the unread count regardless, so it would not exercise the bug.
+    await f.service.from('messages').insert({
+      id: messageId,
+      conversation_id: nonParticipantConvId,
+      sender_type: 'client',
+      sender_id: f.extras.orgAClient.id,
+      body: 'A message in a conversation userA never joined.',
+    });
+  });
+  afterAll(async () => {
+    await f.service.from('conversations').delete().eq('id', nonParticipantConvId);
+    await f.cleanup();
+  });
+
+  test('non-participant conversation reports unreadCount 0', async () => {
+    const items = await listConversationsForOrgUser({
+      orgId: f.orgA.id,
+      userId: f.userA.userId,
+    });
+    const row = items.find((c) => c.id === nonParticipantConvId);
+    // Transparency model: the conversation is in the org user's inbox …
+    expect(row).toBeDefined();
+    // … but userA is not a participant, so nothing in it is unread for them.
+    // Pre-fix, the LEFT JOIN's NULL last_read_at counted every message (1).
+    expect(row?.unreadCount).toBe(0);
   });
 });

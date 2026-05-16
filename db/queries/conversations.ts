@@ -79,9 +79,15 @@ export async function listConversationsForOrgUser(opts: {
         ORDER BY ${messages.createdAt} DESC
         LIMIT 1
       )`,
+      // DEBT-067: gate the count on participation. The LEFT JOIN above
+      // yields a NULL conversation_participants row for conversations the
+      // caller doesn't participate in (the transparency model returns them
+      // anyway); without this gate the `last_read_at IS NULL` branch below
+      // would count every message in those conversations.
       unreadCount: sql<number>`(
         SELECT COUNT(*)::int FROM ${messages}
         WHERE ${messages.conversationId} = ${conversations.id}
+          AND ${conversationParticipants.id} IS NOT NULL
           AND (${conversationParticipants.lastReadAt} IS NULL OR ${messages.createdAt} > ${conversationParticipants.lastReadAt})
           AND NOT (${messages.senderType} = 'user' AND ${messages.senderId} = ${opts.userId})
           AND ${messages.deletedAt} IS NULL

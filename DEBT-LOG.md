@@ -340,7 +340,7 @@
 
 **Trigger:** Pre-launch UX polish pass OR if customers complain about the badge.
 
-**Cross-references:** `app/(org)/layout.tsx` (badge render); `db/queries/conversations.ts:totalUnreadForOrgUser`
+**Cross-references:** `app/(org)/layout.tsx` (badge render); `db/queries/conversations.ts:totalUnreadForOrgUser`. See also **DEBT-067** — the S1 Phase A diagnostic of this entry found `totalUnreadForOrgUser` (the nav-badge query) correct and traced the visible count inflation to `listConversationsForOrgUser` (the org inbox); DEBT-067 was filed in Phase A and fixed in Phase D. This entry stays Open only for its untested original hypothesis — `markConversationRead` revalidation scope causing transient nav-badge staleness — deferred to S3.
 
 ---
 
