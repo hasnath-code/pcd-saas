@@ -40,6 +40,44 @@ function CardShell({
   );
 }
 
+// DEBT-063: post-invitation auth choice. Sign up is the primary, full-width
+// action — a first-time invitee has no auth.users row yet and would hit
+// "Invalid login credentials" on Sign in. Sign in and the already-signed-in
+// shortcut are demoted to secondary links. Shared by both invitation-type
+// branches; the type-specific framing lives in each branch's CardHeader.
+function InvitationActions({
+  signupHref,
+  loginHref,
+  acceptHref,
+}: {
+  signupHref: string;
+  loginHref: string;
+  acceptHref: string;
+}) {
+  return (
+    <>
+      <Button asChild className="w-full">
+        <Link href={signupHref}>Sign up — new to PCD</Link>
+      </Button>
+      <p className="text-center text-xs text-muted-foreground">
+        Already have a PCD account?{' '}
+        <Link
+          href={loginHref}
+          className="font-medium text-foreground underline underline-offset-2"
+        >
+          Sign in
+        </Link>
+      </p>
+      <p className="text-center text-xs text-muted-foreground">
+        Already signed in?{' '}
+        <Link href={acceptHref} className="underline underline-offset-2">
+          Accept invitation
+        </Link>
+      </p>
+    </>
+  );
+}
+
 export default async function InvitationLandingPage({
   params,
 }: {
@@ -131,20 +169,11 @@ export default async function InvitationLandingPage({
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-3">
-              <div className="grid grid-cols-2 gap-3">
-                <Button asChild>
-                  <Link href={signupHref}>Sign up</Link>
-                </Button>
-                <Button asChild variant="outline">
-                  <Link href={loginHref}>Sign in</Link>
-                </Button>
-              </div>
-              <p className="text-center text-xs text-muted-foreground">
-                Already signed in?{' '}
-                <Link href={acceptHref} className="underline">
-                  Accept invitation
-                </Link>
-              </p>
+              <InvitationActions
+                signupHref={signupHref}
+                loginHref={loginHref}
+                acceptHref={acceptHref}
+              />
             </CardContent>
           </Card>
         </div>
@@ -177,20 +206,11 @@ export default async function InvitationLandingPage({
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-3">
-            <div className="grid grid-cols-2 gap-3">
-              <Button asChild>
-                <Link href={signupHref}>Sign up</Link>
-              </Button>
-              <Button asChild variant="outline">
-                <Link href={loginHref}>Sign in</Link>
-              </Button>
-            </div>
-            <p className="text-center text-xs text-muted-foreground">
-              Already signed in?{' '}
-              <Link href={acceptHref} className="underline">
-                Accept invitation
-              </Link>
-            </p>
+            <InvitationActions
+              signupHref={signupHref}
+              loginHref={loginHref}
+              acceptHref={acceptHref}
+            />
           </CardContent>
         </Card>
       </div>
