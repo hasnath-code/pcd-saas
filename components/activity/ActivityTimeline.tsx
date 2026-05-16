@@ -1,5 +1,7 @@
 import { listProjectActivity } from '@/db/queries/project-activity';
 import { activityLabel, activitySummary } from '@/lib/activity/labels';
+import { EmptyState } from '@/components/ui/empty-state';
+import { History } from 'lucide-react';
 import {
   Card,
   CardContent,
@@ -68,10 +70,11 @@ export async function ActivityTimeline({
         </p>
 
         {rows.length === 0 ? (
-          <p className="text-sm text-muted-foreground">
-            No activity yet. Stage transitions, file uploads, and milestones
-            will appear here as the project moves forward.
-          </p>
+          <EmptyState
+            icon={History}
+            title="No activity yet"
+            description="Stage changes, file uploads, and milestones appear here as the project moves forward."
+          />
         ) : (
           <ol className="relative space-y-3 border-l border-muted-foreground/20 pl-4">
             {rows.map((row) => {

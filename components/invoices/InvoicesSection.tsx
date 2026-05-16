@@ -1,5 +1,7 @@
 import Link from 'next/link';
 import { listInvoicesForProject } from '@/db/queries/documents';
+import { FileText } from 'lucide-react';
+import { EmptyState } from '@/components/ui/empty-state';
 import {
   Card,
   CardContent,
@@ -87,11 +89,15 @@ export async function InvoicesSection({
       </CardHeader>
       <CardContent>
         {invoices.length === 0 ? (
-          <p className="text-sm text-muted-foreground">
-            {viewer === 'org'
-              ? 'No invoices yet. Create one to send the client a token-gated public link.'
-              : 'No invoices to show yet.'}
-          </p>
+          <EmptyState
+            icon={FileText}
+            title="No invoices yet"
+            description={
+              viewer === 'org'
+                ? 'Initial deposits and final invoices appear here once you create them.'
+                : 'Invoices the team issues for this project will appear here.'
+            }
+          />
         ) : (
           <Table>
             <TableHeader>

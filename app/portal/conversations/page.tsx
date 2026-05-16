@@ -35,7 +35,7 @@ export default async function PortalConversationsPage() {
         basePath="/portal/conversations"
         conversations={conversations}
         callerName={callerName}
-        emptyMessage="No conversations yet. They appear automatically when you accept a project invitation."
+        emptyMessage="Threads appear here automatically when you accept a project invitation."
       />
     </main>
   );

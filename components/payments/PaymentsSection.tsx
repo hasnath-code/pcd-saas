@@ -1,5 +1,7 @@
 import Link from 'next/link';
 import { getPaymentsForProject } from '@/db/queries/payments';
+import { Banknote } from 'lucide-react';
+import { EmptyState } from '@/components/ui/empty-state';
 import {
   Card,
   CardContent,
@@ -67,11 +69,15 @@ export async function PaymentsSection({
       </CardHeader>
       <CardContent>
         {rows.length === 0 ? (
-          <p className="text-sm text-muted-foreground">
-            {viewer === 'org'
-              ? 'No payments recorded yet.'
-              : 'No payments to show yet.'}
-          </p>
+          <EmptyState
+            icon={Banknote}
+            title="No payments yet"
+            description={
+              viewer === 'org'
+                ? 'Record a payment against the accepted quote to start the running total.'
+                : 'Payments recorded on this project will appear here.'
+            }
+          />
         ) : (
           <Table>
             <TableHeader>
