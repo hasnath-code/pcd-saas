@@ -59,6 +59,25 @@ export const NOTIFICATION_EVENT_TYPES = [
 
 export type NotificationEventType = (typeof NOTIFICATION_EVENT_TYPES)[number];
 
+// Phase 2 financial event types — quote / invoice / payment / receipt
+// lifecycle. These carry financial detail (amounts, document numbers) into the
+// project_activity timeline. A stakeholder without can_view_financials must not
+// see them even though they are logged visible_to_stakeholders=true (correct
+// for a financial stakeholder): listProjectActivity filters them at read time
+// for non-financial stakeholders (DEBT-066). Maintained as an explicit list —
+// not a 'quote.*'-style prefix match — so a future non-financial event in one
+// of these namespaces isn't silently hidden.
+export const FINANCIAL_EVENT_TYPES = [
+  'quote.sent',
+  'quote.accepted',
+  'invoice.sent',
+  'invoice.revised',
+  'payment.recorded',
+  'payment.corrected',
+  'receipt.generated',
+  'receipt.revised',
+] as const satisfies readonly NotificationEventType[];
+
 export const NOTIFICATION_CHANNELS = ['in_app', 'email', 'push', 'sms'] as const;
 
 export type NotificationChannel = (typeof NOTIFICATION_CHANNELS)[number];

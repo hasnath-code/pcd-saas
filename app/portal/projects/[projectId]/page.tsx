@@ -181,7 +181,11 @@ export default async function PortalProjectDetailPage({
         </>
       )}
 
-      <ActivityTimeline projectId={projectId} viewer="stakeholder" />
+      <ActivityTimeline
+        projectId={projectId}
+        viewer="stakeholder"
+        stakeholderAuthUserId={ctx.authUserId}
+      />
     </main>
   );
 }

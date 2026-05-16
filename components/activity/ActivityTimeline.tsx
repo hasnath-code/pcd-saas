@@ -15,7 +15,9 @@ import {
 // `viewer` selects between org and stakeholder visibility. The query layer
 // enforces visible_to_stakeholders=true for the stakeholder branch via
 // explicit WHERE (defense-in-depth — the RLS policy in 0022 is the
-// canonical gate but the pooler bypasses it).
+// canonical gate but the pooler bypasses it). DEBT-066: a stakeholder caller
+// also passes stakeholderAuthUserId, which gates the financial event types
+// (quote/invoice/payment/receipt) on can_view_financials.
 
 function formatRelative(when: Date): string {
   const ms = Date.now() - when.getTime();
@@ -32,13 +34,20 @@ function formatRelative(when: Date): string {
 export async function ActivityTimeline({
   projectId,
   viewer,
+  stakeholderAuthUserId,
 }: {
   projectId: string;
   viewer: 'org' | 'stakeholder';
+  /**
+   * Stakeholder caller's auth user id — drives the DEBT-066 financial-event
+   * read-time gate. Passed only for viewer='stakeholder'.
+   */
+  stakeholderAuthUserId?: string;
 }) {
   const rows = await listProjectActivity({
     projectId,
     visibleOnly: viewer === 'stakeholder',
+    stakeholderAuthUserId,
   });
 
   return (
