@@ -95,7 +95,7 @@ export async function InvoicesSection({
             description={
               viewer === 'org'
                 ? 'Initial deposits and final invoices appear here once you create them.'
-                : 'Invoices the team issues for this project will appear here.'
+                : 'Invoices shared with you will appear here.'
             }
           />
         ) : (

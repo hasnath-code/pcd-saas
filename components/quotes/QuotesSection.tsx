@@ -92,7 +92,7 @@ export async function QuotesSection({
             description={
               viewer === 'org'
                 ? 'Quotes you create are sent to the client as a token-gated public link.'
-                : 'Quotes the team issues for this project will appear here.'
+                : 'Quotes shared with you will appear here.'
             }
           />
         ) : (

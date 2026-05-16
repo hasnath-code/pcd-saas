@@ -159,7 +159,7 @@ export function InboxList({
     return (
       <EmptyState
         icon={Inbox}
-        title="You're all caught up"
+        title="No notifications yet"
         description="Updates about your projects will appear here."
       />
     );

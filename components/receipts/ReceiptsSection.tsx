@@ -68,7 +68,7 @@ export async function ReceiptsSection({
             description={
               viewer === 'org'
                 ? 'A receipt is issued automatically for each payment you record.'
-                : 'Receipts for payments on this project will appear here.'
+                : 'Receipts shared with you will appear here.'
             }
           />
         ) : (

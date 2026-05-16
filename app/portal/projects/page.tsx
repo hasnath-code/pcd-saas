@@ -46,7 +46,7 @@ export default async function PortalProjectsListPage() {
         <EmptyState
           icon={FolderOpen}
           title="No projects yet"
-          description="When a project team adds you as a stakeholder, the project shows up here."
+          description="When a firm adds you to a project, it'll appear here."
         />
       ) : (
         <Card>
