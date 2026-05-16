@@ -517,6 +517,7 @@ Likely also need to audit `actions/orgs.ts createOrganization` for any callers t
 **Codebase:** SaaS
 **Severity:** Low
 **Type:** Deferred decision
+**Status:** Resolved (16 May 2026 — Polish Sprint S1 Phase D)
 
 **The debt:** Top nav links (PCD / Projects / Conversations / Team / Settings) are plain text with no unread-count indicator next to "Conversations." The conversation list itself sorts by recency but has no visual read/unread distinction.
 
@@ -529,6 +530,8 @@ Likely also need to audit `actions/orgs.ts createOrganization` for any callers t
 **Trigger:** Session 11 (notifications + activity) — natural fit since both surface unread state.
 
 **Cross-references:** ADR-026 (last_read_at column); Session 11 notifications roadmap; `markConversationRead` action; Phase F Step 11
+
+**Resolution:** Verified already implemented — no code change required. Session 11's notification work shipped the unread badge on the Conversations nav item in both `app/(org)/layout.tsx` and `app/portal/layout.tsx` (count from `totalUnreadForOrgUser` / `totalUnreadForStakeholder`, capped at `99+`), and `components/conversations/ConversationsInbox.tsx` renders per-row unread indication (semibold title + a count badge). The fix-sketch's `/api/conversations/unread-count` endpoint was not needed — the layouts are server components and read the count at SSR, mirroring the notification bell badge. Confirmed during the Polish Sprint S1 Phase A diagnostic; closed in Phase D. The separate count-accuracy concern — the org inbox over-counts conversations the caller doesn't participate in — is tracked as DEBT-067.
 
 ---
 
