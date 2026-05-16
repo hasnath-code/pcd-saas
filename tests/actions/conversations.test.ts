@@ -28,6 +28,10 @@ import {
   markConversationRead,
   removeConversationParticipant,
 } from '@/actions/conversations';
+import {
+  getConversationDetail,
+  listMessagesForConversation,
+} from '@/db/queries/conversations';
 import * as auth from '@/lib/auth/requireAuth';
 
 describe('createGroupConversation', () => {
@@ -303,5 +307,114 @@ describe('markConversationRead', () => {
       conversationId: '00000000-0000-7000-8000-000000000000',
     });
     expect(result).toMatchObject({ error: 'not_found' });
+  });
+});
+
+// ─── DEBT-060/061: query-layer viewer gate ───────────────────────────────────
+// getConversationDetail + listMessagesForConversation take an explicit viewer.
+// The Drizzle pooler bypasses RLS, so these tests pin the gate at the query
+// layer: org viewers keep the transparency model (see any conversation in their
+// org, participant or not — the regression a participant-only gate would have
+// introduced); stakeholder viewers see only conversations they participate in.
+
+describe('getConversationDetail — viewer gate (DEBT-060)', () => {
+  let f: ConversationsFixture;
+  // An extra Org A conversation with NO org-user participant — proves the org
+  // transparency model: an org viewer reads it despite not participating.
+  const orphanConvId = uuidv7();
+
+  beforeAll(async () => {
+    f = await createConversationFixture();
+    await f.service.from('conversations').insert({
+      id: orphanConvId,
+      org_id: f.orgA.id,
+      type: 'general',
+      name: 'Org A — no org-user participant',
+      created_by: f.userA.userId,
+    });
+  });
+  afterAll(async () => {
+    await f.service.from('conversations').delete().eq('id', orphanConvId);
+    await f.cleanup();
+  });
+
+  test('org viewer reads an in-org conversation they do not participate in', async () => {
+    // userA is NOT a participant of orphanConvId — the transparency model still
+    // grants visibility. A participant-only gate here would 404.
+    const detail = await getConversationDetail(orphanConvId, {
+      kind: 'org',
+      orgId: f.orgA.id,
+    });
+    expect(detail).not.toBeNull();
+    expect(detail?.id).toBe(orphanConvId);
+  });
+
+  test('stakeholder viewer is gated to conversations they participate in', async () => {
+    const clientId = f.extras.orgAClient.id;
+    // orgAClient IS a participant of orgAConversation → visible.
+    const visible = await getConversationDetail(f.ext.orgAConversation.id, {
+      kind: 'stakeholder',
+      clientId,
+    });
+    expect(visible?.id).toBe(f.ext.orgAConversation.id);
+    // orgAClient is NOT a participant of orgBConversation (another org) → null,
+    // even via a direct pooler query that bypasses RLS.
+    const blocked = await getConversationDetail(f.ext.orgBConversation.id, {
+      kind: 'stakeholder',
+      clientId,
+    });
+    expect(blocked).toBeNull();
+  });
+});
+
+describe('listMessagesForConversation — viewer gate (DEBT-061)', () => {
+  let f: ConversationsFixture;
+  const orphanConvId = uuidv7();
+  const orphanMessageId = uuidv7();
+
+  beforeAll(async () => {
+    f = await createConversationFixture();
+    await f.service.from('conversations').insert({
+      id: orphanConvId,
+      org_id: f.orgA.id,
+      type: 'general',
+      name: 'Org A — no org-user participant',
+      created_by: f.userA.userId,
+    });
+    await f.service.from('messages').insert({
+      id: orphanMessageId,
+      conversation_id: orphanConvId,
+      sender_type: 'user',
+      sender_id: f.userA.userId,
+      body: 'Visible to the org via the transparency model.',
+    });
+  });
+  afterAll(async () => {
+    await f.service.from('conversations').delete().eq('id', orphanConvId);
+    await f.cleanup();
+  });
+
+  test('org viewer reads messages of an in-org conversation they do not participate in', async () => {
+    const rows = await listMessagesForConversation(orphanConvId, {
+      kind: 'org',
+      orgId: f.orgA.id,
+    });
+    expect(rows.map((r) => r.id)).toContain(orphanMessageId);
+  });
+
+  test('stakeholder viewer is gated to conversations they participate in', async () => {
+    const clientId = f.extras.orgAClient.id;
+    // Participant of orgAConversation → sees its messages.
+    const visible = await listMessagesForConversation(f.ext.orgAConversation.id, {
+      kind: 'stakeholder',
+      clientId,
+    });
+    expect(visible.map((r) => r.id)).toContain(f.ext.orgAMessage.id);
+    // Non-participant of another org's conversation → no rows.
+    const blocked = await listMessagesForConversation(f.ext.orgBConversation.id, {
+      kind: 'stakeholder',
+      clientId,
+    });
+    expect(blocked).toEqual([]);
   });
 });
