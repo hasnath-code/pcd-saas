@@ -50,6 +50,27 @@
 
 # Open Debt
 
+## DEBT-070 — Error toasts surface raw server-action error codes
+**Added:** 16 May 2026 by Polish Sprint S1 Phase D (D4 copy-pass audit)
+**Codebase:** SaaS
+**Severity:** Low
+**Type:** UX
+**Status:** Open
+
+**The debt:** The majority of `toast.error(...)` call sites — roughly 30 across ~25 client components — interpolate the raw server-action failure value (`result.reason ?? result.error`) straight into customer-visible copy. `result.error` is a `ServerActionErrorCode` (`not_authorized`, `validation_error`, `not_found`, `conflict`, …); `result.reason` is an internal slug (`org_admin_required`, `no_project_access`, `stakeholder_lacks_can_view_drawings`, …). A user who hits a failure sees, e.g., "Couldn't restore report.pdf: org_admin_required" — a developer string, not a sentence. Affected sites span quotes, invoices, payments, conversations, workflows, files, settings, team, and notifications (`SendQuoteButton`, `RecordPaymentDialog`, `MessageComposer`, `ProjectCreateForm`, `InboxList`, `FileRow`, `RestoreFileButton`, the three settings forms, …).
+
+**Why it exists:** The `toast.error` pattern grew per-component as each feature shipped; no canonical error-code→message map ever existed, so every call site fell back to interpolating whatever the action returned. The right pattern *does* already exist in the codebase but was never generalised: `components/stakeholders/RemoveStakeholderButton.tsx` keeps a local `ERROR_TOAST` lookup table, and `components/team/RemoveMemberDialog.tsx` + `CancelInvitationButton.tsx` resolve a `friendly` string before calling `toast.error`. Three sites do it right; the other ~30 leak codes.
+
+**Cost of leaving it:** Mild user-facing friction — on any action failure the user sees a code instead of guidance and can't always tell whether they made a mistake, lack permission, or hit a bug. No data risk: the toast still fires and the action still fails safely. Same severity tier as DEBT-068 — cosmetic-leaning UX, not a break.
+
+**Fix sketch:** Promote the `RemoveStakeholderButton` `ERROR_TOAST` approach to a canonical, shared `ServerActionErrorCode → user-facing message` map and route every `toast.error` site through it, keeping the raw code only as a last-resort fallback. `ARCHITECTURE-saas.md §13` (Server Actions) is the natural home for the canonical map, beside the `ServerActionErrorCode` definition. Deferred from S1 rather than folded into the D4 copy pass for three reasons: (i) it is map-design work — the user must approve, code by code, which message each one shows — which is outside the S1 copy-pass scope; (ii) it touches every client component with a `toast.error` call, well beyond the analogue of the S1 sweep's 10-line-per-surface budget for a code change; (iii) it sits in the same severity tier as DEBT-068 (mild user-facing friction, no data risk), so deferring it to the same trigger is consistent.
+
+**Trigger:** Pre-launch UX polish sprint — S3 buffer (same trigger as DEBT-068).
+
+**Cross-references:** Polish Sprint S1 Phase D — D4 copy pass (`16c71e3`; the copy-pass audit surfaced this); `components/stakeholders/RemoveStakeholderButton.tsx` (`ERROR_TOAST` — the partial pattern to generalise); `components/team/RemoveMemberDialog.tsx` + `components/team/CancelInvitationButton.tsx` (`friendly`-string siblings); `lib/auth/requireAuth.ts` (`ServerActionErrorCode` definition); ARCHITECTURE-saas.md §13 (Server Actions — proposed home of the canonical map); DEBT-068 (same severity tier and trigger).
+
+---
+
 ## DEBT-069 — `revalidatePath` literal `/projects/[id]` misses the org project route on file actions
 **Added:** 16 May 2026 by Polish Sprint S1 Phase D (surfaced during DEBT-035 recycle-bin work)
 **Codebase:** SaaS
