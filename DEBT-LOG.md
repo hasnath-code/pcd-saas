@@ -50,6 +50,27 @@
 
 # Open Debt
 
+## DEBT-067 — Org conversation inbox inflates unread count for non-participant conversations
+**Added:** 16 May 2026 by Polish Sprint S1 Phase A (DEBT-055 diagnostic)
+**Codebase:** SaaS
+**Severity:** Low
+**Type:** Bug
+**Status:** Open
+
+**The debt:** `db/queries/conversations.ts:listConversationsForOrgUser` returns every conversation in the org (the org-transparency model) and `LEFT JOIN`s `conversation_participants` on the caller's `users.id`. For conversations the caller is not a participant of, the join yields no row, so the per-row `unreadCount` subquery's `(conversationParticipants.lastReadAt IS NULL OR messages.createdAt > conversationParticipants.lastReadAt)` clause is satisfied by every message — the org `/conversations` inbox renders an inflated unread badge (capped `99+`) and bold styling on conversations the user never joined.
+
+**Why it exists:** The `unreadCount` subquery conflates two distinct NULL cases for the left-joined `last_read_at`: (a) a genuine participant who has never read the thread (correct — all messages unread), and (b) a non-participant with no join row at all (should be 0 unread). The org-transparency model — the query intentionally returns conversations the caller isn't in — makes case (b) reachable. Surfaced during the DEBT-055 diagnostic: DEBT-055 attributed the Phase F discrepancy to the nav-badge query `totalUnreadForOrgUser`, which is in fact correct (strictly participant-scoped).
+
+**Cost of leaving it:** The in-house team sees wrong unread numbers on the org `/conversations` inbox; the error grows as the org's conversation count grows. Org-side only — `listConversationsForStakeholder` is participant-scoped from the start (`WHERE conversations.id IN (myConvIds)`) and is unaffected, so there is no stakeholder-facing impact. Not a data leak — RLS and visibility are unaffected; only a displayed count is wrong.
+
+**Fix sketch:** In the `unreadCount` subquery within `listConversationsForOrgUser`, gate on participation — add `AND conversationParticipants.id IS NOT NULL` so non-participant conversations report 0 unread (no badge). ~2 LOC + 1 regression test (a non-participant org conversation returns `unreadCount: 0`). `totalUnreadForOrgUser`, `totalUnreadForStakeholder`, and `listConversationsForStakeholder` need no change.
+
+**Trigger:** Pre-launch UX polish sprint — S1 Phase A surfaced it; scheduled for S1 Phase D (should-if-time), else S3 buffer.
+
+**Cross-references:** `db/queries/conversations.ts:listConversationsForOrgUser` (the `unreadCount` subquery + the `conversation_participants` LEFT JOIN); `components/conversations/ConversationsInbox.tsx` (renders the inflated badge); DEBT-055 (mis-attributed sibling — the nav-badge query `totalUnreadForOrgUser` is correct; DEBT-055's own untested hypothesis is `markConversationRead` revalidation scope, which remains an S3 follow-up).
+
+---
+
 ## DEBT-066 — Activity timeline leaks financial event text to non-financial stakeholders
 **Added:** 15 May 2026 by Phase 2 Session 14 Phase F walk
 **Codebase:** SaaS
