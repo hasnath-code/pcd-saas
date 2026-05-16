@@ -50,6 +50,27 @@
 
 # Open Debt
 
+## DEBT-069 — `revalidatePath` literal `/projects/[id]` misses the org project route on file actions
+**Added:** 16 May 2026 by Polish Sprint S1 Phase D (surfaced during DEBT-035 recycle-bin work)
+**Codebase:** SaaS
+**Severity:** Low
+**Type:** Bug
+**Status:** Open
+
+**The debt:** Three write actions in `actions/files.ts` — `confirmUpload`, `softDeleteFile`, and `restoreFile` — call `revalidatePath` with a `` `/projects/${id}` `` template literal to refresh the org-side project detail page after a file write. No route is mounted at `/projects/[id]`: the org project detail page lives at `/dashboard/projects/[projectId]` (the `(org)` route group prepends the `/dashboard` segment). The org-side call is therefore a silent no-op. Each action *also* calls `revalidatePath` with the correct `` `/portal/projects/${id}` ``, so the portal side refreshes fine — only the org-side literal is wrong.
+
+**Why it exists:** The literal predates — or was copied without re-checking against — the `(org)` route group's `/dashboard` prefix. The adjacent, correct `/portal/projects/...` literal masks it: a casual read sees a matched org/portal pair. It surfaced while building the DEBT-035 recycle-bin page, which revalidates the same org route correctly and exposed the mismatch by contrast.
+
+**Cost of leaving it:** After an org user uploads, soft-deletes, or restores a file, the Files card on `/dashboard/projects/[id]` can render a stale list until the next navigation or an unrelated revalidation. Org-side only; brief staleness; no data risk — RLS and file visibility are unaffected, only a cached render lags. Low because the file surfaces are not yet high-traffic and any navigation clears it.
+
+**Fix sketch:** Change the three `` `/projects/${id}` `` literals to `` `/dashboard/projects/${id}` ``. ~3 LOC. While there, grep the rest of `actions/` for the same bare `/projects/[id]` literal. `revalidatePath` is mocked in `tests/actions/files.test.ts`, so no test asserts the revalidated path today — a follow-up could, but that is out of S1 scope.
+
+**Trigger:** Pre-launch UX polish sprint — S3 buffer, or the next surface that revisits the `actions/files.ts` write actions.
+
+**Cross-references:** `actions/files.ts` — `confirmUpload`, `softDeleteFile`, `restoreFile` (the `revalidatePath('/projects/[id]')` calls); DEBT-035 (file recycle-bin UI — Polish Sprint S1 Phase D; surfaced this while wiring the same org route); ARCHITECTURE-saas.md §35.14 Phase F Fix 1 (the dynamic-segment `revalidatePath` rule).
+
+---
+
 ## DEBT-068 — Notification preferences matrix is a wide table on mobile
 **Added:** 16 May 2026 by Polish Sprint S1 Phase C (mobile responsive sweep)
 **Codebase:** SaaS
