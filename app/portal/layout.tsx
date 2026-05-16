@@ -42,7 +42,7 @@ export default async function PortalLayout({ children }: { children: ReactNode }
   return (
     <>
       <header className="border-b bg-background">
-        <div className="mx-auto flex max-w-5xl items-center justify-between gap-4 px-8 py-3">
+        <div className="mx-auto flex max-w-5xl items-center justify-between gap-4 px-4 py-3 sm:px-8">
           <div className="flex items-center gap-4">
             <Link href="/portal/projects" className="font-semibold">
               PCD
@@ -86,7 +86,9 @@ export default async function PortalLayout({ children }: { children: ReactNode }
               </Link>
             </nav>
           </div>
-          <span className="text-xs text-muted-foreground">Client portal</span>
+          <span className="hidden text-xs text-muted-foreground sm:inline">
+            Client portal
+          </span>
         </div>
       </header>
       {children}

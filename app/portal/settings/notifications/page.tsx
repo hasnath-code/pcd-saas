@@ -16,7 +16,7 @@ export default async function PortalNotificationPreferencesPage() {
   const prefs = 'data' in result ? result.data.prefs : [];
 
   return (
-    <main className="mx-auto max-w-4xl space-y-6 p-8">
+    <main className="mx-auto max-w-4xl space-y-6 p-4 sm:p-8">
       <div className="space-y-2">
         <p className="text-sm">
           <Link href="/portal/projects" className="text-muted-foreground hover:underline">

@@ -60,7 +60,7 @@ export default async function PortalProjectDetailPage({
     : [];
 
   return (
-    <main className="mx-auto max-w-4xl space-y-6 p-8">
+    <main className="mx-auto max-w-4xl space-y-6 p-4 sm:p-8">
       <div className="space-y-2">
         <p className="text-sm text-muted-foreground">
           <Link href="/portal/projects" className="hover:underline">

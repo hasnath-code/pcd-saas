@@ -32,7 +32,7 @@ export default async function PortalProjectsListPage() {
   const list = await listProjectsForStakeholder(ctx.authUserId);
 
   return (
-    <main className="mx-auto max-w-5xl space-y-6 p-8">
+    <main className="mx-auto max-w-5xl space-y-6 p-4 sm:p-8">
       <div>
         <h1 className="text-3xl font-semibold">My projects</h1>
         <p className="text-sm text-muted-foreground">

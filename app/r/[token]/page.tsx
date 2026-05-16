@@ -60,7 +60,7 @@ export default async function PublicReceiptPage({
     const rl = await rateLimit('publicDoc', ip);
     if (rl.limited) {
       return (
-        <main className="mx-auto max-w-md p-8">
+        <main className="mx-auto max-w-md p-4 sm:p-8">
           <Card>
             <CardHeader>
               <CardTitle className="text-base">Too many requests</CardTitle>
@@ -86,7 +86,7 @@ export default async function PublicReceiptPage({
   const issuedAt = doc.sentAt;
 
   return (
-    <main className="mx-auto max-w-2xl space-y-6 p-8">
+    <main className="mx-auto max-w-2xl space-y-6 p-4 sm:p-8">
       <div className="space-y-1">
         <p className="text-sm uppercase tracking-wide text-muted-foreground">
           {orgName}

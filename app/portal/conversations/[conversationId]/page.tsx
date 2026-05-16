@@ -44,7 +44,7 @@ export default async function PortalConversationDetailPage({
         : 'Group';
 
   return (
-    <main className="mx-auto max-w-4xl px-8 py-6">
+    <main className="mx-auto max-w-4xl px-4 py-6 sm:px-8">
       <div className="mb-3">
         <Link
           href="/portal/conversations"

@@ -19,7 +19,7 @@ export default async function PortalNotificationsPage() {
   });
 
   return (
-    <main className="mx-auto max-w-3xl space-y-6 p-8">
+    <main className="mx-auto max-w-3xl space-y-6 p-4 sm:p-8">
       <div className="space-y-2">
         <p className="text-sm">
           <Link

@@ -50,6 +50,27 @@
 
 # Open Debt
 
+## DEBT-068 — Notification preferences matrix is a wide table on mobile
+**Added:** 16 May 2026 by Polish Sprint S1 Phase C (mobile responsive sweep)
+**Codebase:** SaaS
+**Severity:** Low
+**Type:** UX
+**Status:** Open
+
+**The debt:** `components/notifications/NotificationPreferencesMatrix.tsx` renders a 20-row × 5-column `<table>` (an Event column plus the four channel columns) inside an `overflow-x-auto` wrapper. It is functional on mobile — the wrapper scrolls — but at 375px the table is wider than the viewport, so a stakeholder on `/portal/settings/notifications` must scroll horizontally and loses sight of the event-name column when reaching the Push / SMS columns.
+
+**Why it exists:** The matrix is a desktop-first layout — a grid of checkboxes is the natural shape for a per-event × per-channel preference set. The S1 mobile-sweep 10-line CSS/JSX budget doesn't cover a proper mobile treatment, so the surface was flagged rather than redesigned.
+
+**Cost of leaving it:** Mild friction for mobile stakeholders editing notification preferences — a low-frequency action (set once, rarely revisited). Not a break: the matrix works, it just scrolls horizontally. No data risk.
+
+**Fix sketch:** Add a mobile layout below the `sm` breakpoint — render one card per event with the channel toggles stacked (label + checkbox rows), keeping the table at `sm` and up. Alternatively a sticky first column so the event name stays visible while scrolling the channel columns. ~30-60 LOC plus a responsive-variant branch — beyond the S1 sweep's 10-line budget.
+
+**Trigger:** Post-launch UX polish, OR a mobile stakeholder reports difficulty editing preferences.
+
+**Cross-references:** `components/notifications/NotificationPreferencesMatrix.tsx`; surfaced during Polish Sprint S1 Phase C mobile sweep (`/portal/settings/notifications`).
+
+---
+
 ## DEBT-067 — Org conversation inbox inflates unread count for non-participant conversations
 **Added:** 16 May 2026 by Polish Sprint S1 Phase A (DEBT-055 diagnostic)
 **Codebase:** SaaS
