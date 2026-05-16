@@ -218,11 +218,21 @@ export default async function ProjectDetailPage({
       )}
 
       <Card>
-        <CardHeader>
-          <CardTitle className="text-base">Files</CardTitle>
-          <CardDescription>
-            Drawings, surveys, and documents shared on this project.
-          </CardDescription>
+        <CardHeader className="flex flex-row items-start justify-between gap-4">
+          <div>
+            <CardTitle className="text-base">Files</CardTitle>
+            <CardDescription>
+              Drawings, surveys, and documents shared on this project.
+            </CardDescription>
+          </div>
+          {isAdmin && (
+            <Link
+              href={`/dashboard/projects/${project.id}/files/recycle`}
+              className="whitespace-nowrap text-sm text-muted-foreground hover:underline"
+            >
+              Recycle bin
+            </Link>
+          )}
         </CardHeader>
         <CardContent className="space-y-4">
           <FileUploadZone projectId={project.id} source="surveyor_upload" />
