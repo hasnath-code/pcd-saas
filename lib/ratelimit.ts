@@ -39,6 +39,23 @@ const limiters = {
     limiter: Ratelimit.slidingWindow(20, '1 h'),
     prefix: 'rl:invite',
   }),
+  // sendMessage / editMessage: per-user global write cap. 30/min — generous
+  // for genuine use, caps scripted message floods. Send and edit are kept on
+  // separate budgets by key prefix (send_message:* / edit_message:*), not by
+  // limiter. DEBT-021.
+  message: new Ratelimit({
+    redis,
+    limiter: Ratelimit.slidingWindow(30, '1 m'),
+    prefix: 'rl:message',
+  }),
+  // sendMessage / editMessage: per-user-per-conversation write cap. 10/min —
+  // a single participant can't flood one thread. Same key-prefix split as the
+  // global limiter above. DEBT-021.
+  messageConversation: new Ratelimit({
+    redis,
+    limiter: Ratelimit.slidingWindow(10, '1 m'),
+    prefix: 'rl:messageConversation',
+  }),
 } as const;
 
 export type Limiter = keyof typeof limiters;

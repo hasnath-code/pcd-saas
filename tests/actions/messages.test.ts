@@ -17,8 +17,16 @@ vi.mock('@/lib/auth/requireAuth', async (importOriginal) => {
 
 vi.mock('next/cache', () => ({ revalidatePath: vi.fn() }));
 
+// DEBT-021: stub the Upstash limiter so the existing message tests don't hit
+// real Redis once sendMessage/editMessage call rateLimit(). Default = not
+// limited; the rate-limit tests override per-call with mockResolvedValueOnce.
+vi.mock('@/lib/ratelimit', () => ({
+  rateLimit: vi.fn().mockResolvedValue({ limited: false, retryAfterSec: 0 }),
+}));
+
 import { deleteMessage, editMessage, sendMessage } from '@/actions/messages';
 import * as auth from '@/lib/auth/requireAuth';
+import * as ratelimit from '@/lib/ratelimit';
 
 describe('sendMessage', () => {
   let f: ConversationsFixture;
@@ -31,6 +39,9 @@ describe('sendMessage', () => {
   });
   beforeEach(() => {
     vi.mocked(auth.requireAuth).mockResolvedValue(asAuthUser(f.userA));
+    vi.mocked(ratelimit.rateLimit)
+      .mockReset()
+      .mockResolvedValue({ limited: false, retryAfterSec: 0 });
   });
 
   test('happy path: org user sends a message', async () => {
@@ -100,6 +111,23 @@ describe('sendMessage', () => {
     });
     expect(result).toMatchObject({ error: 'validation_error' });
   });
+
+  // DEBT-021: rate-limit-hit path. Global cap clears; the per-conversation cap
+  // trips → action returns the rate_limited shape, keyed under send_message:*.
+  test('rate-limited send returns { error: rate_limited }', async () => {
+    vi.mocked(ratelimit.rateLimit)
+      .mockResolvedValueOnce({ limited: false, retryAfterSec: 0 }) // message (global)
+      .mockResolvedValueOnce({ limited: true, retryAfterSec: 42 }); // messageConversation
+    const result = await sendMessage({
+      conversationId: f.ext.orgAConversation.id,
+      body: 'flood',
+    });
+    expect(result).toEqual({ error: 'rate_limited', reason: 'retry_after_42s' });
+    expect(ratelimit.rateLimit).toHaveBeenCalledWith(
+      'messageConversation',
+      `send_message:user:${f.userA.authUserId}:conv:${f.ext.orgAConversation.id}`,
+    );
+  });
 });
 
 describe('editMessage', () => {
@@ -113,6 +141,9 @@ describe('editMessage', () => {
   });
   beforeEach(() => {
     vi.mocked(auth.requireAuth).mockResolvedValue(asAuthUser(f.userA));
+    vi.mocked(ratelimit.rateLimit)
+      .mockReset()
+      .mockResolvedValue({ limited: false, retryAfterSec: 0 });
   });
 
   test('happy path: sender edits own message', async () => {
@@ -162,6 +193,24 @@ describe('editMessage', () => {
       .update({ deleted_at: null })
       .eq('id', f.ext.orgAMessage.id);
   });
+
+  // DEBT-021: rate-limit-hit path. The per-user global edit cap trips on the
+  // first check, keyed under the edit_message:* prefix (separate from sends).
+  test('rate-limited edit returns { error: rate_limited }', async () => {
+    vi.mocked(ratelimit.rateLimit).mockResolvedValueOnce({
+      limited: true,
+      retryAfterSec: 30,
+    });
+    const result = await editMessage({
+      messageId: f.ext.orgAMessage.id,
+      body: 'flood edit',
+    });
+    expect(result).toEqual({ error: 'rate_limited', reason: 'retry_after_30s' });
+    expect(ratelimit.rateLimit).toHaveBeenCalledWith(
+      'message',
+      `edit_message:user:${f.userA.authUserId}`,
+    );
+  });
 });
 
 describe('deleteMessage', () => {
@@ -175,6 +224,9 @@ describe('deleteMessage', () => {
   });
   beforeEach(() => {
     vi.mocked(auth.requireAuth).mockResolvedValue(asAuthUser(f.userA));
+    vi.mocked(ratelimit.rateLimit)
+      .mockReset()
+      .mockResolvedValue({ limited: false, retryAfterSec: 0 });
   });
 
   test('happy path: sender soft-deletes own message', async () => {

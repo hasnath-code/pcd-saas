@@ -20,6 +20,7 @@ import {
 } from '@/db/schema';
 import { logAudit } from '@/lib/audit/log';
 import { dispatchNotification } from '@/lib/notifications/dispatch';
+import { rateLimit } from '@/lib/ratelimit';
 
 export type MessageActionResult<T = void> =
   | (T extends void ? { success: true } : { success: true; data: T })
@@ -106,6 +107,22 @@ export async function sendMessage(
     };
   }
   const { conversationId, body } = parsed.data;
+
+  // DEBT-021: per-user global + per-user-per-conversation send limits.
+  // Mirrors the actions/auth.ts pattern — checked in the action body after
+  // input validation, before any DB work, so a flood sheds load early. Send
+  // and edit draw on separate budgets via the send_message:* key prefix.
+  const sendUserRl = await rateLimit('message', `send_message:user:${authUser.id}`);
+  if (sendUserRl.limited) {
+    return { error: 'rate_limited', reason: `retry_after_${sendUserRl.retryAfterSec}s` };
+  }
+  const sendConvRl = await rateLimit(
+    'messageConversation',
+    `send_message:user:${authUser.id}:conv:${conversationId}`,
+  );
+  if (sendConvRl.limited) {
+    return { error: 'rate_limited', reason: `retry_after_${sendConvRl.retryAfterSec}s` };
+  }
 
   const conv = await db
     .select({ id: conversations.id, orgId: conversations.orgId })
@@ -307,6 +324,22 @@ export async function editMessage(
   }
   if (msg[0].senderType === 'system' || msg[0].senderId === null) {
     return { error: 'not_authorized', reason: 'cannot_edit_system' };
+  }
+
+  // DEBT-021: per-user global + per-user-per-conversation edit limits. The
+  // edit input carries no conversationId, so the per-conversation check lands
+  // here, after the message lookup. Separate budget from sendMessage via the
+  // edit_message:* key prefix.
+  const editUserRl = await rateLimit('message', `edit_message:user:${authUser.id}`);
+  if (editUserRl.limited) {
+    return { error: 'rate_limited', reason: `retry_after_${editUserRl.retryAfterSec}s` };
+  }
+  const editConvRl = await rateLimit(
+    'messageConversation',
+    `edit_message:user:${authUser.id}:conv:${msg[0].conversationId}`,
+  );
+  if (editConvRl.limited) {
+    return { error: 'rate_limited', reason: `retry_after_${editConvRl.retryAfterSec}s` };
   }
 
   // Sender check: caller's resolved identity must match the message's
