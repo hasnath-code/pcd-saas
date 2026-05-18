@@ -6,6 +6,7 @@ import { AuthError, requireStakeholder } from '@/lib/auth/requireAuth';
 import { totalUnreadForStakeholder } from '@/db/queries/conversations';
 import { unreadInAppCount } from '@/db/queries/notifications';
 import { Badge } from '@/components/ui/badge';
+import { SentryScope } from '@/components/observability/SentryScope';
 
 // Stakeholder portal shell. All /portal/* routes require an auth user with a
 // matching public.clients row (auth_user_id linked). Org users without a
@@ -41,6 +42,12 @@ export default async function PortalLayout({ children }: { children: ReactNode }
 
   return (
     <>
+      {/* DEBT-025: mirror the server-set Sentry scope onto the browser SDK. */}
+      <SentryScope
+        userId={stakeholderCtx.authUserId}
+        email={stakeholderCtx.email}
+        participantType="client"
+      />
       <header className="border-b bg-background">
         <div className="mx-auto flex max-w-5xl items-center justify-between gap-4 px-4 py-3 sm:px-8">
           <div className="flex items-center gap-4">

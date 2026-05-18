@@ -11,6 +11,7 @@ import { users } from '@/db/schema';
 import { and, eq, isNull } from 'drizzle-orm';
 import { OrgSwitcher } from '@/components/org/OrgSwitcher';
 import { Badge } from '@/components/ui/badge';
+import { SentryScope } from '@/components/observability/SentryScope';
 
 // All routes in (org) — dashboard, projects, settings, team — require an
 // authenticated session. Middleware also redirects unauthed users; this layout
@@ -70,6 +71,13 @@ export default async function OrgLayout({ children }: { children: ReactNode }) {
 
   return (
     <>
+      {/* DEBT-025: mirror the server-set Sentry scope onto the browser SDK. */}
+      <SentryScope
+        userId={authUser.id}
+        email={authUser.email}
+        orgId={active?.orgId}
+        participantType="user"
+      />
       {active && (
         <header className="border-b bg-background">
           <div className="mx-auto flex max-w-5xl items-center justify-between gap-4 px-8 py-3">

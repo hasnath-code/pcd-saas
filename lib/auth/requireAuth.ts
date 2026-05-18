@@ -1,6 +1,7 @@
 import { redirect } from 'next/navigation';
 import { cookies } from 'next/headers';
 import type { User } from '@supabase/supabase-js';
+import * as Sentry from '@sentry/nextjs';
 import { createClient } from '@/lib/supabase/server';
 
 // Server-action error codes (ARCHITECTURE-saas.md §20). Server actions return
@@ -32,6 +33,14 @@ export class AuthError extends Error {
   }
 }
 
+// DEBT-025: attach the authenticated user to the current Sentry isolation
+// scope so any error captured later in this request carries user attribution.
+// Sentry SDK calls are safe no-ops when the SDK isn't initialised (e.g. the
+// vitest env). Called from every server-side auth entry point.
+function applySentryUser(user: User): void {
+  Sentry.setUser({ id: user.id, email: user.email });
+}
+
 // Phase 1a: working. Returns the auth.users row for the current session,
 // or throws AuthError('not_authenticated'). Use in server actions and route handlers.
 export async function requireAuth(): Promise<User> {
@@ -41,6 +50,7 @@ export async function requireAuth(): Promise<User> {
     error,
   } = await supabase.auth.getUser();
   if (error || !user) throw new AuthError('not_authenticated');
+  applySentryUser(user);
   return user;
 }
 
@@ -52,6 +62,7 @@ export async function requireAuthOrRedirect(): Promise<User> {
     data: { user },
   } = await supabase.auth.getUser();
   if (!user) redirect('/login');
+  applySentryUser(user);
   return user;
 }
 
@@ -81,6 +92,9 @@ export interface OrgAdminContext {
 export interface StakeholderContext {
   authUserId: string;
   clientId: string;
+  // DEBT-025: surfaced so the portal layout can pass it to the client-side
+  // Sentry scope. Optional — Supabase User.email is `string | undefined`.
+  email?: string;
 }
 
 // Return the calling user's active org membership, or throw.
@@ -137,6 +151,12 @@ export async function requireOrgUser(): Promise<OrgUserContext> {
   if (role !== 'owner' && role !== 'admin' && role !== 'member') {
     throw new AuthError('internal_error', `requireOrgUser: unexpected role '${chosen.role}'`);
   }
+  // DEBT-025: org + participant tags on the Sentry scope. requireAuth (called
+  // at the top of this function) has already set the user. requireOrgAdmin
+  // funnels through requireOrgUser, so the tags are set exactly once per
+  // request — no duplication from the admin call chain.
+  Sentry.setTag('org_id', chosen.org_id);
+  Sentry.setTag('participant_type', 'user');
   return {
     authUserId: authUser.id,
     userId: chosen.id,
@@ -184,5 +204,8 @@ export async function requireStakeholder(): Promise<StakeholderContext> {
   if (!data || data.length === 0) {
     throw new AuthError('not_authorized', 'no_stakeholder_identity');
   }
-  return { authUserId: authUser.id, clientId: data[0].id };
+  // DEBT-025: participant tag on the Sentry scope. requireAuth (above) set the
+  // user; stakeholders have no org at this layer, so no org_id tag here.
+  Sentry.setTag('participant_type', 'client');
+  return { authUserId: authUser.id, clientId: data[0].id, email: authUser.email };
 }
