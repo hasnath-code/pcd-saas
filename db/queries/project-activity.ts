@@ -1,8 +1,12 @@
 import 'server-only';
-import { and, desc, eq } from 'drizzle-orm';
+import { and, desc, eq, notInArray } from 'drizzle-orm';
 import { db } from '@/db';
 import { clients, projectActivity, users } from '@/db/schema';
-import type { NotificationEventType } from '@/lib/notifications/events';
+import {
+  FINANCIAL_EVENT_TYPES,
+  type NotificationEventType,
+} from '@/lib/notifications/events';
+import { hasStakeholderFinancialAccess } from '@/db/queries/documents';
 
 // Phase 1c §12.7 + Phase 9. Read-side query for the activity timeline.
 //
@@ -38,16 +42,39 @@ export async function listProjectActivity(opts: {
   projectId: string;
   /** When true, filter rows to visible_to_stakeholders=true. */
   visibleOnly: boolean;
+  /**
+   * The stakeholder caller's auth user id. When visibleOnly=true this drives
+   * the DEBT-066 financial-event read-time gate: a stakeholder without
+   * can_view_financials access has the financial event types filtered out.
+   * Absent → treated as no financial access (safe default). Ignored when
+   * visibleOnly=false (org callers see every row).
+   */
+  stakeholderAuthUserId?: string;
   limit?: number;
 }): Promise<ActivityRow[]> {
   const limit = opts.limit ?? DEFAULT_LIMIT;
 
-  const baseWhere = opts.visibleOnly
-    ? and(
-        eq(projectActivity.projectId, opts.projectId),
-        eq(projectActivity.visibleToStakeholders, true),
-      )
-    : eq(projectActivity.projectId, opts.projectId);
+  const conditions = [eq(projectActivity.projectId, opts.projectId)];
+  if (opts.visibleOnly) {
+    conditions.push(eq(projectActivity.visibleToStakeholders, true));
+    // DEBT-066: quote/invoice/payment/receipt events are logged
+    // visible_to_stakeholders=true — correct for a can_view_financials
+    // stakeholder, but a progress_only / documents_only stakeholder must not
+    // see them. The pooler bypasses RLS, so enforce the per-stakeholder
+    // financial gate here (mirrors documents.ts:hasStakeholderFinancialAccess).
+    const hasFinancialAccess = opts.stakeholderAuthUserId
+      ? await hasStakeholderFinancialAccess({
+          projectId: opts.projectId,
+          authUserId: opts.stakeholderAuthUserId,
+        })
+      : false;
+    if (!hasFinancialAccess) {
+      conditions.push(
+        notInArray(projectActivity.eventType, [...FINANCIAL_EVENT_TYPES]),
+      );
+    }
+  }
+  const baseWhere = and(...conditions);
 
   const rows = await db
     .select({

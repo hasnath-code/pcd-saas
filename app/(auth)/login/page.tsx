@@ -84,7 +84,26 @@ function LoginInner() {
                 </FormItem>
               )}
             />
-            {error && <p className="text-sm text-destructive">{error}</p>}
+            {error && (
+              <div className="space-y-1.5">
+                <p className="text-sm text-destructive">{error}</p>
+                {/* DEBT-063: a first-time invitee who picked Sign in has no
+                    account yet — surface a recovery path to Sign up, but only
+                    in the invitation flow (?invitation= present) so a plain
+                    mistyped-password sign-in isn't pushed toward signup. */}
+                {invitationToken && (
+                  <p className="text-sm text-muted-foreground">
+                    No PCD account yet?{' '}
+                    <Link
+                      href={`/signup?invitation=${encodeURIComponent(invitationToken)}`}
+                      className="font-medium text-foreground underline underline-offset-2"
+                    >
+                      Sign up →
+                    </Link>
+                  </p>
+                )}
+              </div>
+            )}
             <Button type="submit" className="w-full" disabled={isPending}>
               {isPending ? 'Signing in…' : 'Sign in'}
             </Button>

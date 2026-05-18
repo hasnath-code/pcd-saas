@@ -28,6 +28,11 @@ import {
   markConversationRead,
   removeConversationParticipant,
 } from '@/actions/conversations';
+import {
+  getConversationDetail,
+  listConversationsForOrgUser,
+  listMessagesForConversation,
+} from '@/db/queries/conversations';
 import * as auth from '@/lib/auth/requireAuth';
 
 describe('createGroupConversation', () => {
@@ -303,5 +308,167 @@ describe('markConversationRead', () => {
       conversationId: '00000000-0000-7000-8000-000000000000',
     });
     expect(result).toMatchObject({ error: 'not_found' });
+  });
+});
+
+// ─── DEBT-060/061: query-layer viewer gate ───────────────────────────────────
+// getConversationDetail + listMessagesForConversation take an explicit viewer.
+// The Drizzle pooler bypasses RLS, so these tests pin the gate at the query
+// layer: org viewers keep the transparency model (see any conversation in their
+// org, participant or not — the regression a participant-only gate would have
+// introduced); stakeholder viewers see only conversations they participate in.
+
+describe('getConversationDetail — viewer gate (DEBT-060)', () => {
+  let f: ConversationsFixture;
+  // An extra Org A conversation with NO org-user participant — proves the org
+  // transparency model: an org viewer reads it despite not participating.
+  const orphanConvId = uuidv7();
+
+  beforeAll(async () => {
+    f = await createConversationFixture();
+    await f.service.from('conversations').insert({
+      id: orphanConvId,
+      org_id: f.orgA.id,
+      type: 'general',
+      name: 'Org A — no org-user participant',
+      created_by: f.userA.userId,
+    });
+  });
+  afterAll(async () => {
+    await f.service.from('conversations').delete().eq('id', orphanConvId);
+    await f.cleanup();
+  });
+
+  test('org viewer reads an in-org conversation they do not participate in', async () => {
+    // userA is NOT a participant of orphanConvId — the transparency model still
+    // grants visibility. A participant-only gate here would 404.
+    const detail = await getConversationDetail(orphanConvId, {
+      kind: 'org',
+      orgId: f.orgA.id,
+    });
+    expect(detail).not.toBeNull();
+    expect(detail?.id).toBe(orphanConvId);
+  });
+
+  test('stakeholder viewer is gated to conversations they participate in', async () => {
+    const clientId = f.extras.orgAClient.id;
+    // orgAClient IS a participant of orgAConversation → visible.
+    const visible = await getConversationDetail(f.ext.orgAConversation.id, {
+      kind: 'stakeholder',
+      clientId,
+    });
+    expect(visible?.id).toBe(f.ext.orgAConversation.id);
+    // orgAClient is NOT a participant of orgBConversation (another org) → null,
+    // even via a direct pooler query that bypasses RLS.
+    const blocked = await getConversationDetail(f.ext.orgBConversation.id, {
+      kind: 'stakeholder',
+      clientId,
+    });
+    expect(blocked).toBeNull();
+  });
+});
+
+describe('listMessagesForConversation — viewer gate (DEBT-061)', () => {
+  let f: ConversationsFixture;
+  const orphanConvId = uuidv7();
+  const orphanMessageId = uuidv7();
+
+  beforeAll(async () => {
+    f = await createConversationFixture();
+    await f.service.from('conversations').insert({
+      id: orphanConvId,
+      org_id: f.orgA.id,
+      type: 'general',
+      name: 'Org A — no org-user participant',
+      created_by: f.userA.userId,
+    });
+    await f.service.from('messages').insert({
+      id: orphanMessageId,
+      conversation_id: orphanConvId,
+      sender_type: 'user',
+      sender_id: f.userA.userId,
+      body: 'Visible to the org via the transparency model.',
+    });
+  });
+  afterAll(async () => {
+    await f.service.from('conversations').delete().eq('id', orphanConvId);
+    await f.cleanup();
+  });
+
+  test('org viewer reads messages of an in-org conversation they do not participate in', async () => {
+    const rows = await listMessagesForConversation(orphanConvId, {
+      kind: 'org',
+      orgId: f.orgA.id,
+    });
+    expect(rows.map((r) => r.id)).toContain(orphanMessageId);
+  });
+
+  test('stakeholder viewer is gated to conversations they participate in', async () => {
+    const clientId = f.extras.orgAClient.id;
+    // Participant of orgAConversation → sees its messages.
+    const visible = await listMessagesForConversation(f.ext.orgAConversation.id, {
+      kind: 'stakeholder',
+      clientId,
+    });
+    expect(visible.map((r) => r.id)).toContain(f.ext.orgAMessage.id);
+    // Non-participant of another org's conversation → no rows.
+    const blocked = await listMessagesForConversation(f.ext.orgBConversation.id, {
+      kind: 'stakeholder',
+      clientId,
+    });
+    expect(blocked).toEqual([]);
+  });
+});
+
+// ─── listConversationsForOrgUser — unread count gate (DEBT-067) ───────────────
+// The org inbox returns every conversation in the org (transparency model) via
+// a LEFT JOIN on conversation_participants. For a conversation the caller does
+// NOT participate in, the join yields a NULL row, so the unreadCount subquery's
+// `last_read_at IS NULL` branch counted every message. The fix gates the
+// subquery on `conversation_participants.id IS NOT NULL`.
+
+describe('listConversationsForOrgUser — unread count for non-participant conversations (DEBT-067)', () => {
+  let f: ConversationsFixture;
+  // An Org A conversation userA does NOT participate in, carrying one message
+  // from another identity. Transparency returns it in userA's inbox; its
+  // unread count must be 0 because userA is not a participant.
+  const nonParticipantConvId = uuidv7();
+  const messageId = uuidv7();
+
+  beforeAll(async () => {
+    f = await createConversationFixture();
+    await f.service.from('conversations').insert({
+      id: nonParticipantConvId,
+      org_id: f.orgA.id,
+      type: 'general',
+      name: 'Org A — userA is not a participant',
+      created_by: f.userA.userId,
+    });
+    // Sender is the org-A client, not userA: a userA-sent message is excluded
+    // from the unread count regardless, so it would not exercise the bug.
+    await f.service.from('messages').insert({
+      id: messageId,
+      conversation_id: nonParticipantConvId,
+      sender_type: 'client',
+      sender_id: f.extras.orgAClient.id,
+      body: 'A message in a conversation userA never joined.',
+    });
+  });
+  afterAll(async () => {
+    await f.service.from('conversations').delete().eq('id', nonParticipantConvId);
+    await f.cleanup();
+  });
+
+  test('non-participant conversation reports unreadCount 0', async () => {
+    const items = await listConversationsForOrgUser({
+      orgId: f.orgA.id,
+      userId: f.userA.userId,
+    });
+    const row = items.find((c) => c.id === nonParticipantConvId);
+    // Transparency model: the conversation is in the org user's inbox …
+    expect(row).toBeDefined();
+    // … but userA is not a participant, so nothing in it is unread for them.
+    // Pre-fix, the LEFT JOIN's NULL last_read_at counted every message (1).
+    expect(row?.unreadCount).toBe(0);
   });
 });

@@ -23,7 +23,7 @@ import {
   restoreFile,
   softDeleteFile,
 } from '@/actions/files';
-import { listFilesForProject } from '@/db/queries/files';
+import { listDeletedFilesForProject, listFilesForProject } from '@/db/queries/files';
 import * as auth from '@/lib/auth/requireAuth';
 
 const BUCKET = 'org-files';
@@ -726,5 +726,72 @@ describe('listFilesForProject — visibleOnly filter (DEBT-059)', () => {
     const ids = rows.map((r) => r.id);
     expect(ids).toContain(visibleFileId);
     expect(ids).toContain(hiddenFileId);
+  });
+});
+
+// ─── listDeletedFilesForProject (DEBT-035) ────────────────────────────────────
+// Backs the org-admin file recycle-bin page. The inverse of
+// listFilesForProject: returns rows WHERE deleted_at IS NOT NULL. Pins that it
+// surfaces soft-deleted rows, excludes live ones, and exposes deletedAt.
+
+describe('listDeletedFilesForProject (DEBT-035)', () => {
+  let f: WorkflowProjectFixture;
+  const trackedFileIds = new Set<string>();
+  let liveFileId: string;
+  let deletedFileId: string;
+
+  beforeAll(async () => {
+    f = await createWorkflowProjectFixture();
+    liveFileId = uuidv7();
+    deletedFileId = uuidv7();
+    await f.service.from('project_files').insert([
+      {
+        id: liveFileId,
+        project_id: f.extras.orgAProject.id,
+        uploaded_by_type: 'user',
+        uploaded_by_id: f.userA.userId,
+        storage_path: `org/${f.orgA.id}/projects/${f.extras.orgAProject.id}/surveyor-uploads/${liveFileId}.pdf`,
+        original_filename: 'live.pdf',
+        mime_type: 'application/pdf',
+        size_bytes: 1024,
+        source: 'surveyor_upload',
+      },
+      {
+        id: deletedFileId,
+        project_id: f.extras.orgAProject.id,
+        uploaded_by_type: 'user',
+        uploaded_by_id: f.userA.userId,
+        storage_path: `org/${f.orgA.id}/projects/${f.extras.orgAProject.id}/surveyor-uploads/${deletedFileId}.pdf`,
+        original_filename: 'deleted.pdf',
+        mime_type: 'application/pdf',
+        size_bytes: 2048,
+        source: 'surveyor_upload',
+        deleted_at: new Date().toISOString(),
+      },
+    ]);
+    trackedFileIds.add(liveFileId);
+    trackedFileIds.add(deletedFileId);
+  });
+
+  afterAll(async () => {
+    if (trackedFileIds.size > 0) {
+      await f.service
+        .from('project_files')
+        .delete()
+        .in('id', Array.from(trackedFileIds));
+    }
+    await f.cleanup();
+  });
+
+  test('returns soft-deleted rows and excludes live rows', async () => {
+    const rows = await listDeletedFilesForProject({
+      projectId: f.extras.orgAProject.id,
+    });
+    const ids = rows.map((r) => r.id);
+    expect(ids).toContain(deletedFileId);
+    expect(ids).not.toContain(liveFileId);
+    const deleted = rows.find((r) => r.id === deletedFileId);
+    expect(deleted?.deletedAt).toBeInstanceOf(Date);
+    expect(deleted?.originalFilename).toBe('deleted.pdf');
   });
 });

@@ -18,6 +18,8 @@ import { QuotesSection } from '@/components/quotes/QuotesSection';
 import { InvoicesSection } from '@/components/invoices/InvoicesSection';
 import { PaymentsSection } from '@/components/payments/PaymentsSection';
 import { ReceiptsSection } from '@/components/receipts/ReceiptsSection';
+import { EmptyState } from '@/components/ui/empty-state';
+import { CalendarClock } from 'lucide-react';
 
 // Per-project portal view. Sections are gated on the caller's per-stakeholder
 // flag set (Phase 1b §14):
@@ -60,7 +62,7 @@ export default async function PortalProjectDetailPage({
     : [];
 
   return (
-    <main className="mx-auto max-w-4xl space-y-6 p-8">
+    <main className="mx-auto max-w-4xl space-y-6 p-4 sm:p-8">
       <div className="space-y-2">
         <p className="text-sm text-muted-foreground">
           <Link href="/portal/projects" className="hover:underline">
@@ -89,9 +91,11 @@ export default async function PortalProjectDetailPage({
           </CardHeader>
           <CardContent>
             {view.milestones.length === 0 ? (
-              <p className="text-sm text-muted-foreground">
-                No milestones recorded yet.
-              </p>
+              <EmptyState
+                icon={CalendarClock}
+                title="No milestones yet"
+                description="Milestones the team schedules for this project appear here."
+              />
             ) : (
               <ul className="space-y-2 text-sm">
                 {view.milestones.map((m) => (
@@ -181,7 +185,11 @@ export default async function PortalProjectDetailPage({
         </>
       )}
 
-      <ActivityTimeline projectId={projectId} viewer="stakeholder" />
+      <ActivityTimeline
+        projectId={projectId}
+        viewer="stakeholder"
+        stakeholderAuthUserId={ctx.authUserId}
+      />
     </main>
   );
 }

@@ -1,12 +1,8 @@
 import Link from 'next/link';
 import { Badge } from '@/components/ui/badge';
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from '@/components/ui/card';
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { MessagesSquare } from 'lucide-react';
+import { EmptyState } from '@/components/ui/empty-state';
 import { cn } from '@/lib/utils';
 import type { ConversationListItem } from '@/db/queries/conversations';
 import { deriveTitle } from './deriveTitle';
@@ -50,12 +46,11 @@ export function ConversationsInbox({
 }) {
   if (conversations.length === 0) {
     return (
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base">Inbox</CardTitle>
-          <CardDescription>{emptyMessage}</CardDescription>
-        </CardHeader>
-      </Card>
+      <EmptyState
+        icon={MessagesSquare}
+        title="No conversations yet"
+        description={emptyMessage}
+      />
     );
   }
 

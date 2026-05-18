@@ -23,7 +23,7 @@ export default async function PortalConversationsPage() {
   const callerName = callerRows[0]?.name ?? 'You';
 
   return (
-    <main className="mx-auto max-w-5xl px-8 py-8">
+    <main className="mx-auto max-w-5xl px-4 py-8 sm:px-8">
       <div className="mb-6">
         <h1 className="font-heading text-2xl">Conversations</h1>
         <p className="text-sm text-muted-foreground">
@@ -35,7 +35,7 @@ export default async function PortalConversationsPage() {
         basePath="/portal/conversations"
         conversations={conversations}
         callerName={callerName}
-        emptyMessage="No conversations yet. They appear automatically when you accept a project invitation."
+        emptyMessage="Threads appear here automatically when you accept a project invitation."
       />
     </main>
   );

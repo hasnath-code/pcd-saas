@@ -56,7 +56,7 @@ export default async function ConversationsInboxPage() {
         basePath="/conversations"
         conversations={conversations}
         callerName={callerName}
-        emptyMessage="No conversations yet. New direct and general threads appear automatically when stakeholders accept invitations."
+        emptyMessage="Direct and general threads appear automatically when stakeholders accept invitations."
       />
     </main>
   );

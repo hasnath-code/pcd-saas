@@ -1,5 +1,5 @@
 import 'server-only';
-import { and, desc, eq, isNull, ne } from 'drizzle-orm';
+import { and, desc, eq, isNotNull, isNull, ne } from 'drizzle-orm';
 import { db } from '@/db';
 import { clients, projectFiles, projects, users } from '@/db/schema';
 
@@ -133,6 +133,82 @@ export async function listFilesForProject(opts: {
     visibility: r.visibility as ProjectFileVisibility,
     thumbnailPath: r.thumbnailPath,
     createdAt: r.createdAt,
+  }));
+}
+
+export type DeletedProjectFileRow = ProjectFileRow & { deletedAt: Date };
+
+// List soft-deleted files for a project, most-recently-deleted first — the
+// inverse of listFilesForProject. Feeds the org-admin recycle-bin page
+// (DEBT-035: /dashboard/projects/[id]/files/recycle). There is no
+// `visibleOnly` flag: the recycle bin is an org-admin-only surface and org
+// members are entitled to both visibility classes (mirrors the
+// visibleOnly:false branch of listFilesForProject). `document_artifact` rows
+// are excluded for the same reason as listFilesForProject — generated PDFs
+// aren't drawings/files in the user-facing sense and have their own
+// lifecycle, so they don't belong in a file recycle bin.
+export async function listDeletedFilesForProject(opts: {
+  projectId: string;
+}): Promise<DeletedProjectFileRow[]> {
+  const rows = await db
+    .select({
+      id: projectFiles.id,
+      projectId: projectFiles.projectId,
+      uploadedByType: projectFiles.uploadedByType,
+      uploadedById: projectFiles.uploadedById,
+      storagePath: projectFiles.storagePath,
+      originalFilename: projectFiles.originalFilename,
+      mimeType: projectFiles.mimeType,
+      sizeBytes: projectFiles.sizeBytes,
+      source: projectFiles.source,
+      visibility: projectFiles.visibility,
+      thumbnailPath: projectFiles.thumbnailPath,
+      createdAt: projectFiles.createdAt,
+      deletedAt: projectFiles.deletedAt,
+      userName: users.name,
+      clientName: clients.name,
+    })
+    .from(projectFiles)
+    .leftJoin(
+      users,
+      and(eq(users.id, projectFiles.uploadedById), eq(projectFiles.uploadedByType, 'user')),
+    )
+    .leftJoin(
+      clients,
+      and(
+        eq(clients.id, projectFiles.uploadedById),
+        eq(projectFiles.uploadedByType, 'client'),
+      ),
+    )
+    .where(
+      and(
+        eq(projectFiles.projectId, opts.projectId),
+        ne(projectFiles.source, 'document_artifact'),
+        isNotNull(projectFiles.deletedAt),
+      ),
+    )
+    .orderBy(desc(projectFiles.deletedAt));
+
+  return rows.map((r) => ({
+    id: r.id,
+    projectId: r.projectId,
+    uploadedByType: r.uploadedByType as ProjectFileRow['uploadedByType'],
+    uploadedById: r.uploadedById,
+    uploaderDisplayName:
+      r.uploadedByType === 'user'
+        ? r.userName ?? 'Team member'
+        : r.clientName ?? 'Stakeholder',
+    storagePath: r.storagePath,
+    originalFilename: r.originalFilename,
+    mimeType: r.mimeType,
+    sizeBytes: Number(r.sizeBytes),
+    source: r.source as ProjectFileSource,
+    visibility: r.visibility as ProjectFileVisibility,
+    thumbnailPath: r.thumbnailPath,
+    createdAt: r.createdAt,
+    // Non-null by the isNotNull(deletedAt) filter above; Drizzle types the
+    // nullable column as Date | null, so assert here.
+    deletedAt: r.deletedAt!,
   }));
 }
 

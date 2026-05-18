@@ -1,5 +1,7 @@
 import Link from 'next/link';
 import { listQuotesForProject } from '@/db/queries/documents';
+import { FileText } from 'lucide-react';
+import { EmptyState } from '@/components/ui/empty-state';
 import {
   Card,
   CardContent,
@@ -84,11 +86,15 @@ export async function QuotesSection({
       </CardHeader>
       <CardContent>
         {quotes.length === 0 ? (
-          <p className="text-sm text-muted-foreground">
-            {viewer === 'org'
-              ? 'No quotes yet. Create one to send the client a token-gated public link.'
-              : 'No quotes to show yet.'}
-          </p>
+          <EmptyState
+            icon={FileText}
+            title="No quotes yet"
+            description={
+              viewer === 'org'
+                ? 'Quotes you create are sent to the client as a token-gated public link.'
+                : 'Quotes shared with you will appear here.'
+            }
+          />
         ) : (
           <Table>
             <TableHeader>

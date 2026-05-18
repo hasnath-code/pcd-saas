@@ -1,5 +1,5 @@
 import 'server-only';
-import { and, eq, inArray, isNull, sql } from 'drizzle-orm';
+import { and, eq, exists, inArray, isNull, sql } from 'drizzle-orm';
 import { db } from '@/db';
 import {
   clientOrgMemberships,
@@ -79,9 +79,15 @@ export async function listConversationsForOrgUser(opts: {
         ORDER BY ${messages.createdAt} DESC
         LIMIT 1
       )`,
+      // DEBT-067: gate the count on participation. The LEFT JOIN above
+      // yields a NULL conversation_participants row for conversations the
+      // caller doesn't participate in (the transparency model returns them
+      // anyway); without this gate the `last_read_at IS NULL` branch below
+      // would count every message in those conversations.
       unreadCount: sql<number>`(
         SELECT COUNT(*)::int FROM ${messages}
         WHERE ${messages.conversationId} = ${conversations.id}
+          AND ${conversationParticipants.id} IS NOT NULL
           AND (${conversationParticipants.lastReadAt} IS NULL OR ${messages.createdAt} > ${conversationParticipants.lastReadAt})
           AND NOT (${messages.senderType} = 'user' AND ${messages.senderId} = ${opts.userId})
           AND ${messages.deletedAt} IS NULL
@@ -344,11 +350,40 @@ export type ConversationDetail = {
   participants: ConversationParticipant[];
 };
 
+// DEBT-060/061: conversation detail + message queries take an explicit viewer.
+// The Drizzle pooler bypasses RLS, so visibility is enforced here in the WHERE
+// rather than relying on caller-side checks. Org viewers see every conversation
+// in their org (transparency model); stakeholder viewers see only conversations
+// they actively participate in.
+export type ConversationViewer =
+  | { kind: 'org'; orgId: string }
+  | { kind: 'stakeholder'; clientId: string };
+
+// EXISTS predicate: `clientId` is an active (non-left) 'client' participant of
+// the conversation. Non-correlated — keyed on the scalar conversationId — so it
+// drops into either the conversations or the messages WHERE clause unchanged.
+function stakeholderParticipates(conversationId: string, clientId: string) {
+  return exists(
+    db
+      .select()
+      .from(conversationParticipants)
+      .where(
+        and(
+          eq(conversationParticipants.conversationId, conversationId),
+          eq(conversationParticipants.participantType, 'client'),
+          eq(conversationParticipants.participantId, clientId),
+          isNull(conversationParticipants.leftAt),
+        ),
+      ),
+  );
+}
+
 // Detail fetch for a single conversation. Includes participant list with
-// resolved display names. Caller must verify visibility — this query doesn't
-// scope by user/client (the page-level guards do).
+// resolved display names. The `viewer` gate (DEBT-060) scopes the row at the
+// query layer — a conversation the viewer can't see resolves to null.
 export async function getConversationDetail(
   conversationId: string,
+  viewer: ConversationViewer,
 ): Promise<ConversationDetail | null> {
   const convRows = await db
     .select({
@@ -365,7 +400,13 @@ export async function getConversationDetail(
     .from(conversations)
     .leftJoin(projects, eq(projects.id, conversations.projectId))
     .where(
-      and(eq(conversations.id, conversationId), isNull(conversations.deletedAt)),
+      and(
+        eq(conversations.id, conversationId),
+        isNull(conversations.deletedAt),
+        viewer.kind === 'org'
+          ? eq(conversations.orgId, viewer.orgId)
+          : stakeholderParticipates(conversationId, viewer.clientId),
+      ),
     )
     .limit(1);
   if (convRows.length === 0) return null;
@@ -440,9 +481,11 @@ export type MessageRow = {
 
 // Initial server-side message fetch (the realtime hook does the same query
 // client-side then patches via subscription). Body-blanked '[deleted]'
-// projection lives here too.
+// projection lives here too. The `viewer` gate (DEBT-061) scopes the result at
+// the query layer — a viewer who can't see the conversation gets [].
 export async function listMessagesForConversation(
   conversationId: string,
+  viewer: ConversationViewer,
   opts?: { limit?: number },
 ): Promise<MessageRow[]> {
   const rows = await db
@@ -467,7 +510,25 @@ export async function listMessagesForConversation(
       clients,
       and(eq(clients.id, messages.senderId), eq(messages.senderType, 'client')),
     )
-    .where(eq(messages.conversationId, conversationId))
+    .where(
+      and(
+        eq(messages.conversationId, conversationId),
+        viewer.kind === 'org'
+          ? exists(
+              db
+                .select()
+                .from(conversations)
+                .where(
+                  and(
+                    eq(conversations.id, conversationId),
+                    eq(conversations.orgId, viewer.orgId),
+                    isNull(conversations.deletedAt),
+                  ),
+                ),
+            )
+          : stakeholderParticipates(conversationId, viewer.clientId),
+      ),
+    )
     .orderBy(messages.createdAt)
     .limit(opts?.limit ?? 200);
 

@@ -19,6 +19,8 @@ import {
 } from '@/components/ui/table';
 import { Button } from '@/components/ui/button';
 import { ProjectStageBadge } from '@/components/projects/ProjectStageBadge';
+import { EmptyState } from '@/components/ui/empty-state';
+import { FolderOpen } from 'lucide-react';
 
 export default async function PortalProjectsListPage() {
   let ctx;
@@ -32,7 +34,7 @@ export default async function PortalProjectsListPage() {
   const list = await listProjectsForStakeholder(ctx.authUserId);
 
   return (
-    <main className="mx-auto max-w-5xl space-y-6 p-8">
+    <main className="mx-auto max-w-5xl space-y-6 p-4 sm:p-8">
       <div>
         <h1 className="text-3xl font-semibold">My projects</h1>
         <p className="text-sm text-muted-foreground">
@@ -41,15 +43,11 @@ export default async function PortalProjectsListPage() {
       </div>
 
       {list.length === 0 ? (
-        <Card>
-          <CardHeader>
-            <CardTitle>No projects yet</CardTitle>
-            <CardDescription>
-              When a project team adds you as a stakeholder, the project will
-              show up here.
-            </CardDescription>
-          </CardHeader>
-        </Card>
+        <EmptyState
+          icon={FolderOpen}
+          title="No projects yet"
+          description="When a firm adds you to a project, it'll appear here."
+        />
       ) : (
         <Card>
           <CardContent className="p-0">

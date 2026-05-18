@@ -57,7 +57,7 @@ export default async function PublicQuotePage({
     if (rl.limited) {
       // Mimic 429 surface — render a plain message; no token leakage.
       return (
-        <main className="mx-auto max-w-md p-8">
+        <main className="mx-auto max-w-md p-4 sm:p-8">
           <Card>
             <CardHeader>
               <CardTitle className="text-base">Too many requests</CardTitle>
@@ -87,7 +87,7 @@ export default async function PublicQuotePage({
   const accepted = doc.acceptedAt !== null;
 
   return (
-    <main className="mx-auto max-w-2xl space-y-6 p-8">
+    <main className="mx-auto max-w-2xl space-y-6 p-4 sm:p-8">
       <div className="space-y-1">
         <p className="text-sm uppercase tracking-wide text-muted-foreground">
           {orgName}

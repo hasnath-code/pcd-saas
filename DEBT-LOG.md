@@ -50,12 +50,140 @@
 
 # Open Debt
 
+## DEBT-072 — Sub-44px touch targets on the portal conversation thread
+**Added:** 18 May 2026 by Polish Sprint S1 Phase F walk
+**Codebase:** SaaS
+**Severity:** Low
+**Type:** UX
+**Status:** Open
+
+**The debt:** On `/portal/conversations/[id]` two interactive elements have touch targets below the 44×44px minimum recommended by WCAG 2.5.5 (Level AAA) and the Apple Human Interface Guidelines: the "← All conversations" back link has a ~99×14px hit area (height far too small), and the message Send button is ~36×36px (both dimensions short). Both register taps and are functional today, but on a phone they invite easier-than-necessary mis-taps.
+
+**Why it exists:** The portal conversation thread was built desktop-first with default control sizing; touch-target dimensions were never audited against the mobile guidance. The S1 mobile sweep checked for layout overflow, not tap-target size.
+
+**Cost of leaving it:** Mild mobile friction on a touch-heavy surface (stakeholders skew mobile). Accessibility-grade, not blocker-grade — nothing is unusable, mis-taps are just likelier than they should be. No data risk.
+
+**Fix sketch:** Pad the back link to a ≥44px-tall hit area and grow the Send button to ≥44×44px (or add an invisible touch-target expansion). Small CSS change once approved. Best handled as part of a broader portal touch-target pass — a fuller WCAG 2.5.5 sweep of `/portal/*` would catch siblings (other icon-only buttons, compact links).
+
+**Trigger:** Pre-launch UX polish sprint — S3 buffer, OR a full WCAG audit pass.
+
+**Cross-references:** `app/portal/conversations/[conversationId]/page.tsx` + the conversation thread components (back link, `MessageComposer` Send button); surfaced during Polish Sprint S1 Phase F walk; DEBT-068 (sibling mobile-UX finding from the same sprint).
+
+---
+
+## DEBT-071 — `&amp;` HTML entity rendered literally in "Drawings & files" helper text
+**Added:** 18 May 2026 by Polish Sprint S1 Phase F walk
+**Codebase:** SaaS
+**Severity:** Low
+**Type:** UX
+**Status:** Open
+
+**The debt:** On `/portal/projects/[id]`, the helper sentence under the "Drawings & files" card heading renders as "Files shared on this project. Drag &amp; drop to upload." — the literal five characters `&amp;` instead of `&`. The card heading itself ("Drawings & files") renders correctly; only the description is wrong.
+
+**Why it exists:** In `app/portal/projects/[projectId]/page.tsx` the heading is JSX text content (`Drawings &amp; files` between tags) — JSX decodes the HTML entity there. The description is a JavaScript string literal passed through `{...}` (`'… Drag &amp; drop to upload.'`); JSX does not decode HTML entities inside string expressions, so the raw `&amp;` reaches the DOM as text. A copy-paste of the entity-encoded heading form into the string literal.
+
+**Cost of leaving it:** Purely cosmetic — one stray `&amp;` in one helper sentence on the portal project page. No data risk, no functional impact. Looks unpolished to a stakeholder reading closely.
+
+**Fix sketch:** In `app/portal/projects/[projectId]/page.tsx`, change the `'… Drag &amp; drop to upload.'` string literal to a plain `&` (`'… Drag & drop to upload.'`). 1 LOC. While there, grep portal/public string literals for other `&amp;` / `&lt;` / `&gt;` entities mistakenly placed inside JS strings.
+
+**Trigger:** Pre-launch UX polish sprint — S3 buffer.
+
+**Cross-references:** `app/portal/projects/[projectId]/page.tsx` (the "Drawings & files" CardDescription); surfaced during Polish Sprint S1 Phase F walk.
+
+---
+
+## DEBT-070 — Error toasts surface raw server-action error codes
+**Added:** 16 May 2026 by Polish Sprint S1 Phase D (D4 copy-pass audit)
+**Codebase:** SaaS
+**Severity:** Low
+**Type:** UX
+**Status:** Open
+
+**The debt:** The majority of `toast.error(...)` call sites — roughly 30 across ~25 client components — interpolate the raw server-action failure value (`result.reason ?? result.error`) straight into customer-visible copy. `result.error` is a `ServerActionErrorCode` (`not_authorized`, `validation_error`, `not_found`, `conflict`, …); `result.reason` is an internal slug (`org_admin_required`, `no_project_access`, `stakeholder_lacks_can_view_drawings`, …). A user who hits a failure sees, e.g., "Couldn't restore report.pdf: org_admin_required" — a developer string, not a sentence. Affected sites span quotes, invoices, payments, conversations, workflows, files, settings, team, and notifications (`SendQuoteButton`, `RecordPaymentDialog`, `MessageComposer`, `ProjectCreateForm`, `InboxList`, `FileRow`, `RestoreFileButton`, the three settings forms, …).
+
+**Why it exists:** The `toast.error` pattern grew per-component as each feature shipped; no canonical error-code→message map ever existed, so every call site fell back to interpolating whatever the action returned. The right pattern *does* already exist in the codebase but was never generalised: `components/stakeholders/RemoveStakeholderButton.tsx` keeps a local `ERROR_TOAST` lookup table, and `components/team/RemoveMemberDialog.tsx` + `CancelInvitationButton.tsx` resolve a `friendly` string before calling `toast.error`. Three sites do it right; the other ~30 leak codes.
+
+**Cost of leaving it:** Mild user-facing friction — on any action failure the user sees a code instead of guidance and can't always tell whether they made a mistake, lack permission, or hit a bug. No data risk: the toast still fires and the action still fails safely. Same severity tier as DEBT-068 — cosmetic-leaning UX, not a break.
+
+**Fix sketch:** Promote the `RemoveStakeholderButton` `ERROR_TOAST` approach to a canonical, shared `ServerActionErrorCode → user-facing message` map and route every `toast.error` site through it, keeping the raw code only as a last-resort fallback. `ARCHITECTURE-saas.md §13` (Server Actions) is the natural home for the canonical map, beside the `ServerActionErrorCode` definition. Deferred from S1 rather than folded into the D4 copy pass for three reasons: (i) it is map-design work — the user must approve, code by code, which message each one shows — which is outside the S1 copy-pass scope; (ii) it touches every client component with a `toast.error` call, well beyond the analogue of the S1 sweep's 10-line-per-surface budget for a code change; (iii) it sits in the same severity tier as DEBT-068 (mild user-facing friction, no data risk), so deferring it to the same trigger is consistent.
+
+**Trigger:** Pre-launch UX polish sprint — S3 buffer (same trigger as DEBT-068).
+
+**Cross-references:** Polish Sprint S1 Phase D — D4 copy pass (`16c71e3`; the copy-pass audit surfaced this); `components/stakeholders/RemoveStakeholderButton.tsx` (`ERROR_TOAST` — the partial pattern to generalise); `components/team/RemoveMemberDialog.tsx` + `components/team/CancelInvitationButton.tsx` (`friendly`-string siblings); `lib/auth/requireAuth.ts` (`ServerActionErrorCode` definition); ARCHITECTURE-saas.md §13 (Server Actions — proposed home of the canonical map); DEBT-068 (same severity tier and trigger).
+
+---
+
+## DEBT-069 — `revalidatePath` literal `/projects/[id]` misses the org project route on file actions
+**Added:** 16 May 2026 by Polish Sprint S1 Phase D (surfaced during DEBT-035 recycle-bin work)
+**Codebase:** SaaS
+**Severity:** Low
+**Type:** Bug
+**Status:** Open
+
+**The debt:** Three write actions in `actions/files.ts` — `confirmUpload`, `softDeleteFile`, and `restoreFile` — call `revalidatePath` with a `` `/projects/${id}` `` template literal to refresh the org-side project detail page after a file write. No route is mounted at `/projects/[id]`: the org project detail page lives at `/dashboard/projects/[projectId]` (the `(org)` route group prepends the `/dashboard` segment). The org-side call is therefore a silent no-op. Each action *also* calls `revalidatePath` with the correct `` `/portal/projects/${id}` ``, so the portal side refreshes fine — only the org-side literal is wrong.
+
+**Why it exists:** The literal predates — or was copied without re-checking against — the `(org)` route group's `/dashboard` prefix. The adjacent, correct `/portal/projects/...` literal masks it: a casual read sees a matched org/portal pair. It surfaced while building the DEBT-035 recycle-bin page, which revalidates the same org route correctly and exposed the mismatch by contrast.
+
+**Cost of leaving it:** After an org user uploads, soft-deletes, or restores a file, the Files card on `/dashboard/projects/[id]` can render a stale list until the next navigation or an unrelated revalidation. Org-side only; brief staleness; no data risk — RLS and file visibility are unaffected, only a cached render lags. Low because the file surfaces are not yet high-traffic and any navigation clears it.
+
+**Fix sketch:** Change the three `` `/projects/${id}` `` literals to `` `/dashboard/projects/${id}` ``. ~3 LOC. While there, grep the rest of `actions/` for the same bare `/projects/[id]` literal. `revalidatePath` is mocked in `tests/actions/files.test.ts`, so no test asserts the revalidated path today — a follow-up could, but that is out of S1 scope.
+
+**Trigger:** Pre-launch UX polish sprint — S3 buffer, or the next surface that revisits the `actions/files.ts` write actions.
+
+**Cross-references:** `actions/files.ts` — `confirmUpload`, `softDeleteFile`, `restoreFile` (the `revalidatePath('/projects/[id]')` calls); DEBT-035 (file recycle-bin UI — Polish Sprint S1 Phase D; surfaced this while wiring the same org route); ARCHITECTURE-saas.md §35.14 Phase F Fix 1 (the dynamic-segment `revalidatePath` rule).
+
+---
+
+## DEBT-068 — Notification preferences matrix is a wide table on mobile
+**Added:** 16 May 2026 by Polish Sprint S1 Phase C (mobile responsive sweep)
+**Codebase:** SaaS
+**Severity:** Low
+**Type:** UX
+**Status:** Open
+
+**The debt:** `components/notifications/NotificationPreferencesMatrix.tsx` renders a 20-row × 5-column `<table>` (an Event column plus the four channel columns) inside an `overflow-x-auto` wrapper. It is functional on mobile — the wrapper scrolls — but at 375px the table is wider than the viewport, so a stakeholder on `/portal/settings/notifications` must scroll horizontally and loses sight of the event-name column when reaching the Push / SMS columns.
+
+**Why it exists:** The matrix is a desktop-first layout — a grid of checkboxes is the natural shape for a per-event × per-channel preference set. The S1 mobile-sweep 10-line CSS/JSX budget doesn't cover a proper mobile treatment, so the surface was flagged rather than redesigned.
+
+**Cost of leaving it:** Mild friction for mobile stakeholders editing notification preferences — a low-frequency action (set once, rarely revisited). Not a break: the matrix works, it just scrolls horizontally. No data risk.
+
+**Fix sketch:** Add a mobile layout below the `sm` breakpoint — render one card per event with the channel toggles stacked (label + checkbox rows), keeping the table at `sm` and up. Alternatively a sticky first column so the event name stays visible while scrolling the channel columns. ~30-60 LOC plus a responsive-variant branch — beyond the S1 sweep's 10-line budget.
+
+**Trigger:** Post-launch UX polish, OR a mobile stakeholder reports difficulty editing preferences.
+
+**Cross-references:** `components/notifications/NotificationPreferencesMatrix.tsx`; surfaced during Polish Sprint S1 Phase C mobile sweep (`/portal/settings/notifications`).
+
+---
+
+## DEBT-067 — Org conversation inbox inflates unread count for non-participant conversations
+**Added:** 16 May 2026 by Polish Sprint S1 Phase A (DEBT-055 diagnostic)
+**Codebase:** SaaS
+**Severity:** Low
+**Type:** Bug
+**Status:** Resolved (18 May 2026 — Polish Sprint S1 Phase D)
+
+**The debt:** `db/queries/conversations.ts:listConversationsForOrgUser` returns every conversation in the org (the org-transparency model) and `LEFT JOIN`s `conversation_participants` on the caller's `users.id`. For conversations the caller is not a participant of, the join yields no row, so the per-row `unreadCount` subquery's `(conversationParticipants.lastReadAt IS NULL OR messages.createdAt > conversationParticipants.lastReadAt)` clause is satisfied by every message — the org `/conversations` inbox renders an inflated unread badge (capped `99+`) and bold styling on conversations the user never joined.
+
+**Why it exists:** The `unreadCount` subquery conflates two distinct NULL cases for the left-joined `last_read_at`: (a) a genuine participant who has never read the thread (correct — all messages unread), and (b) a non-participant with no join row at all (should be 0 unread). The org-transparency model — the query intentionally returns conversations the caller isn't in — makes case (b) reachable. Surfaced during the DEBT-055 diagnostic: DEBT-055 attributed the Phase F discrepancy to the nav-badge query `totalUnreadForOrgUser`, which is in fact correct (strictly participant-scoped).
+
+**Cost of leaving it:** The in-house team sees wrong unread numbers on the org `/conversations` inbox; the error grows as the org's conversation count grows. Org-side only — `listConversationsForStakeholder` is participant-scoped from the start (`WHERE conversations.id IN (myConvIds)`) and is unaffected, so there is no stakeholder-facing impact. Not a data leak — RLS and visibility are unaffected; only a displayed count is wrong.
+
+**Fix sketch:** In the `unreadCount` subquery within `listConversationsForOrgUser`, gate on participation — add `AND conversationParticipants.id IS NOT NULL` so non-participant conversations report 0 unread (no badge). ~2 LOC + 1 regression test (a non-participant org conversation returns `unreadCount: 0`). `totalUnreadForOrgUser`, `totalUnreadForStakeholder`, and `listConversationsForStakeholder` need no change.
+
+**Trigger:** Pre-launch UX polish sprint — S1 Phase A surfaced it; scheduled for S1 Phase D (should-if-time), else S3 buffer.
+
+**Cross-references:** `db/queries/conversations.ts:listConversationsForOrgUser` (the `unreadCount` subquery + the `conversation_participants` LEFT JOIN); `components/conversations/ConversationsInbox.tsx` (renders the inflated badge); DEBT-055 (mis-attributed sibling — the nav-badge query `totalUnreadForOrgUser` is correct; DEBT-055's own untested hypothesis is `markConversationRead` revalidation scope, which remains an S3 follow-up).
+
+**Resolution:** Fixed in Polish Sprint S1 Phase D (commit `5bd86cf`). The `unreadCount` subquery in `listConversationsForOrgUser` now ANDs `conversation_participants.id IS NOT NULL`, so a conversation the caller does not participate in reports 0 unread instead of counting every message. A regression test was added to `tests/actions/conversations.test.ts` and verified failing against the pre-fix query first (`expected 1 to be 0`); `totalUnreadForOrgUser` / `totalUnreadForStakeholder` / `listConversationsForStakeholder` were confirmed correct and left unchanged. Org-side only — not re-walked in the portal-focused Phase F; the regression test is the gate.
+
+---
+
 ## DEBT-066 — Activity timeline leaks financial event text to non-financial stakeholders
 **Added:** 15 May 2026 by Phase 2 Session 14 Phase F walk
 **Codebase:** SaaS
 **Severity:** Medium
 **Type:** Stakeholder data-visibility leak (mild)
-**Status:** Open
+**Status:** Resolved (18 May 2026 — Polish Sprint S1 Phase B)
 
 **The debt:** When a stakeholder has `can_view_financials = false`, the financial section cards (Quotes / Invoices / Payments / Receipts) are correctly removed from the DOM on `/portal/projects/[id]`, but the Activity Timeline on the same page still surfaces strings like "received £400.00, R1" / "invoice / quote / payment / receipt issued". Activity rows for `payment.recorded`, `quote.sent`, `quote.accepted`, `invoice.sent`, `invoice.revised`, `receipt.generated` are written with `visibleToStakeholders: true` because they're part of the project narrative for *financial* stakeholders, but the per-stakeholder financial flag is not consulted at timeline-render time.
 
@@ -68,6 +196,8 @@
 **Trigger:** Before the pre-launch UX polish sprint, OR when a customer notices.
 
 **Cross-references:** ARCHITECTURE-saas.md §14 (visibility model), §12.7 (project_activity), §12.P2.9 (Session 14 portal financial visibility — this DEBT is the read-time complement of the section-rendering gate); `db/queries/project-activity.ts:listProjectActivity`; `lib/activity/log.ts:logActivityTx`; recordPayment / sendQuote / acceptQuote / sendInvoice / reviseInvoice activity-row writes.
+
+**Resolution:** Fixed in Polish Sprint S1 Phase B (commit `a9fd82e`). Added `FINANCIAL_EVENT_TYPES` (the 8 financial events) to `lib/notifications/events.ts`; `db/queries/project-activity.ts:listProjectActivity` gained an optional `stakeholderAuthUserId` and, when `visibleOnly` is set, calls `hasStakeholderFinancialAccess` and `notInArray`-filters the financial event types for stakeholders without financial access. `ActivityTimeline` threads the new prop; the org view is unaffected (`viewer="org"` → no filter). +2 tests in the new `tests/actions/project-activity.test.ts` (positive: financial-access stakeholder sees financial rows; negative: `progress_only` sees none but still sees non-financial rows). Phase F walk on the Vercel preview (project P-2026-111, two stakeholders): the `progress_only` stakeholder's activity timeline showed zero rows for the 8 financial event types while the full-access stakeholder saw them — the sprint's load-bearing correctness gate, confirmed green.
 
 ---
 
@@ -118,7 +248,7 @@
 **Codebase:** SaaS
 **Severity:** Medium
 **Type:** UX
-**Status:** Open
+**Status:** Resolved (18 May 2026 — Polish Sprint S1 Phase C)
 
 **The debt:** The invitation landing page presents Sign up / Sign in / "Accept invitation" affordances with no guidance for brand-new invitees. A first-time invited stakeholder (their `clients` row exists from `inviteStakeholder`'s tx, but no `auth.users` row yet) who instinctively clicks "Sign in" hits "Invalid login credentials" with no redirect to Sign up. The natural recovery path (try the other option) is not surfaced.
 
@@ -131,6 +261,8 @@
 **Trigger:** Pre-launch — a first stakeholder confusion report would surface this as urgent.
 
 **Cross-references:** invitation landing page component (TBD during fix); DEBT-R008 (same flow, post-signup copy clarity); DEBT-R015 (DEBT-038 verification walk surfaced this observation)
+
+**Resolution:** Fixed in Polish Sprint S1 Phase C (commit `7a3c53e`). `app/invitations/[token]/page.tsx` now presents Sign up as a primary full-width button ("new to PCD" framing) with Sign in demoted to a secondary text link, branched on invitation type so team-member invites keep their own framing (no "collaborator" wording). `app/(auth)/login/page.tsx` renders a conditional "no account yet — Sign up" recovery link, shown only when an `?invitation=` token is present and a sign-in attempt has just failed — no `auth.users` probing. `.tsx`-only; browser-QA'd, no unit test. Phase F walk: confirmed during a fresh invitation acceptance from a never-seen email — Sign up primary, Sign in secondary.
 
 ---
 
@@ -160,7 +292,7 @@
 **Codebase:** SaaS
 **Severity:** Medium
 **Type:** Bug / Security (defense-in-depth)
-**Status:** Open
+**Status:** Resolved (18 May 2026 — Polish Sprint S1 Phase B)
 
 **The debt:** `db/queries/conversations.ts:listMessagesForConversation` scopes only by `conversationId`. The Drizzle pooler `db` bypasses RLS so the `messages` SELECT policy doesn't apply. Stakeholder portal pages (`app/portal/conversations/[conversationId]/page.tsx`) re-enforce participation via a separate query before calling (line 33–45 → `notFound()` on mismatch), so the SQL layer fetches arbitrary rows but they're never user-surfaced. Same shape as DEBT-060.
 
@@ -174,6 +306,8 @@
 
 **Cross-references:** `db/queries/conversations.ts:listMessagesForConversation`; `app/portal/conversations/[conversationId]/page.tsx:33-47` (caller-side participation check); DEBT-060 (sibling); DEBT-R006 (DEBT-059 fix as pattern reference); ARCHITECTURE-saas.md §12.3 (`messages`)
 
+**Resolution:** Fixed in Polish Sprint S1 Phase B (commit `c6de22f`), bundled with DEBT-060. `listMessagesForConversation` now takes the same required `viewer: ConversationViewer` and ANDs it into the WHERE — org viewers via an EXISTS on `conversations` scoped to `orgId`, stakeholder viewers via the shared `stakeholderParticipates` EXISTS on `conversation_participants` (`left_at IS NULL`). The caller-side participation block in the portal page was removed once the query gate was verified. Covered by the +4 DEBT-060/061 tests in `tests/actions/conversations.test.ts`. See DEBT-060's resolution for the shared design rationale (discriminated-union viewer over the literal `participant` shape).
+
 ---
 
 ## DEBT-060 — `getConversationDetail` pooler-bypass: caller-enforced participation gate (no query-level filter)
@@ -181,7 +315,7 @@
 **Codebase:** SaaS
 **Severity:** Medium
 **Type:** Bug / Security (defense-in-depth)
-**Status:** Open
+**Status:** Resolved (18 May 2026 — Polish Sprint S1 Phase B)
 
 **The debt:** `db/queries/conversations.ts:getConversationDetail` scopes only by `conversationId` and `deletedAt IS NULL`. The Drizzle pooler `db` bypasses RLS so the `conversations` SELECT policy doesn't apply. Stakeholder portal pages (`app/portal/conversations/[conversationId]/page.tsx:29`) call this query BEFORE the participation check at lines 33–45, so the SQL fetches arbitrary conversation metadata; rendering is gated by `notFound()` afterwards. Caller-enforced gate, not query-level — defense-in-depth gap.
 
@@ -194,6 +328,8 @@
 **Trigger:** Pre-launch operational pass OR a future change that touches portal conversation rendering.
 
 **Cross-references:** `db/queries/conversations.ts:getConversationDetail`; `app/portal/conversations/[conversationId]/page.tsx:29-45` (call site + caller-side check); DEBT-061 (sibling); DEBT-R006 (DEBT-059 fix as the canonical visibility-column variant of this pattern); ARCHITECTURE-saas.md §12.1 (`conversations`)
+
+**Resolution:** Fixed in Polish Sprint S1 Phase B (commit `c6de22f`), bundled with DEBT-061. `getConversationDetail` now takes a required `viewer: ConversationViewer` discriminated union (`{kind:'org';orgId}` | `{kind:'stakeholder';clientId}`) — chosen over the fix sketch's literal `participant` shape, which would have regressed the org-wide conversation-transparency model. The viewer is ANDed into the WHERE: org viewers match `conversations.orgId`; stakeholder viewers match an EXISTS subquery on `conversation_participants` (`participant_type='client'`, `left_at IS NULL`). Both callers (`app/(org)/conversations/[conversationId]/page.tsx`, `app/portal/conversations/[conversationId]/page.tsx`) pass the viewer; the now-redundant caller-side participation/org checks were removed after confirming the SQL gate. +4 tests across the DEBT-060/061 pair in `tests/actions/conversations.test.ts` (org viewer reads a non-participated in-org conversation — transparency preserved; stakeholder viewer gets null / `[]` for a cross-org or non-participated conversation).
 
 ---
 
@@ -277,7 +413,7 @@
 
 **Trigger:** Pre-launch UX polish pass OR if customers complain about the badge.
 
-**Cross-references:** `app/(org)/layout.tsx` (badge render); `db/queries/conversations.ts:totalUnreadForOrgUser`
+**Cross-references:** `app/(org)/layout.tsx` (badge render); `db/queries/conversations.ts:totalUnreadForOrgUser`. See also **DEBT-067** — the S1 Phase A diagnostic of this entry found `totalUnreadForOrgUser` (the nav-badge query) correct and traced the visible count inflation to `listConversationsForOrgUser` (the org inbox); DEBT-067 was filed in Phase A and fixed in Phase D. This entry stays Open only for its untested original hypothesis — `markConversationRead` revalidation scope causing transient nav-badge staleness — deferred to S3.
 
 ---
 
@@ -394,6 +530,7 @@ Likely also need to audit `actions/orgs.ts createOrganization` for any callers t
 **Codebase:** SaaS
 **Severity:** Low
 **Type:** Deferred decision
+**Status:** Resolved (18 May 2026 — Polish Sprint S1 Phase D)
 
 **The debt:** `restoreFile` server action exists in `actions/files.ts` (org-admin-only, clears `deleted_at` + audit-logs `restore`) but no UI surface exposes it. Once a file is soft-deleted via `softDeleteFile`, an admin currently has to undo it via service-role SQL or Supabase Studio.
 
@@ -406,6 +543,8 @@ Likely also need to audit `actions/orgs.ts createOrganization` for any callers t
 **Trigger:** Pre-launch operational pass (alongside DEBT-006 items) OR sooner if any production user reports an accidental soft-delete.
 
 **Cross-references:** `actions/files.ts:restoreFile`; SESSION-10-HANDOVER.md Phase F Step 13; ADR-022 (soft-delete + admin restore convention)
+
+**Resolution:** Fixed in Polish Sprint S1 Phase D (commit `c131641`). Added an org-admin recycle bin at `/dashboard/projects/[projectId]/files/recycle` — a new `listDeletedFilesForProject` query (inverse of `listFilesForProject`; `deleted_at IS NOT NULL`, `document_artifact` rows excluded), a server page gated to org admins, a `RestoreFileButton` client component, and an admin-only "Recycle bin" link from the project Files card. Wrap-only over the existing `restoreFile` action — no signature, audit-shape, or permission change. +1 query test in `tests/actions/files.test.ts`. Phase F walk: recycle-bin empty state verified on the Vercel preview (copy verbatim-matches the approved string). One adjacent finding filed during the work — DEBT-069 (`restoreFile`'s `revalidatePath` literal misses the org route) — filed Open, not fixed.
 
 ---
 
@@ -475,6 +614,7 @@ Likely also need to audit `actions/orgs.ts createOrganization` for any callers t
 **Codebase:** SaaS
 **Severity:** Low
 **Type:** Deferred decision
+**Status:** Resolved (16 May 2026 — Polish Sprint S1 Phase D)
 
 **The debt:** Top nav links (PCD / Projects / Conversations / Team / Settings) are plain text with no unread-count indicator next to "Conversations." The conversation list itself sorts by recency but has no visual read/unread distinction.
 
@@ -487,6 +627,8 @@ Likely also need to audit `actions/orgs.ts createOrganization` for any callers t
 **Trigger:** Session 11 (notifications + activity) — natural fit since both surface unread state.
 
 **Cross-references:** ADR-026 (last_read_at column); Session 11 notifications roadmap; `markConversationRead` action; Phase F Step 11
+
+**Resolution:** Verified already implemented — no code change required. Session 11's notification work shipped the unread badge on the Conversations nav item in both `app/(org)/layout.tsx` and `app/portal/layout.tsx` (count from `totalUnreadForOrgUser` / `totalUnreadForStakeholder`, capped at `99+`), and `components/conversations/ConversationsInbox.tsx` renders per-row unread indication (semibold title + a count badge). The fix-sketch's `/api/conversations/unread-count` endpoint was not needed — the layouts are server components and read the count at SSR, mirroring the notification bell badge. Confirmed during the Polish Sprint S1 Phase A diagnostic; closed in Phase D. The separate count-accuracy concern — the org inbox over-counts conversations the caller doesn't participate in — is tracked as DEBT-067.
 
 ---
 

@@ -57,7 +57,7 @@ export default async function PublicInvoicePage({
     const rl = await rateLimit('publicDoc', ip);
     if (rl.limited) {
       return (
-        <main className="mx-auto max-w-md p-8">
+        <main className="mx-auto max-w-md p-4 sm:p-8">
           <Card>
             <CardHeader>
               <CardTitle className="text-base">Too many requests</CardTitle>
@@ -85,7 +85,7 @@ export default async function PublicInvoicePage({
   const subtypeLabel = doc.invoiceSubtype === 'final' ? 'Final' : 'Initial';
 
   return (
-    <main className="mx-auto max-w-2xl space-y-6 p-8">
+    <main className="mx-auto max-w-2xl space-y-6 p-4 sm:p-8">
       <div className="space-y-1">
         <p className="text-sm uppercase tracking-wide text-muted-foreground">
           {orgName}

@@ -10,6 +10,8 @@ import {
 } from '@/actions/notifications';
 import { useNotifications, type InboxRow } from '@/hooks/use-notifications';
 import type { NotificationEventType } from '@/lib/notifications/events';
+import { Inbox } from 'lucide-react';
+import { EmptyState } from '@/components/ui/empty-state';
 
 // Phase 1c §17 + Phase 8 plan. Inbox list with Realtime + polling fallback.
 // Single component used by both /notifications (org side) and
@@ -155,9 +157,11 @@ export function InboxList({
 
   if (rows.length === 0) {
     return (
-      <div className="rounded-md border border-dashed p-12 text-center text-sm text-muted-foreground">
-        No notifications yet. We&apos;ll let you know when something happens.
-      </div>
+      <EmptyState
+        icon={Inbox}
+        title="No notifications yet"
+        description="Updates about your projects will appear here."
+      />
     );
   }
 

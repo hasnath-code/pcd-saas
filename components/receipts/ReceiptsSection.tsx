@@ -1,5 +1,7 @@
 import Link from 'next/link';
 import { listReceiptsForProject } from '@/db/queries/documents';
+import { Receipt } from 'lucide-react';
+import { EmptyState } from '@/components/ui/empty-state';
 import {
   Card,
   CardContent,
@@ -60,11 +62,15 @@ export async function ReceiptsSection({
       </CardHeader>
       <CardContent>
         {receipts.length === 0 ? (
-          <p className="text-sm text-muted-foreground">
-            {viewer === 'org'
-              ? 'No receipts yet. Record a payment to issue one automatically.'
-              : 'No receipts to show yet.'}
-          </p>
+          <EmptyState
+            icon={Receipt}
+            title="No receipts yet"
+            description={
+              viewer === 'org'
+                ? 'A receipt is issued automatically for each payment you record.'
+                : 'Receipts shared with you will appear here.'
+            }
+          />
         ) : (
           <Table>
             <TableHeader>

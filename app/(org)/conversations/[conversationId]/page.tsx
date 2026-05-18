@@ -24,14 +24,16 @@ export default async function ConversationDetailPage({
   }
 
   const { conversationId } = await params;
-  const detail = await getConversationDetail(conversationId);
+  // DEBT-060/061: the query enforces the org-visibility gate (the pooler
+  // bypasses RLS). A conversation outside ctx.orgId resolves to null → 404.
+  const detail = await getConversationDetail(conversationId, {
+    kind: 'org',
+    orgId: ctx.orgId,
+  });
   if (!detail) notFound();
 
-  // Cross-org guard: org members of detail.orgId can view; everyone else gets 404.
-  if (detail.orgId !== ctx.orgId) notFound();
-
   const [initialMessages, pickable] = await Promise.all([
-    listMessagesForConversation(conversationId),
+    listMessagesForConversation(conversationId, { kind: 'org', orgId: ctx.orgId }),
     listOrgPickableParticipants(detail.orgId),
   ]);
 

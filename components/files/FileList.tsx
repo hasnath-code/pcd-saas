@@ -1,5 +1,7 @@
 import { FileRow } from './FileRow';
 import type { ProjectFileRow } from '@/db/queries/files';
+import { FileText } from 'lucide-react';
+import { EmptyState } from '@/components/ui/empty-state';
 
 export type FileListProps = {
   files: ProjectFileRow[];
@@ -27,9 +29,11 @@ function canViewerDelete(file: ProjectFileRow, viewer: FileListProps['viewer']):
 export function FileList({ files, viewer }: FileListProps) {
   if (files.length === 0) {
     return (
-      <p className="text-sm text-muted-foreground">
-        No files uploaded yet.
-      </p>
+      <EmptyState
+        icon={FileText}
+        title="No files yet"
+        description="Drawings, surveys, and documents shared on this project appear here."
+      />
     );
   }
   return (

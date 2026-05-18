@@ -5,9 +5,6 @@ import {
   getConversationDetail,
   listMessagesForConversation,
 } from '@/db/queries/conversations';
-import { db } from '@/db';
-import { conversationParticipants } from '@/db/schema';
-import { and, eq, isNull } from 'drizzle-orm';
 import { ConversationDetailClient } from '@/components/conversations/ConversationDetailClient';
 import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
@@ -26,25 +23,18 @@ export default async function PortalConversationDetailPage({
   }
 
   const { conversationId } = await params;
-  const detail = await getConversationDetail(conversationId);
+  // DEBT-060/061: the query enforces the participation gate (the pooler
+  // bypasses RLS) — a non-participant stakeholder resolves to null → 404.
+  const detail = await getConversationDetail(conversationId, {
+    kind: 'stakeholder',
+    clientId: ctx.clientId,
+  });
   if (!detail) notFound();
 
-  // Stakeholder visibility: must be an active participant of this conversation.
-  const participation = await db
-    .select({ id: conversationParticipants.id })
-    .from(conversationParticipants)
-    .where(
-      and(
-        eq(conversationParticipants.conversationId, conversationId),
-        eq(conversationParticipants.participantType, 'client'),
-        eq(conversationParticipants.participantId, ctx.clientId),
-        isNull(conversationParticipants.leftAt),
-      ),
-    )
-    .limit(1);
-  if (participation.length === 0) notFound();
-
-  const initialMessages = await listMessagesForConversation(conversationId);
+  const initialMessages = await listMessagesForConversation(conversationId, {
+    kind: 'stakeholder',
+    clientId: ctx.clientId,
+  });
 
   const titleFallback =
     detail.type === 'general'
@@ -54,7 +44,7 @@ export default async function PortalConversationDetailPage({
         : 'Group';
 
   return (
-    <main className="mx-auto max-w-4xl px-8 py-6">
+    <main className="mx-auto max-w-4xl px-4 py-6 sm:px-8">
       <div className="mb-3">
         <Link
           href="/portal/conversations"
